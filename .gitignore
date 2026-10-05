@@ -1,0 +1,13 @@
+node_modules/
+dist/
+.adelic/
+graphify-out/
+.env
+.env.*
+!.env.example
+.ai-memory.toml
+*.log
+coverage/
+.DS_Store
+.desktop/
+release/

@@ -1,0 +1,113 @@
+# Validação do incremento local
+
+Data: 2026-10-04. Os registros abaixo descrevem os testes locais anteriores à publicação da v0.1.0. O modo web usa `http://127.0.0.1:4317`; o desktop escolhe uma porta livre. Ambos escutam somente no loopback. As [notas da versão](releases/v0.1.0.md) descrevem os artefatos distribuídos.
+
+## Conversas avulsas, tema escuro e programas pequenos
+
+Na etapa de conversas avulsas: `npm test` passou com **60 testes em seis arquivos**; `npm run typecheck` e `npm run build` também passaram. Codificadores Luna separaram backend, UI e CSS. Revisões independentes somente leitura por GPT-6 Sol e GPT-6 Astra foram executadas pelo Codex CLI; o limite de threads impediu criar um novo agente de tema, então o agente Luna anterior foi reutilizado. Astra não encontrou bloqueadores no backend. Sol apontou contraste insuficiente e um snapshot atrasado que poderia substituir o chat recém-criado; ambos foram corrigidos e conferidos no preview.
+
+A migração foi aplicada ao SQLite real após backup local. Todos os registros anteriores de projetos, sessões, mensagens, execuções, eventos, aprovações, tarefas e resumos foram preservados; `foreign_key_check` não encontrou inconsistências. Sessões e tarefas aceitam `projectId: null`. Novos testes cobrem migração preenchida, vínculo/desvínculo atômicos, rejeição durante execução, workspace avulso, ausência de memória/grafo de outro projeto e cancelamento por sessão.
+
+No preview T3: o + de Adelic criou uma thread vinculada; o botão global e Ctrl+K abriram avulsas mesmo com o projeto selecionado. O seletor anexou e desvinculou uma conversa já respondida, mantendo suas duas mensagens. Após recarga, a saída de sua tarefa avulsa continuou carregável mesmo com a conversa anexada a Adelic. Um refresh SSE foi acionado com a resposta de health deliberadamente retida; criar uma nova conversa e depois liberar o snapshot anterior preservou a nova seleção. A instrumentação de fetch/EventSource foi restaurada após o teste.
+
+Tema escuro conferido em chat e tela inicial, com `color-scheme: dark` e paleta aplicada a todos os painéis/controles. O texto de ações roxas usa `#171725` sobre `#9290f4`, contraste calculado de 6,34:1 (5,62:1 no hover). Iframes de mesma origem com 360 e 388 pixels mostraram os quatro seletores em grade 2×2, sem transbordamento horizontal e com selects de 109–144 pixels, evitando o encolhimento encontrado no primeiro teste. Não é teste em dispositivo físico.
+
+| Execução real | Evidência |
+| --- | --- |
+| Kiro, conversa avulsa: 12 × 13 | Resposta 156; um executor GPT-5.6 Luna; nenhuma ferramenta/memória; 2,46 s |
+| Codex, projeto: somador Node.js e palíndromo Python | Planejador GPT-6 Sol, dois executores GPT-6 Luna, revisor GPT-6 Sol e síntese; cinco tarefas concluídas; escrita dos quatro arquivos e testes reais registrados |
+| Codex, conversa avulsa: criar e executar hello.py | Quatro tarefas concluídas, workspace próprio, nenhuma memória/grafo de projeto, saída 42 com newline; 64,06 s; anexar projeto durante execução retornou 409 |
+
+O somador teve **7/7 testes aprovados**, incluindo decimal/negativo, ausência de argumentos, valores inválidos e overflow. O palíndromo teve **6/6**, incluindo Unicode e erro de uso. O revisor leu os arquivos e repetiu os dois comandos em somente leitura, com cinco verificações adicionais; o orquestrador repetiu os testes externamente e confirmou os resultados e o README original. O pipeline levou 190,22 s, sem aprovação manual pendente. Escritas dos dois executores foram serializadas conforme a política do aplicativo; esse teste não comprova escrita paralela nem latência fixa.
+
+Os programas foram criados em uma pasta local de validação sob `~/.local/share/adelic/smoke-projects/`. Comandos usados: `node --test sum.test.mjs` e `python3 -B -m unittest -v test_palindrome.py`. A conversa avulsa com `hello.py` usa `~/.local/share/adelic/conversations/<id-da-conversa>/`. Nenhuma dependência externa foi instalada. Permissão de escrita foi capturada somente no início dos smokes e restaurada para somente leitura imediatamente depois; memória automática permanece desligada.
+
+## Orquestração e Graphify por projeto
+
+Verificação final: `npm run typecheck`, `npm test` (50 testes em seis arquivos) e `npm run build` passaram. O build final está servido por `npm start` no loopback. A revisão independente de Sol cobriu contexto de memória, skills, paralelismo, persistência e carregamento de saída; os ajustes finais de classificação e caminhos foram conferidos pelo orquestrador, regressões e smokes reais. Astra revisou pelo Codex CLI em modo somente leitura; seus achados de recuperação após cancelamento do índice, detecção de mudanças e preservação de saída integral foram corrigidos.
+
+Projetos novos e existentes sem configuração explícita começam com delegação e Graphify ativados. O coordenador é o agente/modelo da conversa; executores e revisores herdam seu provedor, com modelos compatíveis selecionados do catálogo real. No Codex, a preferência é GPT-6 Luna/GPT-6 Sol; no catálogo Kiro deste computador, foram usados GPT-5.6 Luna/GPT-5.6 Sol. Perguntas simples têm somente uma chamada de executor, sem ferramentas, planejamento, grafo ou busca automática de memória.
+
+| Fluxo real | Resultado verificado |
+| --- | --- |
+| Kiro: 7 × 8 | Um executor GPT-5.6 Luna, resposta 56, sem ferramentas/memória; 2,44 s |
+| Codex: 9 × 9 | Um executor GPT-6 Luna, resposta 81, sem ferramentas/memória; 6,49 s |
+| Kiro: ler README.md | Um executor; leitura registrada e linhas confirmadas; 10,07 s |
+| Kiro: recuperar decisão sobre Graphify | Uma chamada de executor, rota com memória e sem ferramentas/grafo; decisão correta; 10,83 s |
+| Kiro: duas partes independentes | Planejador, dois executores, revisor e síntese; cinco tarefas concluídas, consultas Graphify e leitura de código registradas |
+| Kiro: ler server/router.ts pelo caminho explícito | Auto habilitou leitura com um executor; código e testes consultados, escopo/mapa com 13 caminhos reais; 16,50 s |
+
+Os dois executores independentes começaram com 13 ms de diferença, antes de qualquer um terminar. O fluxo completo levou 149,03 s, incluindo espera por aprovação manual e correção de um caminho digitado incorretamente pelo executor. Esse tempo não representa latência sem interação. A revisão conferiu fontes; a síntese usou resultados compactos. Saídas completas dos cinco papéis foram recuperadas individualmente pela API. A resposta da conversa e a visão de coordenação não incluem essas saídas integralmente.
+
+Graphify existente (`graphifyy 0.9.68`) foi executado de fato, sem instalação global adicional: extração AST com `--code-only --no-cluster --max-workers 2`, consulta com orçamento de 800 tokens. A primeira indexação pela tela produziu 373 nós/1.053 relações; o índice foi atualizado depois das mudanças de código. O cache final fica em `~/.local/share/adelic/graphs/<hash-do-caminho>/graphify-out/graph.json`. `GRAPHIFY_OUT` no subprocesso também direciona o cache auxiliar de metadados para essa pasta; os caches experimentais criados no repositório foram removidos. A camada semântica de documentos não foi indexada.
+
+Pelo preview T3, indexação, consulta, desligar/ligar Graphify e limpar provedor/modelo para herdar a conversa funcionaram, com confirmação posterior pela API. A tela mostrou as cinco tarefas concluídas do pipeline e carregou uma saída completa sob demanda. Configurações de orquestração/Graphify foram verificadas em larguras efetivas de 360 e 388 pixels por iframe de mesma origem, sem transbordamento; não foi teste em dispositivo físico.
+
+O botão de cancelamento encerrou uma execução delegada real, marcou executores em andamento e tarefas na fila como cancelados e resolveu todas as aprovações pendentes. Tarefas já concluídas permaneceram concluídas. Reinícios posteriores preservaram os registros. Memória automática foi ativada apenas durante seu smoke e restaurada para desligada; a política permanece somente leitura.
+
+As regressões novas cobrem limites e dependências do plano, herança de provedor/modelo, contexto completo do pedido e resumos limitados, recuperação/cancelamento dos filhos, serialização e reserva de escrita por projeto, uso sem contagem dupla, memória seletiva e falha/ausência de notas sem inventar decisões, saída sob demanda, exportação e remoção de tarefas, Graphify desatualizado/cancelado e caminhos reais `src=`. Mudanças detectadas durante indexação/consulta impedem enviar o recorte como atual. Inspeção por metadados pode ser mais lenta em árvores muito grandes; não há benchmark de redução percentual de tokens.
+
+## Registros da etapa inicial
+
+As evidências abaixo são anteriores ao incremento de delegação e Graphify. Permanecem como histórico de validação dos runtimes, permissões, memória e interface inicial.
+
+## Verificação automatizada
+
+`npm run typecheck`, `npm test` e `npm run build` passaram após as correções finais: 26 testes em quatro arquivos. `npm audit --omit=dev` não encontrou vulnerabilidades. O build gera `dist/`; `npm start` serve esse build localmente.
+
+Na entrega, o servidor de desenvolvimento foi encerrado e o build foi iniciado com `npm start`. HTML e health retornaram 200; Codex, Kiro e memória disponíveis. O histórico e a resposta final sobreviveram à troca de processo. O servidor de produção local permanece aberto para teste.
+
+A suíte cobre roteamento por intenção, perguntas conceituais que devem continuar rápidas, contexto/skills pertinentes, idempotência, exclusão de execuções simultâneas, recuperação após reinício, captura de permissões no começo do turno, aprovação/cancelamento, limites de histórico, descoberta real de configuração MCP e lifecycle dos adaptadores. Há regressões para inicialização concorrente, cancelamento durante inicialização, morte do app-server Codex, permissões solicitadas e alinhamento entre projeto e conversa após respostas atrasadas. Os doubles verificam protocolos; não substituem as execuções reais abaixo.
+
+## Execuções reais
+
+Pedidos foram enviados pelo chat do preview T3 e pela API local. Dados foram conferidos novamente pela API após cada execução. A memória automática estava desligada, o modo padrão era Auto e o filesystem somente leitura.
+
+| Runtime/modelo | Pedido | Rota | Primeiro texto | Duração | Evidência |
+| --- | --- | --- | --- | --- | --- |
+| Codex / GPT-6-Luna | Quanto é 7 × 8? | Rápido | 9,06 s | 9,56 s | Resposta 56; nenhuma ferramenta ou busca de memória |
+| Codex / GPT-6-Luna | Ler e resumir README.md | Completo | 9,72 s | 11,26 s | Comando `cat README.md` registrado; resumo do conteúdo real |
+| Kiro / GPT-5.6-Luna | Quanto é 7 × 8? | Rápido | 2,14 s | 2,26 s | Resposta 56; nenhuma ferramenta ou busca de memória |
+| Kiro / GPT-5.6-Luna | Ler e resumir README.md | Completo | 2,98 s | 6,26 s | Leitura de README registrada e concluída; resumo do conteúdo real |
+
+São amostras individuais, sujeitas ao provedor, modelo, carga do computador e inicialização. O requisito comprovado é retirar trabalho adicional do caminho simples; não há promessa de latência fixa. Uma execução Codex anterior, com modelo padrão e perfil anterior às correções finais, levou 4,59 s e não constitui benchmark da configuração final.
+
+Uma conversa nova Codex forçada para Rápido recebeu um pedido de leitura de arquivo: respondeu que não tinha acesso aos arquivos, sem adivinhar o título e sem registrar ferramentas (3,55 s no total). Isso valida o limite do modo mesmo diante de um pedido que normalmente acionaria ferramentas.
+
+Uma resposta longa do Kiro foi recarregada durante o streaming. A interface recuperou o texto persistido e mostrou o botão de cancelamento. O cancelamento pela tela encerrou o processo, preservou a resposta parcial (19.678 caracteres) e deixou o turno com status `cancelled`, sem evento de erro fictício. O pedido seguinte, 9 × 9, completou com resposta 81 em 2,42 s, sem ferramentas. Um cancelamento Codex antes da inicialização também foi verificado durante a integração; a correção final desse fluxo está coberta pelas regressões.
+
+## Interface, memória e persistência
+
+- Preview T3: chat, criação de conversa, escolha de modelo, alternância de modos, streaming, cancelamento, atividade, configurações e memória inspecionados. O histórico permaneceu após recargas e reinícios do servidor durante a integração.
+- Layout estreito testado em iframe de mesma origem, com larguras efetivas de 360 e 388 pixels e media queries ativas, sem transbordamento horizontal. O controle de resize do preview falhou; esse teste não equivale a teste em dispositivo físico.
+- Resposta PATCH deliberadamente atrasada: trocar de conversa enquanto a resposta chegava preservou o agente e o modo da conversa selecionada. O desalinhamento adicional de bootstrap encontrado por Astra foi corrigido por Sol e coberto por três regressões de seleção.
+- ai-memory: pesquisa, leitura completa de página e gravação pela tela passaram no escopo explícito workspace/project configurados para o teste; a nota foi lida novamente pela API. A memória pessoal foi mantida em seu escopo separado.
+- SQLite em `~/.local/share/adelic/adelic.sqlite`; dados de runtime e credenciais não foram colocados em arquivos versionados.
+
+## Permissões e revisões
+
+Bubblewrap foi executado com um script de teste controlado: em somente leitura, escrita dentro e fora do projeto foi bloqueada; em workspace-write, escrita dentro do projeto passou e escrita fora foi bloqueada. Os arquivos temporários foram removidos. Kiro também executou os smokes reais dentro desse mecanismo. Isso comprova proteção de escrita nesse teste, sem afirmar isolamento de leitura de todo o host ou isolamento de rede. Codex usa o sandbox nativo configurado em cada turno. Aprovações tiveram validação de protocolo e regressões; não houve smoke real de alteração de arquivo autorizado pela tela.
+
+Três codificadores GPT-6 Luna trabalharam em UI, backend e runtimes. GPT-6 Sol revisou os fluxos e corrigiu regressões. GPT-6 Astra revisou em uma execução independente do Codex CLI com sandbox somente leitura: o limite de threads impediu seu spawn pelo canal de colaboração. A revisão final não identificou P1 no escopo lido; encontrou o P2 de seleção corrigido e verificado por Sol e pelo orquestrador.
+
+## Limites conhecidos
+
+- Claude Code instalado, sem autenticação confirmada neste computador. Adaptador implementado e flags conferidas pelo CLI; execução completa e inferência com Claude Pro/Max ainda não validadas.
+- OpenCode: instalação e modelos descobertos; execução não implementada e apresentada como indisponível.
+- ai-jail ausente; integração futura. MCP funcional nesta versão: ai-memory. Não há catálogo geral, importação arbitrária de MCPs, isolamento de rede, Tailscale ou login por e-mail do aplicativo.
+- Tokens e custos não informados pelo runtime permanecem indisponíveis. Modelos exibidos vêm da descoberta dos CLIs, não de uma lista simulada.
+
+## Desktop Linux — 2026-10-04
+
+Três codificadores Luna implementaram runtime, desktop e descoberta; o orquestrador integrou build/instalação e testes do pacote. Sol e Astra revisaram independentemente pelo Codex CLI em somente leitura. Os bloqueadores encontrados foram corrigidos e revalidados: dependências redundantes no asar, shutdown Graphify manual/compartilhado, processos de descoberta/status fora do cleanup, distinção ChatGPT/API key, startup antes do PID e preservação do cwd sob `/tmp` no bwrap. A revisão final do sandbox confirmou que o staging intermediário foi removido e os binds usam fontes reais do host.
+
+- `npm run typecheck` e `npm run build` passaram. `npm test`: **88 testes em 11 arquivos**, todos passaram neste host, inclusive os três testes reais bwrap sem skip. `npm run package:linux` produziu `release/Adelic-0.1.0-linux-x86_64.AppImage` (117.369.439 bytes, cerca de 112 MiB) e SHA-256; checksum conferido.
+- Host: Linux x86_64, Arch/Omarchy, sessão Wayland. Electron **44.5.1**, Node incorporado **24.21.0**, electron-builder **26.15.3**. SQLite incorporado executou consultas; o Node do desenvolvimento era 26.8.1, separado do pacote.
+- Auditoria do `app.asar` final: **10 entradas**, contendo bundles, UI, metadados, ícone e avisos de licença; **zero node_modules**, arquivos de dados ou configurações de credenciais. O AppImage contém também o runtime Electron e seus recursos.
+- `npm run desktop:smoke` passou no artefato final: execução a partir de pasta temporária, PATH inicial `/usr/bin:/bin` sem Node/npm neste host, criação de conversa avulsa, segunda abertura encaminhada sem novo backend, SIGTERM com backend encerrado, porta fechada, reabertura com DOM/API/SQLite válidos e conversa preservada. Resultado em `.desktop/validation/smoke.json`, sem conversas/credenciais.
+- Abertura direta e alternativa de extração do AppImage passaram neste host. Instalador/reinstalação foram executados somente em prefixos XDG temporários com espaços e `%`; atalho/launcher foram conferidos e o aplicativo instalado passou no smoke. Antes da publicação, o instalador também passou sem o repositório, usando somente os três assets da release: checksum válido, binário idêntico, launcher executável e ícone genérico. Nenhuma instalação global foi necessária para esses testes.
+- Inferência no pacote atualizado: **Codex GPT-6 Luna** respondeu `66` para 22 × 3, um worker, rota fast, ferramentas/memória desativadas, **3.552 ms** até conclusão; **Kiro GPT-5.6 Luna** respondeu `117` para 13 × 9, **2.262 ms**, usando conversa em `ADELIC_DATA_DIR=/tmp/...` após a correção bwrap. O histórico anterior da conversa permaneceu ao reabrir. A interface foi inspecionada no preview T3 conectado ao backend do AppImage.
+- Fechamento durante uma execução Codex real: um processo Codex identificado antes de SIGTERM, execução persistida como **cancelled**, nenhum processo vivo remanescente na árvore da instância. Testes específicos também cobrem processos que ignoram SIGTERM e descoberta presa no initialize.
+- O modo web anterior foi encerrado com **zero execuções ativas** antes da abertura desktop na base padrão, preservando o histórico existente. A janela desktop usa essa mesma base; testes anteriores em `/tmp` permanecem separados.
+
+Esta evidência não comprova compatibilidade com outra distribuição. GTK/NSS/ALSA e demais bibliotecas gráficas do sistema continuam necessárias; CLIs/autenticação/bubblewrap/Graphify/ai-memory são externos ao pacote. Claude Pro/Max permanece sem inferência validada neste computador. A distribuição da v0.1.0 usa as releases do GitHub; atualização automática e acesso remoto não estão implementados. Veja [instruções do pacote](desktop-linux.md).

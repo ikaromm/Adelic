@@ -1,0 +1,49 @@
+import type { Bootstrap, DelegatedTask, GraphifyQueryResult, GraphifyStatus, MemoryHit, MemoryPage, Project, ProjectCoordination, Session, SessionDetail, Settings, Skill } from '../shared/contracts';
+export interface Health { status: string; providers: { id: string; status: string; available: boolean }[]; memory: string; jail: string }
+
+type ProjectPatch = { name?: string; memoryWorkspace?: string; memoryProject?: string; orchestration?: Project['orchestration']; graphify?: Project['graphify'] };
+function serializeProjectPatch(data: ProjectPatch) {
+  if (!data.orchestration) return JSON.stringify(data);
+  const orchestration: Record<string, unknown> = { ...data.orchestration };
+  for (const key of ['workerProviderId', 'workerModel', 'reviewerProviderId', 'reviewerModel']) {
+    if (Object.hasOwn(orchestration, key) && orchestration[key] === undefined) orchestration[key] = null;
+  }
+  return JSON.stringify({ ...data, orchestration });
+}
+
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(path, {
+    ...init,
+    headers: { 'Content-Type': 'application/json', ...init?.headers },
+  });
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({})) as { error?: string };
+    throw new Error(body.error || `Falha na solicitação (${response.status})`);
+  }
+  if (response.status === 204) return undefined as T;
+  return response.json() as Promise<T>;
+}
+
+export const api = {
+  bootstrap: () => request<Bootstrap>('/api/bootstrap'),
+  health: () => request<Health>('/api/health'),
+  detail: (id: string) => request<SessionDetail>(`/api/sessions/${encodeURIComponent(id)}`),
+  task: (id: string) => request<DelegatedTask>(`/api/tasks/${encodeURIComponent(id)}`),
+  createProject: (data: { name: string; path: string; memoryWorkspace?: string; memoryProject?: string }) => request<Project>('/api/projects', { method: 'POST', body: JSON.stringify(data) }),
+  updateProject: (id: string, data: ProjectPatch) => request<Project>(`/api/projects/${encodeURIComponent(id)}`, { method: 'PATCH', body: serializeProjectPatch(data) }),
+  coordination: (id: string) => request<ProjectCoordination>(`/api/projects/${encodeURIComponent(id)}/coordination`),
+  graphify: (id: string) => request<GraphifyStatus>(`/api/projects/${encodeURIComponent(id)}/graphify`),
+  indexGraphify: (id: string) => request<GraphifyStatus>(`/api/projects/${encodeURIComponent(id)}/graphify/index`, { method: 'POST', body: JSON.stringify({}) }),
+  queryGraphify: (id: string, query: string) => request<GraphifyQueryResult>(`/api/projects/${encodeURIComponent(id)}/graphify/query`, { method: 'POST', body: JSON.stringify({ query }) }),
+  createSession: (data: { projectId?: string | null; providerId: string; model?: string; mode?: string; title?: string }) => request<Session>('/api/sessions', { method: 'POST', body: JSON.stringify(data) }),
+  updateSession: (id: string, data: Partial<Pick<Session, 'title' | 'providerId' | 'mode' | 'projectId'>> & { model?: string | null }) => request<Session>(`/api/sessions/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  deleteSession: (id: string) => request<void>(`/api/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  send: (id: string, content: string, clientMessageId: string) => request<{ runId: string; messageId: string }>(`/api/sessions/${encodeURIComponent(id)}/messages`, { method: 'POST', body: JSON.stringify({ content, clientMessageId }) }),
+  cancel: (id: string) => request<void>(`/api/sessions/${encodeURIComponent(id)}/cancel`, { method: 'POST' }),
+  approve: (id: string, decision: 'approve' | 'deny') => request<void>(`/api/approvals/${encodeURIComponent(id)}`, { method: 'POST', body: JSON.stringify({ decision }) }),
+  settings: (data: Partial<Settings>) => request<Settings>('/api/settings', { method: 'PATCH', body: JSON.stringify(data) }),
+  memorySearch: (projectId: string, q: string) => request<{ hits: MemoryHit[] }>(`/api/memory/search?projectId=${encodeURIComponent(projectId)}&q=${encodeURIComponent(q)}`),
+  memoryPage: (projectId: string, path: string) => request<MemoryPage>(`/api/memory/page?projectId=${encodeURIComponent(projectId)}&path=${encodeURIComponent(path)}`),
+  saveMemory: (projectId: string, path: string, body: string) => request<MemoryPage>('/api/memory/page', { method: 'POST', body: JSON.stringify({ projectId, path, body }) }),
+  skill: (id: string, enabled: boolean) => request<Skill>(`/api/skills/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ enabled }) }),
+};

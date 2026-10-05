@@ -1,0 +1,46 @@
+{
+  "name": "adelic",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Aplicativo local para conversar e coordenar agentes de IA",
+  "author": "Adelic",
+  "type": "module",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "dev": "tsx server/cli.ts",
+    "build": "tsc --noEmit && vite build",
+    "start": "NODE_ENV=production tsx server/cli.ts",
+    "desktop:build": "npm run build && node scripts/build-desktop.mjs",
+    "desktop:dev": "npm run desktop:build && node node_modules/electron/install.js && env -u ELECTRON_RUN_AS_NODE electron .desktop/app",
+    "package:linux": "npm run desktop:build && node scripts/package-linux.mjs",
+    "desktop:smoke": "node scripts/smoke-desktop.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "lucide-react": "^0.468.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
+    "smol-toml": "^1.9.0",
+    "zod": "^4.1.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.3",
+    "@types/node": "^24.10.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@vitejs/plugin-react": "^5.1.0",
+    "electron": "44.5.1",
+    "electron-builder": "26.15.3",
+    "esbuild": "0.28.2",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3",
+    "vite": "^7.2.2",
+    "vitest": "^5.0.3"
+  }
+}

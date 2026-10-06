@@ -233,3 +233,31 @@ test('creates a project from the dialog with a slugged memory id', async ({ page
   await expect(dialog).toBeHidden();
   await expect(page.locator('.sidebar-projects').getByText('Meu Aplicativo Ágil').first()).toBeVisible();
 });
+
+test('delegates in a project and loads a task output on demand', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Adicionar projeto' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Novo projeto' });
+  const name = `Delegação ${Date.now()}`;
+  await dialog.getByRole('textbox', { name: 'Nome do projeto' }).fill(name);
+  await dialog.getByRole('textbox', { name: 'Caminho da pasta' }).fill('/tmp');
+  await dialog.getByRole('button', { name: 'Criar projeto' }).click();
+  await expect(dialog).toBeHidden();
+  await page
+    .locator('.sidebar-projects')
+    .getByRole('button', { name: `Nova conversa em ${name}` })
+    .click();
+  const input = page.getByRole('textbox', { name: 'Mensagem para o agente' });
+  await input.fill('Revise a estrutura do projeto e explique em detalhes cada pasta');
+  await input.press('Enter');
+  const activity = page.getByRole('region', { name: 'Atividade desta execução' }).last();
+  await expect(activity).toContainText(/tarefa/, { timeout: 15_000 });
+  await activity.locator('summary').first().click();
+  const load = activity.getByRole('button', { name: 'Carregar saída completa' }).first();
+  await load.click();
+  await expect(load).toBeHidden();
+  // The output was fetched from /api/tasks/:id (it is not part of the session detail).
+  await activity.getByText('Ver saída completa').first().click();
+  await expect(activity.locator('.activity-output pre').first()).not.toBeEmpty();
+  await expect(activity).toContainText('Executor');
+});

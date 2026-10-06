@@ -22,7 +22,6 @@ import {
 } from 'lucide-react';
 import type {
   Bootstrap,
-  DelegatedTask,
   GraphifyQueryResult,
   GraphifyStatus,
   Message,
@@ -45,6 +44,7 @@ import { useNow } from './useNow';
 import { useAutosize } from './hooks/useAutosize';
 import { useGlobalShortcuts } from './hooks/useGlobalShortcuts';
 import { useStickToBottom } from './hooks/useStickToBottom';
+import { useTaskOutputs } from './hooks/useTaskOutputs';
 import { projectOrchestration } from '../shared/contracts';
 import { ActivityPage } from './components/ActivityPage';
 import { ConversationSearch } from './components/ConversationSearch';
@@ -76,8 +76,6 @@ export default function App() {
   const [projectQuery, setProjectQuery] = useState('');
   const [graphQueryResult, setGraphQueryResult] = useState<GraphifyQueryResult | null>(null);
   const [projectBusy, setProjectBusy] = useState(false);
-  const [taskOutputs, setTaskOutputs] = useState<Record<string, string | null>>({});
-  const [loadingTaskOutputs, setLoadingTaskOutputs] = useState<Set<string>>(() => new Set());
   const focusComposerRef = useRef(false);
   const [expandedLists, setExpandedLists] = useState<Record<string, boolean>>({});
   const now = useNow(60_000);
@@ -85,7 +83,6 @@ export default function App() {
   const bootstrapRequestRef = useRef(0);
   const detailRequestRef = useRef(new Map<string, number>());
   const detailSnapshotRef = useRef<SessionDetail | null>(null);
-  const taskOutputRequestsRef = useRef(new Map<string, number>());
   const projectRequestRef = useRef(new Map<string, number>());
   const graphActionRef = useRef(0);
   const projectWriteRef = useRef(new Map<string, Promise<void>>());
@@ -114,6 +111,7 @@ export default function App() {
   selectedSessionRef.current = selectedSession;
   projectSnapshotRef.current = data;
   detailSnapshotRef.current = detail;
+  const taskOutputs = useTaskOutputs(selectedSessionRef, detailSnapshotRef, setNotice);
   const selectSession = (id: string) => {
     selectedSessionRef.current = id;
     setSelectedSession(id);
@@ -753,47 +751,6 @@ export default function App() {
     }
   }
 
-  async function loadTaskOutput(task: DelegatedTask) {
-    if (task.status === 'running' || task.status === 'queued' || Object.hasOwn(taskOutputs, task.id)) return;
-    if (selectedSessionRef.current !== task.sessionId) return;
-    const detailAtStart = detailSnapshotRef.current;
-    if (!detailAtStart?.tasks?.some((item) => item.id === task.id && item.runId === task.runId)) return;
-    const requestId = (taskOutputRequestsRef.current.get(task.id) || 0) + 1;
-    taskOutputRequestsRef.current.set(task.id, requestId);
-    setLoadingTaskOutputs((current) => new Set(current).add(task.id));
-    const isCurrent = () => {
-      const latest = detailSnapshotRef.current;
-      return (
-        selectedSessionRef.current === task.sessionId &&
-        latest?.session.id === task.sessionId &&
-        latest.tasks?.some((item) => item.id === task.id && item.runId === task.runId)
-      );
-    };
-    try {
-      const fullTask = await api.task(task.id);
-      if (taskOutputRequestsRef.current.get(task.id) !== requestId || !isCurrent()) return;
-      if (
-        fullTask.id !== task.id ||
-        fullTask.projectId !== task.projectId ||
-        fullTask.sessionId !== task.sessionId ||
-        fullTask.runId !== task.runId
-      )
-        return;
-      setTaskOutputs((current) => ({ ...current, [task.id]: fullTask.output ?? null }));
-    } catch (error) {
-      if (taskOutputRequestsRef.current.get(task.id) === requestId && isCurrent()) setNotice((error as Error).message);
-    } finally {
-      if (taskOutputRequestsRef.current.get(task.id) === requestId) {
-        taskOutputRequestsRef.current.delete(task.id);
-        setLoadingTaskOutputs((current) => {
-          const next = new Set(current);
-          next.delete(task.id);
-          return next;
-        });
-      }
-    }
-  }
-
   async function updateSetting(
     key:
       | 'defaultProviderId'
@@ -1211,9 +1168,9 @@ export default function App() {
                               events={activityEvents}
                               providers={data.providers}
                               active={session.activeRunId === message.runId}
-                              taskOutputs={taskOutputs}
-                              loadingTaskOutputs={loadingTaskOutputs}
-                              onLoadTaskOutput={loadTaskOutput}
+                              taskOutputs={taskOutputs.outputs}
+                              loadingTaskOutputs={taskOutputs.loading}
+                              onLoadTaskOutput={taskOutputs.load}
                             />
                           )}
                         </div>

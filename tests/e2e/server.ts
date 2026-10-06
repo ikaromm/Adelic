@@ -47,6 +47,14 @@ const providers: ProviderRegistry = {
   async run(input, emit, signal) {
     // The prompt also carries earlier messages after the current one ("Pedido atual: …"
     // then "Mensagens recentes"), so read the marker from the current request only.
+    // Coordinated runs: a planner asks for a JSON task list.
+    if (input.prompt.includes('Produza somente JSON válido') && input.prompt.includes('"tasks"')) {
+      const plan = JSON.stringify({
+        tasks: [{ id: 't1', title: 'Verificar arquivos', instructions: 'ler', scope: ['src'], dependsOn: [] }],
+      });
+      emit({ type: 'delta', text: plan });
+      return { text: plan, stopReason: 'completed' };
+    }
     const current = (input.prompt.split('Pedido atual:').at(-1) ?? input.prompt).split('\n\nMensagens recentes')[0];
     const marker = ['[aprovar]', '[lento]', '[normal]'].find((m) => current.toLowerCase().includes(m)) ?? '';
     try {

@@ -1,7 +1,9 @@
 name: Release
 
-# Builds the Linux AppImage for a pushed vX.Y.Z tag and publishes a GitHub Release with
-# the AppImage, its SHA-256 and install-linux.sh. The tag is created by `npm run release`.
+# Builds the Linux AppImage for a pushed vX.Y.Z tag, opens it once headless (window, API,
+# SQLite, second instance, shutdown) and only then publishes a GitHub Release with the
+# AppImage, its SHA-256, install-linux.sh and a build-provenance attestation.
+# Manual runs without `publish` only build and smoke-test (useful to check the pipeline).
 on:
   push:
     tags: ['v*.*.*']
@@ -10,9 +12,15 @@ on:
       tag:
         description: 'Tag existente (ex.: v0.4.0)'
         required: true
+      publish:
+        description: 'Publicar a release (senão só gera e testa)'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 jobs:
   release:
@@ -20,6 +28,7 @@ jobs:
     timeout-minutes: 30
     env:
       TAG: ${{ github.event.inputs.tag || github.ref_name }}
+      PUBLISH: ${{ github.event_name == 'push' || github.event.inputs.publish == 'true' }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -38,11 +47,15 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Typecheck and test
+      - name: System tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq bubblewrap ripgrep pulseaudio-utils libfuse2t64
+          sudo apt-get install -y -qq bubblewrap ripgrep pulseaudio-utils libfuse2t64 xvfb xauth
+          # bubblewrap and Electron's sandbox need unprivileged user namespaces.
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+
+      - name: Typecheck and test
+        run: |
           curl -fsSL -o /tmp/ai-memory.tgz https://github.com/akitaonrails/ai-memory/releases/download/v2.1.0/ai-memory-linux-x86_64.tar.gz
           echo "b4d911f392fea7f151c9c1ff83521922417570e5104ffb02a5e82253afc877ac  /tmp/ai-memory.tgz" | sha256sum -c -
           mkdir -p /tmp/ai-memory && tar xzf /tmp/ai-memory.tgz -C /tmp/ai-memory ./ai-memory
@@ -53,14 +66,25 @@ jobs:
       - name: Build AppImage
         run: npm run package:linux
 
+      - name: Smoke test the AppImage (headless X11)
+        run: xvfb-run --auto-servernum --server-args='-screen 0 1280x800x24' npm run desktop:smoke
+
+      - name: Attest build provenance
+        if: env.PUBLISH == 'true'
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: release/Adelic-*-linux-x86_64.AppImage
+
       - name: Release notes
         run: |
           notes="docs/releases/$TAG.md"
           test -f "$notes" || { echo "faltam as notas $notes"; exit 1; }
           cp "$notes" release-notes.md
-          printf '\n\nSHA-256 do AppImage: `%s`\n' "$(cut -d' ' -f1 release/Adelic-*-linux-x86_64.AppImage.sha256)" >> release-notes.md
+          sha=$(cut -d' ' -f1 release/Adelic-*-linux-x86_64.AppImage.sha256)
+          printf '\n\nSHA-256 do AppImage: `%s`\n\nProveniência: `gh attestation verify Adelic-*-linux-x86_64.AppImage --repo %s`\n' "$sha" "$GITHUB_REPOSITORY" >> release-notes.md
 
       - name: Publish GitHub Release
+        if: env.PUBLISH == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -71,3 +95,13 @@ jobs:
             release/Adelic-*-linux-x86_64.AppImage \
             release/Adelic-*-linux-x86_64.AppImage.sha256 \
             release/install-linux.sh
+
+      - name: Keep the build (manual runs)
+        if: env.PUBLISH != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: appimage-${{ env.TAG }}
+          path: |
+            release/Adelic-*-linux-x86_64.AppImage
+            release/Adelic-*-linux-x86_64.AppImage.sha256
+          retention-days: 3

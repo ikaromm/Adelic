@@ -30,6 +30,10 @@ export default function MemoryPage({ visible = true, activated = true }: { visib
   const dirtyRef = useRef(dirty);
   dirtyRef.current = dirty;
   const scopeKey = scope ? `${scope.workspace}/${scope.project}` : '';
+  // Effects keyed on scopeKey read the scope through this ref; a new object with the same
+  // key must not restart them.
+  const scopeRef = useRef(scope);
+  scopeRef.current = scope;
   const pollState = useRef({ note, offset, editing, creating });
   pollState.current = { note, offset, editing, creating };
   const scopes = catalog?.scopes || [];
@@ -91,10 +95,11 @@ export default function MemoryPage({ visible = true, activated = true }: { visib
       wasVisible.current = visible;
       return;
     }
-    if (visible && !wasVisible.current && initialized.current) void refresh();
+    if (visible && !wasVisible.current && initialized.current) void refreshRef.current();
     wasVisible.current = visible;
   }, [visible]);
   useEffect(() => {
+    const scope = scopeRef.current;
     if (!scope) return;
     const id = ++generation.current;
     busyRef.current = true;
@@ -208,13 +213,15 @@ export default function MemoryPage({ visible = true, activated = true }: { visib
       }
     }
   };
+  const refreshRef = useRef(refresh);
+  refreshRef.current = refresh;
   useEffect(() => {
     if (!visible || !initialized.current || typeof document === 'undefined') return;
     const timer = window.setInterval(() => {
       if (document.visibilityState !== 'visible' || busyRef.current || running.current) return;
       const id = generation.current;
       const { note: noteAtStart, offset: currentOffset, editing: isEditing, creating: isCreating } = pollState.current;
-      const scopeAtStart = scope;
+      const scopeAtStart = scopeRef.current;
       running.current = true;
       void (async () => {
         try {

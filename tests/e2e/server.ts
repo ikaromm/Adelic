@@ -14,8 +14,11 @@ import type { ProviderInfo, ProviderRegistry } from '../../shared/contracts.js';
 import { createBackend } from '../../server/index.js';
 import { Store } from '../../server/store.js';
 import { emitApproval } from '../../server/providers/common.js';
+import { startFakeMemory } from './fake-memory.js';
 
 const port = Number(process.env.E2E_PORT || 4399);
+// Optional simulated ai-memory (E2E_MEMORY_PORT); otherwise ADELIC_MEMORY_URL points nowhere.
+if (process.env.E2E_MEMORY_PORT) startFakeMemory(Number(process.env.E2E_MEMORY_PORT));
 const dataDir = mkdtempSync(join(tmpdir(), 'adelic-e2e-'));
 const store = new Store(dataDir);
 

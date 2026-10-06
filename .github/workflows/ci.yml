@@ -129,3 +129,32 @@ jobs:
             playwright-report/
             test-results/
           retention-days: 7
+
+  # Same packaging and headless smoke test the Release workflow runs before publishing,
+  # so a broken AppImage shows up on develop instead of at release time.
+  package:
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 26
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: System tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libfuse2t64 xvfb xauth
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+
+      - name: Build AppImage
+        run: npm run package:linux
+
+      - name: Smoke test the AppImage (headless X11)
+        run: xvfb-run --auto-servernum --server-args='-screen 0 1280x800x24' npm run desktop:smoke

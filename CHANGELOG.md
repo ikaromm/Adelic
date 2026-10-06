@@ -1,6 +1,6 @@
 # Changelog
 
-## Não publicado
+## 0.3.0 — 2026-10-06
 
 - Tema escuro inspirado no Dracula, um pouco mais escuro, com tokens de cor e contraste AA calculado; fontes Inter e JetBrains Mono incluídas no aplicativo.
 - Interface baseada no T3 Code: barra lateral com conversas recentes e tempo relativo, navegação no rodapé e trilho recolhido; mensagem do usuário em bolha; atividade do turno como “Trabalhou por …” com cronômetro; campo de mensagem com modelo, thinking, permissões e projeto/modo em pílulas.
@@ -8,8 +8,10 @@
 - Botões de copiar em mensagens e blocos de código; links externos abrem fora do aplicativo; textos visíveis com pelo menos 11 px.
 - Memória com ai-memory em Docker: catálogo, listagem, busca, leitura, criação e edição passam pela API do serviço (`/api/v1`, MCP e `/admin/write-page`), sem acesso ao SQLite ou ao Markdown do serviço. `ADELIC_MEMORY_URL` e `ADELIC_MEMORY_TOKEN`/`ADELIC_MEMORY_TOKEN_FILE` configuram endereço e token. Erros de serviço indisponível, token, API ausente ou catálogo incoerente aparecem na tela em vez de um catálogo vazio. Notas com metadados que o serviço não consegue reproduzir ficam bloqueadas para edição.
 - Kiro: a disponibilidade usa só o resultado explícito da verificação `Auth` do `kiro-cli doctor --all`. Falhas de dotfiles ou integração do terminal (Qterm, kiro-cli-term), que podem deixar o código de saída diferente de zero, não marcam mais um Kiro autenticado como indisponível. `✘ Auth`, ausência da verificação, diagnóstico interrompido por timeout e catálogo de modelos vazio continuam bloqueando.
+- Nova logo: uma árvore 2-ádica em forma de "A" atravessada pela reta real, as duas metades que o anel de adeles une. Usada no ícone do aplicativo, no favicon e na barra lateral.
+- Integração contínua no GitHub Actions (typecheck, testes com bubblewrap real e build), e testes que dependiam de temporização ou da pasta temporária corrigidos.
 
-Evidências e limites em [validação](docs/validation.md).
+Evidências e limites em [notas da v0.3.0](docs/releases/v0.3.0.md) e [validação](docs/validation.md).
 
 ## 0.2.0 — 2026-10-06
 

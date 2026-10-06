@@ -2,6 +2,10 @@
 
 ## Não publicado
 
+_Nada ainda._
+
+## 0.4.0 — 2026-10-06
+
 - Desenvolvimento: ESLint e Prettier com verificação no CI, código formatado (commit ignorado no `git blame`), rotas do servidor divididas em `server/http/` e telas do front em `src/components/`. Sem mudança de comportamento.
 - Testes que falhavam de forma intermitente no CI corrigidos (handler de SIGTERM instalado antes de anunciar o pid).
 - Erros de renderização mostram uma mensagem com "Tentar de novo" e "Recarregar" em vez de uma janela em branco; a navegação continua funcionando.

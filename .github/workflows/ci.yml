@@ -53,6 +53,16 @@ jobs:
       - name: Format
         run: npm run format:check
 
+      # Real ai-memory for tests/integration-ai-memory.test.ts, pinned to the version
+      # this project validates against; the checksum is pinned here, not fetched.
+      - name: Install ai-memory 2.1.0
+        run: |
+          curl -fsSL -o /tmp/ai-memory.tgz https://github.com/akitaonrails/ai-memory/releases/download/v2.1.0/ai-memory-linux-x86_64.tar.gz
+          echo "b4d911f392fea7f151c9c1ff83521922417570e5104ffb02a5e82253afc877ac  /tmp/ai-memory.tgz" | sha256sum -c -
+          mkdir -p /tmp/ai-memory && tar xzf /tmp/ai-memory.tgz -C /tmp/ai-memory ./ai-memory
+          echo "AI_MEMORY_BIN=/tmp/ai-memory/ai-memory" >> "$GITHUB_ENV"
+          /tmp/ai-memory/ai-memory --version
+
       - name: Test
         run: npm test
 

@@ -7,13 +7,20 @@ import { Store } from './store.js';
 import { GraphifyService, graphify, mountGraphifyRoutes } from './graphify.js';
 import { error, message, originGuard } from './http/common.js';
 import type { BackendContext } from './http/context.js';
+import { accessGuard, authRoutes, type RemoteAccess } from './http/auth.js';
 import { diagnosticsRoutes } from './http/diagnostics.js';
 import { memoryRoutes } from './http/memory.js';
 import { projectsRoutes } from './http/projects.js';
 import { sessionsRoutes } from './http/sessions.js';
 import { settingsRoutes } from './http/settings.js';
 
-export function createBackend(store: Store, providers: ProviderRegistry, graphifyService: GraphifyService = graphify) {
+export function createBackend(
+  store: Store,
+  providers: ProviderRegistry,
+  graphifyService: GraphifyService = graphify,
+  // Optional remote access (token-protected); see server/http/auth.ts. Off by default.
+  remote?: RemoteAccess,
+) {
   const app = express();
   app.disable('x-powered-by');
   app.use(express.json({ limit: '128kb', strict: true }));
@@ -70,7 +77,8 @@ export function createBackend(store: Store, providers: ProviderRegistry, graphif
       },
     ];
   }
-  app.use(originGuard);
+  app.use(authRoutes(remote));
+  app.use(accessGuard(remote, originGuard));
   app.get('/api/bootstrap', async (_req, res) => {
     try {
       const [providersResult] = await Promise.all([providerList(), memoryIntegration()]);

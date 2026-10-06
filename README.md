@@ -46,7 +46,7 @@ Codex e Kiro foram testados com respostas reais e leitura de arquivo. O adaptado
 
 Codex, Kiro e Claude usam bubblewrap no Linux para limitar escrita, além dos controles nativos disponíveis; a política padrão é somente leitura. Aprovação automática permite consultas locais reconhecidas; comandos ambíguos, scripts e pedidos sensíveis ficam para confirmação. O Kiro continua com aprovação manual porque o protocolo não comprova todos os dados do comando. Isso não isola a rede. A integração `ai-jail` está prevista e o aplicativo informa a disponibilidade real do binário. Provedores indisponíveis exibem o motivo; as assinaturas mantêm os limites dos runtimes oficiais. Após autenticar um CLI, reinicie o servidor para atualizar imediatamente a descoberta, que tem cache de cinco minutos.
 
-Este incremento é local. Acesso remoto/Tailscale, integração ai-jail, catálogo geral de MCPs e automações ficam para etapas seguintes.
+O Adelic escuta só em `127.0.0.1` por padrão. Acesso remoto (por exemplo pela Tailscale) é opcional e fica desligado: veja [acesso remoto](docs/specs/remote-access.md). A avaliação do ai-jail está em [ai-jail](docs/specs/ai-jail.md); catálogo geral de MCPs e automações ficam para etapas seguintes.
 
 Verificação local (a mesma do CI no GitHub Actions, em todo push para `develop` e em PRs):
 

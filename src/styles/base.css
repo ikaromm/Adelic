@@ -518,3 +518,44 @@ kbd {
   display: flex;
   gap: 8px;
 }
+
+/* Remote access login (only shown off loopback). */
+.remote-gate {
+  display: grid;
+  min-height: 100vh;
+  place-items: center;
+  padding: 24px;
+  background: var(--app-bg);
+}
+.remote-gate form {
+  display: grid;
+  gap: 12px;
+  width: min(380px, 100%);
+  padding: 24px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+}
+.remote-gate-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 650;
+}
+.remote-gate-brand .brand-mark {
+  width: 28px;
+  height: 28px;
+}
+.remote-gate h1 {
+  font-size: var(--text-xl, 20px);
+}
+.remote-gate p {
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+}
+.remote-gate label {
+  display: grid;
+  gap: 6px;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+}

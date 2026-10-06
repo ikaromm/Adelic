@@ -10,9 +10,12 @@ import type { Project, ProviderRegistry } from '../shared/contracts.js';
 import { GraphifyService } from './graphify.js';
 import { createBackend } from './index.js';
 import { Store } from './store.js';
+import { remoteAccessFromEnv, type RemoteAccess } from './http/auth.js';
 
 export interface StartServerOptions {
   port?: number;
+  /** Remote access (token-protected). Defaults to ADELIC_REMOTE_BIND/TOKEN/PORT; off when unset. */
+  remote?: RemoteAccess | null;
   webDir?: string;
   dataDir?: string;
   development?: boolean;
@@ -22,6 +25,8 @@ export interface StartServerOptions {
 export interface RunningServer {
   url: string;
   port: number;
+  /** Set only when remote access is enabled. */
+  remoteUrl?: string;
   close(): Promise<void>;
 }
 
@@ -112,6 +117,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Run
   let orchestrator: ReturnType<typeof createBackend>['orchestrator'] | undefined;
   let graphifyService: GraphifyService | undefined;
   let http: HttpServer | undefined;
+  let remoteHttp: HttpServer | undefined;
   let vite: ViteDevServer | undefined;
   let closePromise: Promise<void> | undefined;
   try {
@@ -120,7 +126,8 @@ export async function startServer(options: StartServerOptions = {}): Promise<Run
     const { createProviderRegistry } = await import('./providers/index.js');
     providers = createProviderRegistry(realDataDir);
     graphifyService = new GraphifyService(undefined, realDataDir);
-    const backend = createBackend(store, providers, graphifyService);
+    const remote = options.remote === null ? undefined : (options.remote ?? remoteAccessFromEnv());
+    const backend = createBackend(store, providers, graphifyService, remote);
     orchestrator = backend.orchestrator;
 
     if (options.development) {
@@ -135,6 +142,14 @@ export async function startServer(options: StartServerOptions = {}): Promise<Run
     await listen(http, { host: '127.0.0.1', port: options.port ?? 4317 });
     const address = http.address();
     if (!address || typeof address === 'string') throw new Error('O servidor iniciou sem uma porta TCP válida.');
+    // Same app on a second, explicitly configured address; every request there needs the token.
+    let remotePort: number | undefined;
+    if (remote) {
+      remoteHttp = createHttpServer(backend.app);
+      await listen(remoteHttp, { host: remote.bind, port: remote.port });
+      const remoteAddress = remoteHttp.address();
+      remotePort = remoteAddress && typeof remoteAddress !== 'string' ? remoteAddress.port : remote.port;
+    }
 
     const close = () =>
       (closePromise ??= (async () => {
@@ -148,6 +163,9 @@ export async function startServer(options: StartServerOptions = {}): Promise<Run
         };
         await attempt(async () => {
           await closeServer(http!);
+        });
+        await attempt(async () => {
+          if (remoteHttp) await closeServer(remoteHttp);
         });
         await attempt(async () => {
           const results = await Promise.allSettled(
@@ -171,7 +189,14 @@ export async function startServer(options: StartServerOptions = {}): Promise<Run
         if (firstError) throw firstError;
       })());
 
-    return { url: `http://127.0.0.1:${address.port}`, port: address.port, close };
+    return {
+      url: `http://127.0.0.1:${address.port}`,
+      port: address.port,
+      ...(remote
+        ? { remoteUrl: `http://${remote.bind.includes(':') ? `[${remote.bind}]` : remote.bind}:${remotePort}` }
+        : {}),
+      close,
+    };
   } catch (error) {
     await Promise.allSettled(
       [orchestrator?.shutdown(), graphifyService?.shutdown()].filter((pending): pending is Promise<void> =>
@@ -183,6 +208,9 @@ export async function startServer(options: StartServerOptions = {}): Promise<Run
     } catch {}
     try {
       if (http) await closeServer(http);
+    } catch {}
+    try {
+      if (remoteHttp) await closeServer(remoteHttp);
     } catch {}
     try {
       await vite?.close();

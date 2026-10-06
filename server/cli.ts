@@ -13,6 +13,7 @@ async function main() {
     seedProject: await seedAdelicProject(cwd),
   });
   console.log(`Adelic disponível em ${server.url}`);
+  if (server.remoteUrl) console.log(`Acesso remoto (com token) em ${server.remoteUrl}`);
   let stopping: Promise<void> | undefined;
   const stop = () =>
     (stopping ??= server.close().then(

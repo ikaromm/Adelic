@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { CodexProvider } from '../server/providers/codex';
-import { kiroToolEvent, KiroProvider, parseKiroModelCatalog } from '../server/providers/kiro';
+import { kiroToolEvent, KiroProvider, parseKiroDoctorAuth, parseKiroModelCatalog } from '../server/providers/kiro';
 import { JsonRpcProcess } from '../server/providers/process';
 import { boundedPrompt } from '../server/providers/common';
 import { CommandScope, runCommand } from '../server/providers/command';
@@ -199,6 +199,31 @@ else if(m.method==='session/cancel')send({jsonrpc:'2.0',id:m.id,result:{}});
       const closedController=new AbortController();let closedApproval='';const closedRun=provider.run(input('r6'),event=>{if(event.type==='approval')closedApproval=event.approval.id;},closedController.signal);for(let i=0;i<100&&!closedApproval;i++)await new Promise(r=>setTimeout(r,10));expect(closedApproval).toBeTruthy();const activeProcess=[...(provider as unknown as {processes:Set<JsonRpcProcess>}).processes][0]!;activeProcess.child.stdin.destroy();expect(()=>closedController.abort()).not.toThrow();await expect(closedRun).resolves.toMatchObject({stopReason:'cancelled'});await expect(provider.approve(closedApproval,'approve')).rejects.toThrow(/não está mais pendente/);
       const responses=(await readFile(log,'utf8')).trim().split('\n').map(line=>JSON.parse(line));expect(responses).toHaveLength(5);expect(responses.slice(0,2)).toEqual([{outcome:{outcome:'selected',optionId:'once'}},{outcome:{outcome:'selected',optionId:'once'}}]);expect(responses.slice(2)).toEqual([{outcome:{outcome:'cancelled'}},{outcome:{outcome:'cancelled'}},{outcome:{outcome:'cancelled'}}]);await expect(provider.approve(cancelId,'approve')).rejects.toThrow(/não está mais pendente/);
     }finally{await provider.shutdown();if(prior===undefined)delete process.env.ADELIC_KIRO_BIN;else process.env.ADELIC_KIRO_BIN=prior;if(priorOptions===undefined)delete process.env.KIRO_PERMISSION_OPTIONS;else process.env.KIRO_PERMISSION_OPTIONS=priorOptions;}
+  });
+  it('confirms Kiro auth from the explicit Auth check, regardless of terminal integration failures',()=>{
+    const doctor=(auth:string,extra='')=>`Let's check if you're logged in...\n${auth}\n\nLet's check your dotfiles...\n● ~/.bashrc does not source pre integration\n✘ Kiro CLI terminal integrations: kiro-cli-term is not running in this terminal\n✘ Qterm Socket Check: Qterm is not running, please restart your terminal.${extra}\n`;
+    expect(parseKiroDoctorAuth({code:1,stdout:doctor('✔ Auth'),stderr:'',timedOut:false})).toBe(true);
+    expect(parseKiroDoctorAuth({code:0,stdout:`\x1b[32m✔\x1b[0m Auth\n`,stderr:'',timedOut:false})).toBe(true);
+    expect(parseKiroDoctorAuth({code:1,stdout:doctor('✘ Auth: not logged in'),stderr:'',timedOut:false})).toBe(false);
+    expect(parseKiroDoctorAuth({code:0,stdout:doctor('✔ Auth','\n✘ Auth token expired'),stderr:'',timedOut:false})).toBe(false);
+    expect(parseKiroDoctorAuth({code:0,stdout:"Let's check your dotfiles...\n✔ Fish is up to date\n",stderr:'',timedOut:false})).toBe(false);
+    expect(parseKiroDoctorAuth({code:0,stdout:'✔ Authorization header sent\n',stderr:'',timedOut:false})).toBe(false);
+    expect(parseKiroDoctorAuth({code:null,stdout:doctor('✔ Auth'),stderr:'',timedOut:true})).toBe(false);
+    expect(parseKiroDoctorAuth({code:null,stdout:'✔ Auth\n',stderr:'',timedOut:false})).toBe(false);
+  });
+  it('reports Kiro ready with a valid catalog when only terminal checks fail, and keeps the catalog mandatory',async()=>{
+    const directory=await mkdtemp(path.join(os.tmpdir(),'adelic-kiro-doctor-'));const script=path.join(directory,'kiro-cli');
+    await writeFile(script,`#!/bin/sh
+if [ "$1" = doctor ]; then printf '%s\\n' '✔ Auth' '✘ Qterm Socket Check: Qterm is not running'; exit 1; fi
+if [ -n "$KIRO_EMPTY_CATALOG" ]; then echo '{"models":[]}'; else echo '{"models":[{"model_id":"m1","model_name":"M1","isDefault":true}]}'; fi
+`);await chmod(script,0o755);
+    const prior=process.env.ADELIC_KIRO_BIN;process.env.ADELIC_KIRO_BIN=script;
+    try{
+      const ready=new KiroProvider();
+      try{await expect(ready.info()).resolves.toMatchObject({available:true,status:'ready',defaultModel:'m1',models:[{id:'m1'}]});}finally{await ready.shutdown();}
+      process.env.KIRO_EMPTY_CATALOG='1';const empty=new KiroProvider();
+      try{await expect(empty.info()).resolves.toMatchObject({available:false,status:'error'});}finally{await empty.shutdown();delete process.env.KIRO_EMPTY_CATALOG;}
+    }finally{if(prior===undefined)delete process.env.ADELIC_KIRO_BIN;else process.env.ADELIC_KIRO_BIN=prior;await rm(directory,{recursive:true,force:true});}
   });
   it('preserves empty and unknown reasoning-effort announcements from discovery',()=>{
     const catalog=parseKiroModelCatalog(JSON.stringify({models:[

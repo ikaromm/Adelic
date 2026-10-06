@@ -7,6 +7,7 @@
 - Menus posicionados junto ao botão, com foco no item selecionado; rolagem segue o fim só quando você já está lá, com botão para voltar à mensagem mais recente.
 - Botões de copiar em mensagens e blocos de código; links externos abrem fora do aplicativo; textos visíveis com pelo menos 11 px.
 - Memória com ai-memory em Docker: catálogo, listagem, busca, leitura, criação e edição passam pela API do serviço (`/api/v1`, MCP e `/admin/write-page`), sem acesso ao SQLite ou ao Markdown do serviço. `ADELIC_MEMORY_URL` e `ADELIC_MEMORY_TOKEN`/`ADELIC_MEMORY_TOKEN_FILE` configuram endereço e token. Erros de serviço indisponível, token, API ausente ou catálogo incoerente aparecem na tela em vez de um catálogo vazio. Notas com metadados que o serviço não consegue reproduzir ficam bloqueadas para edição.
+- Kiro: a disponibilidade usa só o resultado explícito da verificação `Auth` do `kiro-cli doctor --all`. Falhas de dotfiles ou integração do terminal (Qterm, kiro-cli-term), que podem deixar o código de saída diferente de zero, não marcam mais um Kiro autenticado como indisponível. `✘ Auth`, ausência da verificação, diagnóstico interrompido por timeout e catálogo de modelos vazio continuam bloqueando.
 
 Evidências e limites em [validação](docs/validation.md).
 

@@ -35,6 +35,20 @@ export function parseKiroModelCatalog(stdout:string):{models:ProviderInfo['model
   return {models,defaultModel};
 }
 
+/**
+ * Authentication verdict from `kiro-cli doctor --all`. The doctor also checks dotfiles
+ * and terminal integration (Qterm, kiro-cli-term), which fail outside an integrated
+ * terminal and may make the exit code non-zero even with a valid login. Only the
+ * explicit `Auth` check decides: `✔ Auth` confirms, `✘ Auth`/missing/ambiguous or a
+ * timed-out/killed diagnosis does not.
+ */
+export function parseKiroDoctorAuth(result:{code:number|null;stdout:string;stderr:string;timedOut:boolean}):boolean {
+  if(result.timedOut||result.code===null)return false;
+  const lines=`${result.stdout}\n${result.stderr}`.replace(/\x1b\[[0-9;]*[A-Za-z]/g,'').split(/\r?\n/).map(line=>line.trim());
+  const auth=lines.filter(line=>/^\S+\s+Auth\b/i.test(line));
+  return auth.length>0&&auth.every(line=>/^[✓✔]\s+Auth\b/i.test(line));
+}
+
 export class KiroProvider {
   private binary?: string;
   private turns = new Map<string, KiroTurn>();
@@ -57,7 +71,7 @@ export class KiroProvider {
     ]);
     if (this.shuttingDown) return this.shutdownInfo();
     const {models,defaultModel}=parseKiroModelCatalog(result.stdout);
-    const authenticated = authResult.code === 0 && /[✓✔]\s*Auth\b/i.test(`${authResult.stdout}\n${authResult.stderr}`);
+    const authenticated = parseKiroDoctorAuth(authResult);
     const ready = result.code === 0 && models.length > 0 && authenticated;
     const detail = ready
       ? `Kiro instalado e autenticação verificada pelo doctor; ${models.length} modelos anunciados pelo CLI.`

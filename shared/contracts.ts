@@ -175,6 +175,8 @@ export interface Settings {
   sandbox: Sandbox;
   responseStyle: 'concise' | 'balanced';
   approvalMode?: 'auto-safe' | 'manual';
+  /** Opt-in: check GitHub for a newer release (one anonymous request, never installs). */
+  updateCheck?: boolean;
 }
 export interface Integration {
   id: string;

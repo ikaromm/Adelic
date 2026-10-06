@@ -748,3 +748,24 @@
     opacity: 1;
   }
 }
+
+/* Newer release available (opt-in update check). */
+.update-notice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 8px 6px;
+  padding: 7px 10px;
+  border: 1px solid var(--accent-border);
+  border-radius: var(--radius-md);
+  background: var(--accent-soft);
+  color: var(--text);
+  font-size: var(--text-sm);
+  text-decoration: none;
+}
+.update-notice:hover {
+  background: var(--accent-softer);
+}
+.app-shell.sidebar-collapsed .update-notice {
+  justify-content: center;
+}

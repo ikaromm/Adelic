@@ -90,6 +90,10 @@ const providers: ProviderRegistry = {
 
 const { app } = createBackend(store, providers);
 const web = resolve(import.meta.dirname, '../../dist');
+// Fake GitHub "latest release" for the opt-in update check (ADELIC_RELEASES_URL points here).
+app.get('/e2e/releases/latest', (_req, res) =>
+  res.json({ tag_name: 'v99.0.0', html_url: 'https://github.com/ikaromm/Adelic/releases/tag/v99.0.0' }),
+);
 app.use(express.static(web));
 app.use((_req, res) => res.sendFile(join(web, 'index.html')));
 createServer(app).listen(port, '127.0.0.1', () =>

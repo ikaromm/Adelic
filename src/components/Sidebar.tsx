@@ -1,4 +1,6 @@
-import { Activity, Brain, MessageSquare, Settings as SettingsIcon } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { Activity, ArrowUpCircle, Brain, MessageSquare, Settings as SettingsIcon } from 'lucide-react';
+import { api, type UpdateInfo } from '../api';
 import type { Session } from '../../shared/contracts';
 import { relativeTime } from '../format';
 
@@ -83,5 +85,34 @@ export function SidebarNav({
         <span className="sidebar-label">Configurações</span>
       </button>
     </nav>
+  );
+}
+
+/** Discreet link to a newer release; checks once per app start, only when enabled. */
+export function UpdateNotice({ enabled }: { enabled: boolean }) {
+  const [update, setUpdate] = useState<UpdateInfo | null>(null);
+  useEffect(() => {
+    if (!enabled) return setUpdate(null);
+    let active = true;
+    api
+      .updates()
+      .then((result) => active && setUpdate(result))
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, [enabled]);
+  if (!update?.available || !update.url) return null;
+  return (
+    <a
+      className="update-notice"
+      href={update.url}
+      target="_blank"
+      rel="noreferrer"
+      title={`Abrir a release ${update.latest}`}
+    >
+      <ArrowUpCircle size={15} aria-hidden="true" />
+      <span className="sidebar-label">Versão {update.latest} disponível</span>
+    </a>
   );
 }

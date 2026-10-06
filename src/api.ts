@@ -38,6 +38,16 @@ export interface Diagnostics {
   sandbox: { bubblewrap: string | null };
   memory: { url: string; reachable: boolean; version?: string; notes?: number; detail?: string };
 }
+export interface UpdateInfo {
+  enabled: boolean;
+  current?: string;
+  latest?: string;
+  available?: boolean;
+  url?: string;
+  publishedAt?: string;
+  checkedAt?: string;
+  error?: string;
+}
 export interface Health {
   status: string;
   providers: { id: string; status: string; available: boolean }[];
@@ -80,6 +90,7 @@ export const api = {
   bootstrap: () => request<Bootstrap>('/api/bootstrap'),
   health: () => request<Health>('/api/health'),
   diagnostics: () => request<Diagnostics>('/api/diagnostics'),
+  updates: (force = false) => request<UpdateInfo>(`/api/updates${force ? '?force=1' : ''}`),
   detail: (id: string) => request<SessionDetail>(`/api/sessions/${encodeURIComponent(id)}`),
   task: (id: string) => request<DelegatedTask>(`/api/tasks/${encodeURIComponent(id)}`),
   createProject: (data: { name: string; path: string; memoryWorkspace?: string; memoryProject?: string }) =>

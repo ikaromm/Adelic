@@ -48,7 +48,7 @@ import { projectOrchestration } from '../shared/contracts';
 import { ActivityPage } from './components/ActivityPage';
 import { MessageCard, RunActivityPanel, RunEventRow } from './components/Chat';
 import { SettingsPage } from './components/SettingsPage';
-import { SIDEBAR_LIMIT, SessionItem, SidebarNav, type Page } from './components/Sidebar';
+import { SIDEBAR_LIMIT, SessionItem, SidebarNav, UpdateNotice, type Page } from './components/Sidebar';
 
 type LocalStream = { runId: string; messageId: string; content: string };
 
@@ -813,7 +813,14 @@ export default function App() {
   }
 
   async function updateSetting(
-    key: 'defaultProviderId' | 'defaultMode' | 'memoryEnabled' | 'sandbox' | 'responseStyle' | 'approvalMode',
+    key:
+      | 'defaultProviderId'
+      | 'defaultMode'
+      | 'memoryEnabled'
+      | 'sandbox'
+      | 'responseStyle'
+      | 'approvalMode'
+      | 'updateCheck',
     value: string | boolean,
   ) {
     if (!data) return;
@@ -1057,6 +1064,7 @@ export default function App() {
             </div>
           </section>
         </div>
+        <UpdateNotice enabled={data?.settings.updateCheck === true} />
         <SidebarNav
           page={page}
           goTo={goTo}

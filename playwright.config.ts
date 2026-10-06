@@ -31,7 +31,12 @@ export default defineConfig({
       url: `http://127.0.0.1:${port}/api/health`,
       reuseExistingServer: false,
       timeout: 30_000,
-      env: { E2E_PORT: String(port), ADELIC_MEMORY_URL: 'http://127.0.0.1:9', ADELIC_MEMORY_TOKEN: '' },
+      env: {
+        E2E_PORT: String(port),
+        ADELIC_MEMORY_URL: 'http://127.0.0.1:9',
+        ADELIC_MEMORY_TOKEN: '',
+        ADELIC_RELEASES_URL: `http://127.0.0.1:${port}/e2e/releases/latest`,
+      },
     },
     {
       command: 'npx tsx tests/e2e/server.ts',

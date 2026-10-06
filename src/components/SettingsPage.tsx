@@ -48,7 +48,14 @@ export function SettingsPage({
   onRefreshProject: () => void;
   onProjectMemoryScope: (workspace: string, project: string) => void;
   onSetting: (
-    key: 'defaultProviderId' | 'defaultMode' | 'memoryEnabled' | 'sandbox' | 'responseStyle' | 'approvalMode',
+    key:
+      | 'defaultProviderId'
+      | 'defaultMode'
+      | 'memoryEnabled'
+      | 'sandbox'
+      | 'responseStyle'
+      | 'approvalMode'
+      | 'updateCheck',
     value: string | boolean,
   ) => void;
   onSkill: (id: string, enabled: boolean) => void;
@@ -316,7 +323,10 @@ export function SettingsPage({
               </div>
             )}
           </section>
-          <DiagnosticsCard />
+          <DiagnosticsCard
+            updateCheck={data.settings.updateCheck === true}
+            onUpdateCheck={(enabled) => onSetting('updateCheck', enabled)}
+          />
         </div>
         <aside className="settings-aside">
           <div className="provider-panel">

@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import type { Settings } from '../../shared/contracts.js';
 import { SettingsPatchSchema, SkillPatchSchema, parseBody } from '../../shared/schemas.js';
+import { checkForUpdate } from '../updates.js';
 import { error } from './common.js';
 import type { BackendContext } from './context.js';
 
@@ -13,6 +14,13 @@ export function settingsRoutes({ store }: BackendContext) {
     const patch = Object.fromEntries(Object.entries(parsed.data).filter(([, value]) => value !== undefined));
     const next: Settings = { ...store.getSettings()!, ...patch };
     res.json(store.setSettings(next));
+  });
+  // Opt-in update check. `force` (manual "Verificar agora") works even when the automatic
+  // check is off, since the user asked for it explicitly.
+  app.get('/api/updates', async (req, res) => {
+    const force = req.query.force === '1';
+    if (!force && !store.getSettings()?.updateCheck) return res.json({ enabled: false });
+    res.json({ enabled: true, ...(await checkForUpdate({ force })) });
   });
   app.patch('/api/skills/:id', (req, res) => {
     const skill = store.getSkill(req.params.id);

@@ -1,6 +1,6 @@
 import { useState } from 'react';
-import { Check, ClipboardCopy, Download, LoaderCircle, Stethoscope } from 'lucide-react';
-import { api, type Diagnostics } from '../api';
+import { Check, ClipboardCopy, Download, ExternalLink, LoaderCircle, RefreshCw, Stethoscope } from 'lucide-react';
+import { api, type Diagnostics, type UpdateInfo } from '../api';
 
 const field = (label: string, value: string | number | null | undefined) => (
   <div className="diagnostics-row" key={label}>
@@ -10,7 +10,25 @@ const field = (label: string, value: string | number | null | undefined) => (
 );
 
 /** Settings card that loads /api/diagnostics on demand and lets the user copy or save it. */
-export function DiagnosticsCard() {
+export function DiagnosticsCard({
+  updateCheck,
+  onUpdateCheck,
+}: {
+  updateCheck: boolean;
+  onUpdateCheck: (enabled: boolean) => void;
+}) {
+  const [update, setUpdate] = useState<UpdateInfo | null>(null);
+  const [checking, setChecking] = useState(false);
+  const checkNow = async () => {
+    setChecking(true);
+    try {
+      setUpdate(await api.updates(true));
+    } catch (e) {
+      setUpdate({ enabled: true, error: (e as Error).message });
+    } finally {
+      setChecking(false);
+    }
+  };
   const [report, setReport] = useState<Diagnostics | null>(null);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -55,6 +73,42 @@ export function DiagnosticsCard() {
           <p>Versões, caminhos e estado dos serviços para relatar problemas. Não inclui credenciais nem conversas.</p>
         </div>
       </div>
+      <div className="setting-row">
+        <div>
+          <strong>Verificar novas versões</strong>
+          <span>Consulta a última release no GitHub ao abrir o Adelic. Nunca baixa nem instala nada.</span>
+        </div>
+        <button
+          className={`toggle ${updateCheck ? 'on' : ''}`}
+          role="switch"
+          aria-checked={updateCheck}
+          aria-label="Verificar novas versões"
+          onClick={() => onUpdateCheck(!updateCheck)}
+        >
+          <span />
+        </button>
+      </div>
+      <div className="diagnostics-actions">
+        <button type="button" className="secondary-button" onClick={() => void checkNow()} disabled={checking}>
+          {checking ? <LoaderCircle size={14} className="spin" /> : <RefreshCw size={14} />} Verificar agora
+        </button>
+      </div>
+      {update && (
+        <p className="diagnostics-note" role="status">
+          {update.error ? (
+            update.error
+          ) : update.available ? (
+            <>
+              Nova versão {update.latest} disponível (você usa {update.current}).{' '}
+              <a href={update.url} target="_blank" rel="noreferrer">
+                Abrir a release <ExternalLink size={12} />
+              </a>
+            </>
+          ) : (
+            `Você está na versão mais recente (${update.current}).`
+          )}
+        </p>
+      )}
       <div className="diagnostics-actions">
         <button type="button" className="secondary-button" onClick={() => void load()} disabled={busy}>
           {busy ? <LoaderCircle size={14} className="spin" /> : <Stethoscope size={14} />}

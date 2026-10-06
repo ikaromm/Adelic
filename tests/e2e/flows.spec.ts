@@ -156,3 +156,21 @@ test('keeps reading position when scrolled up and offers a jump to the latest me
     .poll(() => conversation.evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight))
     .toBeLessThan(96);
 });
+
+test('update check is off by default, and when enabled shows a newer release without installing', async ({ page }) => {
+  await page.goto('/');
+  await expect(page.locator('.update-notice')).toHaveCount(0);
+  const nav = page.getByRole('navigation', { name: 'Navegação principal' });
+  await nav.getByRole('button', { name: 'Configurações' }).click();
+  const toggle = page.getByRole('switch', { name: 'Verificar novas versões' });
+  await expect(toggle).toHaveAttribute('aria-checked', 'false');
+  await toggle.click();
+  await expect(toggle).toHaveAttribute('aria-checked', 'true');
+  const notice = page.locator('.update-notice');
+  await expect(notice).toContainText('Versão 99.0.0 disponível');
+  await expect(notice).toHaveAttribute('href', 'https://github.com/ikaromm/Adelic/releases/tag/v99.0.0');
+  await page.getByRole('button', { name: 'Verificar agora' }).click();
+  await expect(page.getByRole('status').filter({ hasText: 'Nova versão 99.0.0' })).toBeVisible();
+  await toggle.click();
+  await expect(notice).toHaveCount(0);
+});

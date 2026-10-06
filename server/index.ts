@@ -7,6 +7,7 @@ import { Store } from './store.js';
 import { GraphifyService, graphify, mountGraphifyRoutes } from './graphify.js';
 import { error, message, originGuard } from './http/common.js';
 import type { BackendContext } from './http/context.js';
+import { diagnosticsRoutes } from './http/diagnostics.js';
 import { memoryRoutes } from './http/memory.js';
 import { projectsRoutes } from './http/projects.js';
 import { sessionsRoutes } from './http/sessions.js';
@@ -83,6 +84,7 @@ export function createBackend(store: Store, providers: ProviderRegistry, graphif
   app.use(sessionsRoutes(context));
   app.use(settingsRoutes(context));
   app.use(memoryRoutes(context));
+  app.use(diagnosticsRoutes(context));
   app.get('/api/health', async (_req, res) => {
     res.json({
       status: 'ok',

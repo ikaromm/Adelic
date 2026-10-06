@@ -15,6 +15,29 @@ import type {
   Settings,
   Skill,
 } from '../shared/contracts';
+/** Report from /api/diagnostics: versions, paths and status only, without secrets or content. */
+export interface Diagnostics {
+  generatedAt: string;
+  app: { version: string; node: string; electron: string | null };
+  system: { platform: string; arch: string; kernel: string };
+  data: {
+    dir: string;
+    schema: { current: number; supported: number };
+    counts: Record<string, number>;
+    backups: { name: string; bytes: number; at: string }[];
+  };
+  providers: {
+    id: string;
+    status: string;
+    available: boolean;
+    detail: string;
+    models: number;
+    binary: string | null;
+    version: string | null;
+  }[];
+  sandbox: { bubblewrap: string | null };
+  memory: { url: string; reachable: boolean; version?: string; notes?: number; detail?: string };
+}
 export interface Health {
   status: string;
   providers: { id: string; status: string; available: boolean }[];
@@ -56,6 +79,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
   bootstrap: () => request<Bootstrap>('/api/bootstrap'),
   health: () => request<Health>('/api/health'),
+  diagnostics: () => request<Diagnostics>('/api/diagnostics'),
   detail: (id: string) => request<SessionDetail>(`/api/sessions/${encodeURIComponent(id)}`),
   task: (id: string) => request<DelegatedTask>(`/api/tasks/${encodeURIComponent(id)}`),
   createProject: (data: { name: string; path: string; memoryWorkspace?: string; memoryProject?: string }) =>

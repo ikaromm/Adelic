@@ -9,6 +9,7 @@ import type {
   ProjectCoordination,
 } from '../../shared/contracts';
 import { integrationName } from '../labels';
+import { DiagnosticsCard } from './DiagnosticsCard';
 import { ProjectTools } from './ProjectTools';
 
 export function SettingsPage({
@@ -315,6 +316,7 @@ export function SettingsPage({
               </div>
             )}
           </section>
+          <DiagnosticsCard />
         </div>
         <aside className="settings-aside">
           <div className="provider-panel">

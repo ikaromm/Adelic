@@ -103,3 +103,24 @@ test('keeps the layout usable on a small screen', async ({ page }) => {
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
   expect(overflow).toBeLessThanOrEqual(0);
 });
+
+test('generates a diagnostics report in Settings without conversation content', async ({ page }) => {
+  const input = await newConversation(page);
+  const secret = `conteudo-privado-${Date.now()}`;
+  await input.fill(`[normal] ${secret}`);
+  await input.press('Enter');
+  await expect(page.locator('.markdown-content strong', { hasText: 'E2E' }).last()).toBeVisible();
+  await page
+    .getByRole('navigation', { name: 'Navegação principal' })
+    .getByRole('button', { name: 'Configurações' })
+    .click();
+  await page.getByRole('button', { name: 'Gerar diagnóstico' }).click();
+  const card = page.getByRole('region', { name: 'Diagnóstico' });
+  await expect(card.getByText('Esquema da base')).toBeVisible();
+  await expect(card).toContainText('indisponível em http://127.0.0.1:9');
+  await expect(card).toContainText('codex');
+  await expect(card).not.toContainText(secret);
+  const report = await page.evaluate(async () => (await fetch('/api/diagnostics')).text());
+  expect(report).not.toContain(secret);
+  await expect(card.getByRole('button', { name: 'Baixar JSON' })).toBeVisible();
+});

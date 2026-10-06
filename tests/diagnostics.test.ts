@@ -5,6 +5,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { createBackend } from '../server/index.js';
 import { Store } from '../server/store.js';
+import { schemaVersion } from '../server/migrations.js';
 import type { ProviderRegistry } from '../shared/contracts.js';
 
 const cleanup: (() => void)[] = [];
@@ -72,7 +73,7 @@ describe('GET /api/diagnostics', () => {
     const text = await response.text();
     const report = JSON.parse(text);
     expect(report.app.version).toMatch(/^\d+\.\d+\.\d+/);
-    expect(report.data.schema).toEqual({ current: 1, supported: 1 });
+    expect(report.data.schema).toEqual({ current: schemaVersion, supported: schemaVersion });
     expect(report.data.counts).toMatchObject({ sessions: 1, messages: 1 });
     expect(report.data.dir.startsWith('~/')).toBe(true);
     expect(report.providers).toEqual([expect.objectContaining({ id: 'codex', status: 'ready', models: 1 })]);

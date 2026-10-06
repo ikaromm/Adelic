@@ -15,6 +15,7 @@ import {
   type Session,
   type Settings,
   type Skill,
+  type ConversationSearchHit,
 } from '../shared/contracts.js';
 import { migrate, type MigrationResult } from './migrations.js';
 
@@ -316,6 +317,71 @@ export class Store {
       runs: this.listRuns(session.id),
       tasks: this.listSessionTaskMetadata(session.id),
     };
+  }
+  /**
+   * Full-text search over message content and conversation titles, newest first. Each word
+   * is matched as a prefix ("config" finds "configuração"); FTS syntax in the query is
+   * neutralised by quoting every term.
+   */
+  searchConversations(query: string, limit = 30): ConversationSearchHit[] {
+    const terms = query
+      .normalize('NFC')
+      .split(/\s+/)
+      .map((t) => t.replace(/["*^:(){}\[\]]/g, '').trim())
+      .filter(Boolean)
+      .slice(0, 8);
+    if (!terms.length) return [];
+    const match = terms.map((t) => `"${t}"*`).join(' ');
+    const rows = this.db
+      .prepare(
+        `SELECT f.session_id AS sessionId, f.message_id AS messageId,
+                snippet(messages_fts, 0, '[[', ']]', '…', 14) AS snippet,
+                json_extract(m.data, '$.role') AS role, json_extract(m.data, '$.createdAt') AS createdAt
+           FROM messages_fts f JOIN messages m ON m.rowid = f.rowid
+          WHERE messages_fts MATCH ?
+          ORDER BY m.rowid DESC
+          LIMIT ?`,
+      )
+      .all(match, limit * 4) as {
+      sessionId: string;
+      messageId: string;
+      snippet: string;
+      role: Message['role'];
+      createdAt: string;
+    }[];
+    const sessions = new Map(this.listSessions().map((session) => [session.id, session]));
+    const folded = (value: string) =>
+      value
+        .normalize('NFD')
+        .replace(/\p{Diacritic}/gu, '')
+        .toLowerCase();
+    const titleHits = [...sessions.values()].filter((session) =>
+      terms.every((t) => folded(session.title).includes(folded(t))),
+    );
+    const hits = new Map<string, ConversationSearchHit>();
+    for (const session of titleHits)
+      hits.set(session.id, {
+        sessionId: session.id,
+        title: session.title,
+        projectId: session.projectId,
+        updatedAt: session.updatedAt,
+        matches: [],
+      });
+    for (const row of rows) {
+      const session = sessions.get(row.sessionId);
+      if (!session) continue;
+      const hit = hits.get(session.id) ?? {
+        sessionId: session.id,
+        title: session.title,
+        projectId: session.projectId,
+        updatedAt: session.updatedAt,
+        matches: [],
+      };
+      if (hit.matches.length < 3)
+        hit.matches.push({ messageId: row.messageId, role: row.role, createdAt: row.createdAt, snippet: row.snippet });
+      hits.set(session.id, hit);
+    }
+    return [...hits.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, limit);
   }
   exportData() {
     return {

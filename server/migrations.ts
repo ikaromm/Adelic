@@ -61,6 +61,38 @@ export const migrations: Migration[] = [
       }
     },
   },
+  {
+    version: 2,
+    description: 'Busca nas conversas: índice FTS5 sobre o conteúdo das mensagens',
+    up(db) {
+      // External-content FTS over messages.data's content field, kept in sync by triggers.
+      // remove_diacritics so "configuracao" finds "configuração".
+      // Idempotent: rebuilt from scratch, so re-running it (or a partial earlier attempt) is safe.
+      db.exec(`
+        DROP TRIGGER IF EXISTS messages_fts_ai;
+        DROP TRIGGER IF EXISTS messages_fts_ad;
+        DROP TRIGGER IF EXISTS messages_fts_au;
+        DROP TABLE IF EXISTS messages_fts;
+        CREATE VIRTUAL TABLE messages_fts USING fts5(
+          content, session_id UNINDEXED, message_id UNINDEXED,
+          tokenize = "unicode61 remove_diacritics 2"
+        );
+        INSERT INTO messages_fts(rowid, content, session_id, message_id)
+          SELECT rowid, json_extract(data, '$.content'), session_id, id FROM messages;
+        CREATE TRIGGER messages_fts_ai AFTER INSERT ON messages BEGIN
+          INSERT INTO messages_fts(rowid, content, session_id, message_id)
+            VALUES (new.rowid, json_extract(new.data, '$.content'), new.session_id, new.id);
+        END;
+        CREATE TRIGGER messages_fts_ad AFTER DELETE ON messages BEGIN
+          DELETE FROM messages_fts WHERE rowid = old.rowid;
+        END;
+        CREATE TRIGGER messages_fts_au AFTER UPDATE OF data ON messages BEGIN
+          DELETE FROM messages_fts WHERE rowid = old.rowid;
+          INSERT INTO messages_fts(rowid, content, session_id, message_id)
+            VALUES (new.rowid, json_extract(new.data, '$.content'), new.session_id, new.id);
+        END;`);
+    },
+  },
 ];
 
 export const schemaVersion = migrations.at(-1)!.version;

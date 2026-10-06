@@ -18,6 +18,8 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Menu,
+  Search,
+  Download,
 } from 'lucide-react';
 import type {
   Bootstrap,
@@ -46,6 +48,7 @@ import { useGlobalShortcuts } from './hooks/useGlobalShortcuts';
 import { useStickToBottom } from './hooks/useStickToBottom';
 import { projectOrchestration } from '../shared/contracts';
 import { ActivityPage } from './components/ActivityPage';
+import { ConversationSearch } from './components/ConversationSearch';
 import { MessageCard, RunActivityPanel, RunEventRow } from './components/Chat';
 import { SettingsPage } from './components/SettingsPage';
 import { SIDEBAR_LIMIT, SessionItem, SidebarNav, UpdateNotice, type Page } from './components/Sidebar';
@@ -67,6 +70,7 @@ export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
   const [projectForm, setProjectForm] = useState(false);
   const [projectName, setProjectName] = useState('');
   const [projectPath, setProjectPath] = useState('');
@@ -398,7 +402,9 @@ export default function App() {
 
   useGlobalShortcuts({
     newConversation: () => void newConversation(),
+    search: () => setSearchOpen(true),
     dismiss: () => {
+      setSearchOpen(false);
       setProjectForm(false);
       setHelpOpen(false);
       setSidebarOpen(false);
@@ -959,6 +965,14 @@ export default function App() {
           <span className="sidebar-label">Nova conversa</span>
           <kbd>{shortcut}</kbd>
         </button>
+        <button
+          className="nav-item sidebar-search"
+          title="Buscar nas conversas (Ctrl+Shift+F)"
+          onClick={() => setSearchOpen(true)}
+        >
+          <Search size={16} aria-hidden="true" />
+          <span className="sidebar-label">Buscar conversas</span>
+        </button>
         <div className="sidebar-scroll">
           <section className="sidebar-section sidebar-detached" aria-labelledby="sidebar-detached-title">
             <div className="sidebar-section-heading">
@@ -1099,6 +1113,17 @@ export default function App() {
             </div>
           </div>
           <div className="topbar-right">
+            {page === 'chat' && session && (
+              <a
+                className="icon-button"
+                href={`/api/sessions/${encodeURIComponent(session.id)}/export`}
+                download
+                aria-label="Exportar conversa em Markdown"
+                title="Exportar conversa em Markdown"
+              >
+                <Download size={16} />
+              </a>
+            )}
             <span className="local-badge" title="Executa neste computador; o servidor escuta somente em 127.0.0.1">
               <span className="status-dot ready" aria-hidden="true" />
               Local
@@ -1640,6 +1665,17 @@ export default function App() {
             </div>
           </form>
         </div>
+      )}
+      {searchOpen && (
+        <ConversationSearch
+          onClose={() => setSearchOpen(false)}
+          onOpen={(id) => {
+            setSearchOpen(false);
+            setSidebarOpen(false);
+            setPage('chat');
+            selectConversation(id);
+          }}
+        />
       )}
       {helpOpen && (
         <div

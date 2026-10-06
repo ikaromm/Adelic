@@ -1704,3 +1704,88 @@ label.setting-row > input {
     gap: 2px;
   }
 }
+
+/* Conversation search dialog. */
+.search-card {
+  width: min(640px, calc(100vw - 32px));
+}
+/* .modal-card > label stacks its children; the search field is a single row. */
+.modal-card > .search-field {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+  color: var(--text-muted);
+}
+.search-field input {
+  flex: 1;
+  min-width: 0;
+  height: var(--control-h-lg);
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text);
+  outline: none;
+}
+.search-field:focus-within {
+  border-color: var(--accent-border);
+  box-shadow: 0 0 0 3px var(--accent-softer);
+}
+.search-card .modal-heading {
+  align-items: center;
+  justify-content: space-between;
+}
+.search-results {
+  display: grid;
+  gap: 6px;
+  max-height: min(55vh, 520px);
+  margin-top: 12px;
+  overflow: auto;
+}
+.search-hit {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: var(--text);
+  text-align: left;
+}
+.search-hit:hover,
+.search-hit:focus-visible {
+  background: var(--surface-hover);
+}
+.search-hit-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+}
+.search-hit-title small {
+  margin-left: auto;
+  color: var(--text-muted);
+  font-weight: 400;
+}
+.search-hit-snippet {
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.search-hit-snippet mark {
+  border-radius: 3px;
+  background: var(--accent-soft);
+  color: var(--text);
+}
+.search-hint {
+  margin-top: 10px;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}

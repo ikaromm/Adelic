@@ -32,7 +32,7 @@ test('switching scope shows only that scope, and searches stay in it', async ({ 
   await expect(page.getByRole('button', { name: /Tema escuro/ })).toBeVisible();
   await expect(page.getByRole('button', { name: /Rede local/ })).toHaveCount(0);
   await page.getByPlaceholder(/Buscar neste escopo/).fill('Roteador');
-  await page.getByRole('button', { name: 'Buscar' }).click();
+  await page.getByRole('button', { name: 'Buscar', exact: true }).click();
   await expect(page.getByRole('button', { name: /Rede local/ })).toHaveCount(0);
   // The 5 s poll must keep using the newly selected scope.
   await page.waitForTimeout(6000);

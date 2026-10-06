@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { randomUUID } from 'node:crypto';
-import type { ProviderInfo, Session } from '../../shared/contracts.js';
+import type { Message, ProviderInfo, Session } from '../../shared/contracts.js';
 import { supportsEffort } from '../../shared/reasoning.js';
 import {
   ApprovalDecisionSchema,
@@ -14,6 +14,22 @@ import { error, errorStatus, message } from './common.js';
 
 const titleSchema = text(160);
 import type { BackendContext } from './context.js';
+
+const roleName: Record<Message['role'], string> = { user: 'Você', assistant: 'Agente', system: 'Sistema' };
+/** Markdown transcript of a conversation's visible messages (no internal events or tasks). */
+export function conversationMarkdown(session: Session, messages: Message[]) {
+  const lines = [
+    `# ${session.title}`,
+    '',
+    `Exportado do Adelic em ${new Date().toISOString()} · ${messages.length} mensagens`,
+    '',
+  ];
+  for (const m of messages) {
+    if (!m.content.trim()) continue;
+    lines.push(`## ${roleName[m.role]} · ${m.createdAt}`, '', m.content.trim(), '');
+  }
+  return lines.join('\n');
+}
 
 function knownModel(catalog: ProviderInfo[], providerId: string, model: string) {
   const provider = catalog.find((p) => p.id === providerId);
@@ -63,6 +79,28 @@ export function sessionsRoutes({ store, orchestrator, providerList }: BackendCon
     const s = store.getSession(req.params.id);
     if (!s) return error(res, 404, 'Conversa não encontrada');
     res.json(store.detail(s));
+  });
+  app.get('/api/search', (req, res) => {
+    const q = titleSchema.safeParse(req.query.q);
+    if (!q.success) return error(res, 400, 'q obrigatório (até 160 caracteres)');
+    res.json({ hits: store.searchConversations(q.data) });
+  });
+  // Export one conversation: Markdown with the visible messages, or the full JSON detail.
+  app.get('/api/sessions/:id/export', (req, res) => {
+    const s = store.getSession(req.params.id);
+    if (!s) return error(res, 404, 'Conversa não encontrada');
+    const format = req.query.format === 'json' ? 'json' : 'md';
+    const slug =
+      s.title
+        .normalize('NFD')
+        .replace(/\p{Diacritic}/gu, '')
+        .replace(/[^a-zA-Z0-9]+/g, '-')
+        .replace(/^-|-$/g, '')
+        .toLowerCase()
+        .slice(0, 60) || 'conversa';
+    res.setHeader('content-disposition', `attachment; filename="adelic-${slug}.${format}"`);
+    if (format === 'json') return res.json(store.detail(s));
+    res.type('text/markdown; charset=utf-8').send(conversationMarkdown(s, store.listMessages(s.id)));
   });
   app.patch('/api/sessions/:id', async (req, res) => {
     const original = store.getSession(req.params.id);

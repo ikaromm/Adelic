@@ -120,6 +120,14 @@ export interface RoutePlan {
   effort?: ReasoningEffort;
   contextBudget: number;
 }
+export interface ConversationSearchHit {
+  sessionId: string;
+  title: string;
+  projectId: string | null;
+  updatedAt: string;
+  /** Up to three matching messages; `[[` and `]]` mark the matched terms in the snippet. */
+  matches: { messageId: string; role: 'user' | 'assistant' | 'system'; createdAt: string; snippet: string }[];
+}
 export interface Message {
   id: string;
   sessionId: string;

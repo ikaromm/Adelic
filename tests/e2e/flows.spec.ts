@@ -174,3 +174,29 @@ test('update check is off by default, and when enabled shows a newer release wit
   await toggle.click();
   await expect(notice).toHaveCount(0);
 });
+
+test('searches every conversation and opens the match; exports the open one as Markdown', async ({ page }) => {
+  const input = await newConversation(page);
+  const word = `girassol${Date.now()}`;
+  await input.fill(`[normal] fale sobre ${word}`);
+  await input.press('Enter');
+  await expect(page.locator('.markdown-content strong', { hasText: 'E2E' }).last()).toBeVisible();
+  await page.getByRole('button', { name: 'Nova conversa' }).first().click();
+  await page.keyboard.press('Control+Shift+F');
+  const box = page.getByRole('textbox', { name: 'Buscar nas conversas' });
+  await box.fill(word.slice(0, 12));
+  const hit = page.getByRole('listitem').filter({ hasText: word });
+  await expect(hit).toBeVisible();
+  await expect(hit.locator('mark').first()).toBeVisible();
+  await hit.click();
+  await expect(
+    page.getByRole('region', { name: 'Conversa', exact: true }).getByText(`fale sobre ${word}`),
+  ).toBeVisible();
+  const download = page.waitForEvent('download');
+  await page.getByRole('link', { name: 'Exportar conversa em Markdown' }).click();
+  const file = await download;
+  expect(file.suggestedFilename()).toMatch(/^adelic-normal-fale-sobre-girassol\d+\.md$/);
+  const text = await (await import('node:fs/promises')).readFile((await file.path())!, 'utf8');
+  expect(text).toContain(`## Você`);
+  expect(text).toContain(word);
+});

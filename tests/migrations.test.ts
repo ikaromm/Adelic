@@ -28,7 +28,7 @@ describe('SQLite schema migrations', () => {
   it('creates a new database at the latest version without a backup', () => {
     const dir = tempDir();
     const store = new Store(dir);
-    expect(store.migration).toMatchObject({ from: 0, to: schemaVersion, applied: [1] });
+    expect(store.migration).toMatchObject({ from: 0, to: schemaVersion, applied: migrations.map((m) => m.version) });
     expect(store.migration.backupPath).toBeUndefined();
     expect(userVersion(store.db)).toBe(schemaVersion);
     store.close();
@@ -43,7 +43,7 @@ describe('SQLite schema migrations', () => {
     const before = ['projects', 'sessions', 'settings', 'skills'].map((t) => tableRows(first.db, t));
     first.close();
     const reopened = new Store(dir);
-    expect(reopened.migration).toMatchObject({ from: 0, to: schemaVersion, applied: [1] });
+    expect(reopened.migration).toMatchObject({ from: 0, to: schemaVersion, applied: migrations.map((m) => m.version) });
     expect(['projects', 'sessions', 'settings', 'skills'].map((t) => tableRows(reopened.db, t))).toEqual(before);
     const backup = new DatabaseSync(reopened.migration.backupPath!, { readOnly: true });
     expect(tableRows(backup, 'projects')).toEqual(before[0]);
@@ -87,7 +87,9 @@ describe('SQLite schema migrations', () => {
         },
       },
     ];
-    expect(() => migrate(db, dir, broken)).toThrow(/Falha na migração .*continua no esquema 1 e há uma cópia em/);
+    expect(() => migrate(db, dir, broken)).toThrow(
+      new RegExp(`Falha na migração .*continua no esquema ${schemaVersion} e há uma cópia em`),
+    );
     expect(userVersion(db)).toBe(schemaVersion);
     expect(tableRows(db, 'projects')).toEqual([{ id: 'p', data: '{}' }]);
     expect(db.prepare("SELECT name FROM sqlite_master WHERE name='half_done'").all()).toEqual([]);

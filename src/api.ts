@@ -1,4 +1,5 @@
 import type {
+  ConversationSearchHit,
   Bootstrap,
   DelegatedTask,
   GraphifyQueryResult,
@@ -90,6 +91,8 @@ export const api = {
   bootstrap: () => request<Bootstrap>('/api/bootstrap'),
   health: () => request<Health>('/api/health'),
   diagnostics: () => request<Diagnostics>('/api/diagnostics'),
+  searchConversations: (q: string) =>
+    request<{ hits: ConversationSearchHit[] }>(`/api/search?q=${encodeURIComponent(q)}`),
   updates: (force = false) => request<UpdateInfo>(`/api/updates${force ? '?force=1' : ''}`),
   detail: (id: string) => request<SessionDetail>(`/api/sessions/${encodeURIComponent(id)}`),
   task: (id: string) => request<DelegatedTask>(`/api/tasks/${encodeURIComponent(id)}`),

@@ -38,3 +38,25 @@ export function newConversationShortcut(
 ): string {
   return /mac|iphone|ipad|ipod/i.test(platform) ? '⌘K' : 'Ctrl K';
 }
+
+/** Compact token count: 980, 4,6 mil, 1,2 mi. Undefined stays unknown ("—" in the UI). */
+export function formatTokens(value: number | undefined): string | undefined {
+  if (value == null || !Number.isFinite(value)) return undefined;
+  if (value < 1000) return String(Math.round(value));
+  if (value < 1_000_000) return `${(value / 1000).toLocaleString('pt-BR', { maximumFractionDigits: 1 })} mil`;
+  return `${(value / 1_000_000).toLocaleString('pt-BR', { maximumFractionDigits: 1 })} mi`;
+}
+
+/** Tokens of a run as "4,6 mil entrada · 5 saída", or undefined when the provider sent none. */
+export function runTokens(run: { inputTokens?: number; outputTokens?: number }): string | undefined {
+  const input = formatTokens(run.inputTokens),
+    output = formatTokens(run.outputTokens);
+  if (!input && !output) return undefined;
+  return [input && `${input} entrada`, output && `${output} saída`].filter(Boolean).join(' · ');
+}
+
+/** Cost in USD only when the provider reported it; unknown is never shown as zero. */
+export function formatCost(costUsd: number | undefined): string | undefined {
+  if (costUsd == null || !Number.isFinite(costUsd)) return undefined;
+  return costUsd < 0.01 ? `US$ ${costUsd.toFixed(4)}` : `US$ ${costUsd.toFixed(2)}`;
+}

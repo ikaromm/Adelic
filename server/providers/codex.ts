@@ -11,6 +11,7 @@ import {
   ItemParams,
   TOOL_ITEM_TYPES,
   ThreadIdParams,
+  TokenUsageParams,
   TurnParams,
   parseParams,
 } from './codex-protocol';
@@ -554,6 +555,11 @@ export class CodexProvider {
             status: message.method === 'item/started' ? 'running' : (item.status ?? 'completed'),
             ...(item.id !== undefined ? { toolCallId: item.id } : {}),
           });
+      } else if (message.method === 'thread/tokenUsage/updated') {
+        // Token counts only: Codex does not report cost, which stays unknown (never zero).
+        const usage = parseParams(TokenUsageParams, message.params)?.tokenUsage.last;
+        if (usage && (usage.inputTokens !== undefined || usage.outputTokens !== undefined))
+          turn.emit({ type: 'usage', inputTokens: usage.inputTokens, outputTokens: usage.outputTokens });
       } else if (message.method === 'turn/started') {
         turn.turnId = parseParams(TurnParams, message.params)?.turn?.id ?? '';
       } else if (message.method === 'turn/completed') {

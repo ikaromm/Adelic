@@ -1,7 +1,7 @@
 import { Activity, ChevronDown, Code2, FileText, LoaderCircle, Sparkles, X } from 'lucide-react';
 import type { Bootstrap, DelegatedTask, Message, Run, SessionDetail } from '../../shared/contracts';
 import { CopyButton, Markdown } from '../Markdown';
-import { formatDuration } from '../format';
+import { formatCost, formatDuration, formatTokens } from '../format';
 import { taskRoleName, taskStatusName, timeLabel } from '../labels';
 import { thinkingLabel } from '../reasoning';
 import {
@@ -98,9 +98,15 @@ export function RunActivityPanel({
         ? `Trabalhou por ${elapsed}`
         : 'Atividade'
       : `${outcome}${elapsed ? ` após ${elapsed}` : ''}`;
+  const totalTokens =
+    run && (run.inputTokens != null || run.outputTokens != null)
+      ? formatTokens((run.inputTokens ?? 0) + (run.outputTokens ?? 0))
+      : undefined;
   const counts = [
     activity.tasks.length ? `${activity.tasks.length} ${activity.tasks.length === 1 ? 'tarefa' : 'tarefas'}` : '',
     activity.actions.length ? `${activity.actions.length} ${activity.actions.length === 1 ? 'ação' : 'ações'}` : '',
+    !running && totalTokens ? `${totalTokens} tokens` : '',
+    !running ? (formatCost(run?.costUsd) ?? '') : '',
   ]
     .filter(Boolean)
     .join(' · ');

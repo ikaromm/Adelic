@@ -39,6 +39,17 @@ export const ErrorParams = z
   })
   .passthrough();
 
+const count = z.number().int().nonnegative();
+const Usage = z.object({ inputTokens: count.optional(), outputTokens: count.optional() }).passthrough();
+/** thread/tokenUsage/updated: `last` is the latest turn, `total` the whole thread. No cost is sent. */
+export const TokenUsageParams = z
+  .object({
+    threadId: id,
+    turnId: id.optional(),
+    tokenUsage: z.object({ last: Usage.optional(), total: Usage.optional() }).passthrough(),
+  })
+  .passthrough();
+
 export const ThreadIdParams = z.object({ threadId: id.optional() }).passthrough();
 
 /** Parses notification params; undefined when they do not match. */

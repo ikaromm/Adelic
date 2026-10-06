@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { formatDuration, newConversationShortcut, relativeTime } from '../src/format';
+import {
+  formatDuration,
+  newConversationShortcut,
+  relativeTime,
+  formatCost,
+  formatTokens,
+  runTokens,
+} from '../src/format';
 
 describe('activity durations', () => {
   it('uses pt-BR decimals below ten seconds and whole units above', () => {
@@ -43,5 +50,23 @@ describe('new conversation shortcut hint', () => {
     expect(newConversationShortcut('Linux x86_64')).toBe('Ctrl K');
     expect(newConversationShortcut('Win32')).toBe('Ctrl K');
     expect(newConversationShortcut('MacIntel')).toBe('⌘K');
+  });
+});
+
+describe('token and cost formatting', () => {
+  it('formats counts compactly and keeps unknown as undefined', () => {
+    expect(formatTokens(980)).toBe('980');
+    expect(formatTokens(4611)).toBe('4,6 mil');
+    expect(formatTokens(1_250_000)).toBe('1,3 mi');
+    expect(formatTokens(undefined)).toBeUndefined();
+    expect(runTokens({ inputTokens: 4606, outputTokens: 5 })).toBe('4,6 mil entrada · 5 saída');
+    expect(runTokens({ outputTokens: 12 })).toBe('12 saída');
+    expect(runTokens({})).toBeUndefined();
+  });
+  it('never turns an unknown cost into zero', () => {
+    expect(formatCost(undefined)).toBeUndefined();
+    expect(formatCost(0)).toBe('US$ 0.0000');
+    expect(formatCost(0.004)).toBe('US$ 0.0040');
+    expect(formatCost(1.234)).toBe('US$ 1.23');
   });
 });

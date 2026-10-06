@@ -1,6 +1,6 @@
 import { Activity, Bot, Clock3, Gauge, History, Zap } from 'lucide-react';
 import type { Bootstrap, Run } from '../../shared/contracts';
-import { formatDuration } from '../format';
+import { formatCost, formatDuration, formatTokens, runTokens } from '../format';
 import { shortDate, statusName, timeLabel } from '../labels';
 
 export function ActivityPage({ runs, providers }: { runs: Run[]; providers: Bootstrap['providers'] }) {
@@ -11,6 +11,11 @@ export function ActivityPage({ runs, providers }: { runs: Run[]; providers: Boot
     numbers.length ? numbers.reduce((sum, item) => sum + item, 0) / numbers.length : null;
   const meanDuration = avg(durations),
     meanFirst = avg(firstTokens);
+  // Totals only over runs that reported them; the hint says how many did.
+  const withTokens = runs.filter((run) => run.inputTokens != null || run.outputTokens != null);
+  const totalTokens = withTokens.reduce((sum, run) => sum + (run.inputTokens ?? 0) + (run.outputTokens ?? 0), 0);
+  const withCost = runs.filter((run) => run.costUsd != null);
+  const totalCost = withCost.reduce((sum, run) => sum + (run.costUsd ?? 0), 0);
   return (
     <section className="page-content">
       <div className="page-heading">
@@ -42,7 +47,16 @@ export function ActivityPage({ runs, providers }: { runs: Run[]; providers: Boot
           value={meanDuration == null ? '—' : formatDuration(meanDuration)}
           hint={meanDuration == null ? 'Sem medição disponível' : 'das execuções registradas'}
         />
-        <MetricCard icon={<Gauge size={17} />} label="Custo" value="—" hint="Indisponível pelo provedor" />{' '}
+        <MetricCard
+          icon={<Gauge size={17} />}
+          label="Tokens"
+          value={withTokens.length ? formatTokens(totalTokens)! : '—'}
+          hint={
+            withTokens.length
+              ? `${withTokens.length} de ${runs.length} execuções informaram${withCost.length ? ` · ${formatCost(totalCost)}` : ' · custo não informado'}`
+              : 'Não informado pelos provedores'
+          }
+        />
       </div>
       <div className="activity-section">
         <div className="section-title-row">
@@ -67,7 +81,7 @@ export function ActivityPage({ runs, providers }: { runs: Run[]; providers: Boot
               <span>STATUS</span>
               <span>HORÁRIO</span>
               <span>DURAÇÃO</span>
-              <span>CUSTO</span>
+              <span>TOKENS / CUSTO</span>
             </div>
             {[...runs]
               .sort((a, b) => b.startedAt.localeCompare(a.startedAt))
@@ -92,7 +106,9 @@ export function ActivityPage({ runs, providers }: { runs: Run[]; providers: Boot
                     {shortDate(run.startedAt)} às {timeLabel(run.startedAt)}
                   </span>
                   <span>{run.durationMs == null ? '—' : formatDuration(run.durationMs)}</span>
-                  <span>{run.costUsd == null ? '—' : `$${run.costUsd.toFixed(4)}`}</span>
+                  <span title={run.costUsd == null ? 'Custo não informado pelo provedor' : undefined}>
+                    {[runTokens(run), formatCost(run.costUsd)].filter(Boolean).join(' · ') || '—'}
+                  </span>
                 </div>
               ))}
           </div>

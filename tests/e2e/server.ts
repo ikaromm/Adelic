@@ -73,6 +73,8 @@ const providers: ProviderRegistry = {
         await sleep(30, signal);
         emit({ type: 'delta', text: chunk });
       }
+      // Like Codex: token counts without a cost.
+      emit({ type: 'usage', inputTokens: 4606, outputTokens: 5 });
       return { text: chunks.join(''), stopReason: 'completed' };
     } catch (error) {
       if (signal.aborted) return { text: '', stopReason: 'cancelled' };

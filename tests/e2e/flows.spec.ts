@@ -200,3 +200,18 @@ test('searches every conversation and opens the match; exports the open one as M
   expect(text).toContain(`## Você`);
   expect(text).toContain(word);
 });
+
+test('shows tokens reported by the provider and leaves an unknown cost unknown', async ({ page }) => {
+  const input = await newConversation(page);
+  await input.fill('[normal] quanto custou?');
+  await input.press('Enter');
+  const activity = page.getByRole('region', { name: 'Atividade desta execução' }).last();
+  await expect(activity).toContainText('4,6 mil tokens');
+  await expect(activity).not.toContainText('US$');
+  await page
+    .getByRole('navigation', { name: 'Navegação principal' })
+    .getByRole('button', { name: 'Atividade' })
+    .click();
+  await expect(page.locator('.metric-card', { hasText: 'Tokens' })).toContainText('custo não informado');
+  await expect(page.locator('.run-table-row').first()).toContainText('4,6 mil entrada · 5 saída');
+});

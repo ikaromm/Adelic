@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { parseJsonRpcLine } from '../server/providers/process.js';
-import { DeltaParams, ItemParams, TurnParams, parseParams } from '../server/providers/codex-protocol.js';
+import {
+  DeltaParams,
+  ItemParams,
+  TokenUsageParams,
+  TurnParams,
+  parseParams,
+} from '../server/providers/codex-protocol.js';
 
 describe('JSON-RPC line parsing', () => {
   it('accepts requests, notifications and responses, with extra fields', () => {
@@ -40,5 +46,30 @@ describe('Codex notification params', () => {
     expect(parseParams(DeltaParams, { threadId: 't', delta: 5 })).toBeUndefined();
     expect(parseParams(ItemParams, { threadId: 't', item: { command: 'pwd' } })).toBeUndefined();
     expect(parseParams(TurnParams, { turn: {} })).toBeUndefined();
+  });
+});
+
+describe('Codex token usage', () => {
+  it('reads the last-turn counts as Codex 0.160 sends them', () => {
+    const params = {
+      threadId: 't',
+      turnId: 'u',
+      tokenUsage: {
+        total: {
+          totalTokens: 4611,
+          inputTokens: 4606,
+          cachedInputTokens: 0,
+          outputTokens: 5,
+          reasoningOutputTokens: 0,
+        },
+        last: { totalTokens: 4611, inputTokens: 4606, cachedInputTokens: 0, outputTokens: 5, reasoningOutputTokens: 0 },
+        modelContextWindow: 258400,
+      },
+    };
+    expect(parseParams(TokenUsageParams, params)?.tokenUsage.last).toMatchObject({
+      inputTokens: 4606,
+      outputTokens: 5,
+    });
+    expect(parseParams(TokenUsageParams, { threadId: 't', tokenUsage: { last: { inputTokens: -1 } } })).toBeUndefined();
   });
 });

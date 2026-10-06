@@ -53,8 +53,8 @@ jobs:
       - name: Format
         run: npm run format:check
 
-      - name: Test
-        run: npm test
+      - name: Test (with coverage floor for server/ and shared/)
+        run: npm run coverage
 
       - name: Build
         run: npm run build

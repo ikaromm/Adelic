@@ -42,6 +42,7 @@ export function externalEdit(w: string, p: string, path: string, body: string) {
   if (note) notes.set(key(w, p, path), { ...note, body });
 }
 
+/** Starts the fake service; port 0 picks a free one (read it from `server.address()`). */
 export function startFakeMemory(port: number) {
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://x');

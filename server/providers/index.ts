@@ -4,13 +4,18 @@ import { ClaudeProvider } from './claude';
 import { KiroProvider } from './kiro';
 import { OpenCodeProvider } from './opencode';
 
-export function createProviderRegistry(dataDir?: string): ProviderRegistry {
-  const providers = {
+type Provider = Pick<ProviderRegistry, 'run' | 'approve' | 'shutdown'> & { info(): Promise<ProviderInfo> };
+
+export function createProviderRegistry(
+  dataDir?: string,
+  // Injectable for tests; production uses the real runtimes.
+  providers: Record<ProviderId, Provider> = {
     codex: new CodexProvider(undefined, undefined, undefined, dataDir),
     claude: new ClaudeProvider(),
     kiro: new KiroProvider(),
     opencode: new OpenCodeProvider(),
-  };
+  },
+): ProviderRegistry {
   const approvalOwners = new Map<string, ProviderId>();
   let listing: Promise<ProviderInfo[]> | undefined;
   return {

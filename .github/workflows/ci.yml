@@ -214,17 +214,25 @@ jobs:
           echo /opt/node/bin >> "$GITHUB_PATH"
 
       - name: Smoke test
+        shell: bash
         run: |
           chmod +x release/Adelic-*-linux-x86_64.AppImage
           useradd -m tester
           chown -R tester release scripts package.json
-          # The smoke script prints the app's stderr on failure; keep a copy as an artifact too.
-          su tester -c "PATH=/opt/node/bin:\$PATH xvfb-run --auto-servernum --server-args='-screen 0 1280x800x24' node scripts/smoke-desktop.mjs \$(ls release/Adelic-*-linux-x86_64.AppImage)" 2>&1 | tee smoke.log
-          status="${PIPESTATUS[0]}"
-          # Surface the failure in the run's annotations (readable without signing in).
-          if [ "$status" != 0 ]; then echo "::error title=AppImage smoke ($(. /etc/os-release; echo "$PRETTY_NAME"))::$(tail -c 900 smoke.log | tr '\n' ' ')"; fi
-          exit "$status"
+          set +e
+          su tester -c "PATH=/opt/node/bin:\$PATH xvfb-run --auto-servernum --server-args='-screen 0 1280x800x24' node scripts/smoke-desktop.mjs \$(ls release/Adelic-*-linux-x86_64.AppImage)" > smoke.log 2>&1
+          status=$?
+          cat smoke.log
+          exit $status
+
+      # Annotations are readable without signing in, unlike logs and artifacts.
+      - name: Report failure
+        if: failure()
         shell: bash
+        run: |
+          os=$(. /etc/os-release; echo "$PRETTY_NAME")
+          msg=$(tail -c 1500 smoke.log 2>/dev/null | tr '\n\r' '  ' | sed 's/%/%25/g')
+          echo "::error title=AppImage smoke em $os::${msg:-sem saída}"
 
       - name: Smoke log
         if: failure()

@@ -215,3 +215,21 @@ test('shows tokens reported by the provider and leaves an unknown cost unknown',
   await expect(page.locator('.metric-card', { hasText: 'Tokens' })).toContainText('custo não informado');
   await expect(page.locator('.run-table-row').first()).toContainText('4,6 mil entrada · 5 saída');
 });
+
+test('creates a project from the dialog with a slugged memory id', async ({ page }) => {
+  await page.goto('/');
+  await page
+    .getByRole('button', { name: /Adicionar projeto|Novo projeto/ })
+    .first()
+    .click();
+  const dialog = page.getByRole('dialog', { name: 'Novo projeto' });
+  await dialog.getByRole('textbox', { name: 'Nome do projeto' }).fill('Meu Aplicativo Ágil');
+  await expect(dialog.getByRole('textbox', { name: 'Projeto na memória' })).toHaveValue('meu-aplicativo-agil');
+  await dialog.getByRole('textbox', { name: 'Caminho da pasta' }).fill('/nao/existe');
+  await dialog.getByRole('button', { name: 'Criar projeto' }).click();
+  await expect(dialog.locator('.form-error')).toBeVisible();
+  await dialog.getByRole('textbox', { name: 'Caminho da pasta' }).fill('/tmp');
+  await dialog.getByRole('button', { name: 'Criar projeto' }).click();
+  await expect(dialog).toBeHidden();
+  await expect(page.locator('.sidebar-projects').getByText('Meu Aplicativo Ágil').first()).toBeVisible();
+});

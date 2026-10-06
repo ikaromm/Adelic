@@ -6,7 +6,6 @@ import {
   ChevronRight,
   CircleHelp,
   Folder,
-  FolderPlus,
   LoaderCircle,
   MessageSquare,
   Plus,
@@ -49,6 +48,7 @@ import { useStickToBottom } from './hooks/useStickToBottom';
 import { projectOrchestration } from '../shared/contracts';
 import { ActivityPage } from './components/ActivityPage';
 import { ConversationSearch } from './components/ConversationSearch';
+import { ProjectForm, type NewProject } from './components/ProjectForm';
 import { MessageCard, RunActivityPanel, RunEventRow } from './components/Chat';
 import { SettingsPage } from './components/SettingsPage';
 import { SIDEBAR_LIMIT, SessionItem, SidebarNav, UpdateNotice, type Page } from './components/Sidebar';
@@ -72,11 +72,6 @@ export default function App() {
   const [helpOpen, setHelpOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [projectForm, setProjectForm] = useState(false);
-  const [projectName, setProjectName] = useState('');
-  const [projectPath, setProjectPath] = useState('');
-  const [projectMemoryWorkspace, setProjectMemoryWorkspace] = useState('pessoal');
-  const [projectMemoryProject, setProjectMemoryProject] = useState('');
-  const [projectMemoryProjectCustom, setProjectMemoryProjectCustom] = useState(false);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [projectQuery, setProjectQuery] = useState('');
   const [graphQueryResult, setGraphQueryResult] = useState<GraphifyQueryResult | null>(null);
@@ -411,32 +406,13 @@ export default function App() {
     },
   });
 
-  async function createProject(event: FormEvent) {
-    event.preventDefault();
+  async function createProject(fields: NewProject) {
     setBusy(true);
     setNotice('');
     try {
-      const projectSlug =
-        projectMemoryProject.trim() ||
-        projectName
-          .trim()
-          .toLowerCase()
-          .normalize('NFD')
-          .replace(/[\u0300-\u036f]/g, '')
-          .replace(/[^a-z0-9]+/g, '-')
-          .replace(/^-|-$/g, '');
-      const created = await api.createProject({
-        name: projectName.trim(),
-        path: projectPath.trim(),
-        memoryWorkspace: projectMemoryWorkspace.trim(),
-        memoryProject: projectSlug,
-      });
+      const created = await api.createProject(fields);
       invalidateBootstrapRefreshes();
       setProjectForm(false);
-      setProjectName('');
-      setProjectPath('');
-      setProjectMemoryProject('');
-      setProjectMemoryProjectCustom(false);
       await refreshBootstrap(false);
       selectProject(created.id);
       selectSession('');
@@ -1558,113 +1534,12 @@ export default function App() {
       </main>
 
       {projectForm && (
-        <div
-          className="modal-backdrop"
-          role="presentation"
-          onMouseDown={(event) => {
-            if (event.target === event.currentTarget) setProjectForm(false);
-          }}
-        >
-          <form
-            className="modal-card"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="project-form-title"
-            onSubmit={(event) => void createProject(event)}
-          >
-            <div className="modal-heading">
-              <div className="project-avatar" aria-hidden="true">
-                <FolderPlus size={17} />
-              </div>
-              <div>
-                <h2 id="project-form-title">Novo projeto</h2>
-                <p>Conecte uma pasta do seu computador.</p>
-              </div>
-              <button type="button" className="icon-button" aria-label="Fechar" onClick={() => setProjectForm(false)}>
-                <X size={17} />
-              </button>
-            </div>
-            <label>
-              Nome do projeto
-              <input
-                autoFocus
-                value={projectName}
-                onChange={(event) => {
-                  setProjectName(event.target.value);
-                  if (!projectMemoryProjectCustom)
-                    setProjectMemoryProject(
-                      event.target.value
-                        .toLowerCase()
-                        .normalize('NFD')
-                        .replace(/[\u0300-\u036f]/g, '')
-                        .replace(/[^a-z0-9]+/g, '-')
-                        .replace(/^-|-$/g, ''),
-                    );
-                }}
-                placeholder="Ex.: Meu aplicativo"
-                required
-              />
-            </label>
-            <label>
-              Caminho da pasta
-              <input
-                value={projectPath}
-                onChange={(event) => setProjectPath(event.target.value)}
-                placeholder="/home/voce/projetos/app"
-                required
-              />
-            </label>
-            <div className="memory-scope-modal">
-              <div>
-                <Brain size={14} /> Escopo de memória explícito
-              </div>
-              <label>
-                Workspace
-                <input
-                  value={projectMemoryWorkspace}
-                  onChange={(event) => setProjectMemoryWorkspace(event.target.value)}
-                  placeholder="pessoal"
-                  required
-                />
-              </label>
-              <label>
-                Projeto na memória
-                <input
-                  value={projectMemoryProject}
-                  onChange={(event) => {
-                    setProjectMemoryProject(event.target.value);
-                    setProjectMemoryProjectCustom(true);
-                  }}
-                  placeholder="identificador único"
-                  required
-                />
-              </label>
-              <small>O identificador começa pelo nome do projeto e pode ser ajustado.</small>
-            </div>
-            <div className="modal-note">
-              <Shield size={14} /> O agente usará esta pasta conforme a permissão definida.
-            </div>
-            {notice && <div className="form-error">{notice}</div>}
-            <div className="modal-actions">
-              <button type="button" className="secondary-button" onClick={() => setProjectForm(false)}>
-                Cancelar
-              </button>
-              <button
-                type="submit"
-                className="primary-button"
-                disabled={
-                  busy ||
-                  !projectName.trim() ||
-                  !projectPath.trim() ||
-                  !projectMemoryWorkspace.trim() ||
-                  !projectMemoryProject.trim()
-                }
-              >
-                {busy ? <LoaderCircle className="spin" size={15} /> : <Plus size={15} />} Criar projeto
-              </button>
-            </div>
-          </form>
-        </div>
+        <ProjectForm
+          busy={busy}
+          error={notice}
+          onSubmit={(fields) => void createProject(fields)}
+          onClose={() => setProjectForm(false)}
+        />
       )}
       {searchOpen && (
         <ConversationSearch

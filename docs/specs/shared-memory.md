@@ -10,7 +10,7 @@ A biblioteca usa somente o serviço ai-memory, nunca os arquivos dele. Assim fun
 
 - Endereço: `ADELIC_MEMORY_URL`, padrão `http://127.0.0.1:49374`. Só loopback (`127.0.0.1`, `localhost`, `::1`), sem credenciais, query ou fragmento na URL.
 - Token: quando o serviço usa `AI_MEMORY_AUTH_TOKEN` (comum em Docker), informe o mesmo valor em `ADELIC_MEMORY_TOKEN` ou num arquivo em `ADELIC_MEMORY_TOKEN_FILE`. Se nenhum for informado, `AI_MEMORY_AUTH_TOKEN` do ambiente é usado. O Adelic lê `ADELIC_MEMORY_TOKEN` ao iniciar e o remove do ambiente, para que os agentes não o herdem. O token vai como `Authorization: Bearer` em todas as chamadas e nunca aparece em logs ou respostas.
-- Capacidades usadas, verificadas no código e no binário do ai-memory 2.1.0 e 2.5.2:
+- Capacidades usadas, verificadas no código e no binário do ai-memory 2.1.0 e 2.5.2 (a CI roda os testes de integração contra as duas versões):
   - MCP `/mcp`: `memory_query` (busca restrita a `scopes:[{workspace,project}]`), `memory_read_page` (corpo e frontmatter) e `memory_write_page` (criação).
   - API `/api/v1`, somente leitura: `GET /projects` lista escopos e contagens; `GET /workspaces/{w}/projects/{p}/pages` lista as notas atuais; `GET .../pages/{path}` confirma se um caminho existe. Essa API exige `serve --enable-web`; a imagem Docker oficial e o serviço systemd deste computador já usam essa opção.
   - `POST /admin/write-page`: reescreve notas existentes.

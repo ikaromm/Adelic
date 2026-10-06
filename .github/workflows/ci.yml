@@ -53,21 +53,50 @@ jobs:
       - name: Format
         run: npm run format:check
 
-      # Real ai-memory for tests/integration-ai-memory.test.ts, pinned to the version
-      # this project validates against; the checksum is pinned here, not fetched.
-      - name: Install ai-memory 2.1.0
-        run: |
-          curl -fsSL -o /tmp/ai-memory.tgz https://github.com/akitaonrails/ai-memory/releases/download/v2.1.0/ai-memory-linux-x86_64.tar.gz
-          echo "b4d911f392fea7f151c9c1ff83521922417570e5104ffb02a5e82253afc877ac  /tmp/ai-memory.tgz" | sha256sum -c -
-          mkdir -p /tmp/ai-memory && tar xzf /tmp/ai-memory.tgz -C /tmp/ai-memory ./ai-memory
-          echo "AI_MEMORY_BIN=/tmp/ai-memory/ai-memory" >> "$GITHUB_ENV"
-          /tmp/ai-memory/ai-memory --version
-
       - name: Test
         run: npm test
 
       - name: Build
         run: npm run build
+
+  # Adelic's ai-memory client against every supported ai-memory release. Checksums are
+  # pinned here (copied from each release's .sha256), not fetched with the archive.
+  ai-memory:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - version: 2.1.0
+            sha256: b4d911f392fea7f151c9c1ff83521922417570e5104ffb02a5e82253afc877ac
+          - version: 2.5.2
+            sha256: acbf6ee84e744a9ab0a8e133a3eefbbb77811d6b4d0ca9a281e664358c1a1fc8
+    name: ai-memory ${{ matrix.version }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 26
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+
+      - name: Install ai-memory ${{ matrix.version }}
+        run: |
+          curl -fsSL -o /tmp/ai-memory.tgz "https://github.com/akitaonrails/ai-memory/releases/download/v${{ matrix.version }}/ai-memory-linux-x86_64.tar.gz"
+          echo "${{ matrix.sha256 }}  /tmp/ai-memory.tgz" | sha256sum -c -
+          mkdir -p /tmp/ai-memory && tar xzf /tmp/ai-memory.tgz -C /tmp/ai-memory ./ai-memory
+          /tmp/ai-memory/ai-memory --version
+
+      - name: Integration tests
+        run: npx vitest run tests/integration-ai-memory.test.ts
+        env:
+          AI_MEMORY_BIN: /tmp/ai-memory/ai-memory
 
   e2e:
     runs-on: ubuntu-24.04

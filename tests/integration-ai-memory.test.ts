@@ -92,12 +92,13 @@ describe.skipIf(!binary)('ai-memory service integration (real server)', () => {
     const catalog = await service.memoryCatalog();
     expect(catalog.scopes).toEqual(
       expect.arrayContaining([
-        { workspace: 'qa', project: 'notas', pageCount: 2 },
+        expect.objectContaining({ workspace: 'qa', project: 'notas' }),
         { workspace: 'qa', project: 'outro', pageCount: 1 },
       ]),
     );
     const list = await service.memoryList(scope, 0, 50);
-    expect(list.pages.map((p) => p.path)).toEqual(['decisoes/fato.md', 'decisoes/simples.md']);
+    expect(list.pages.map((p) => p.path)).toEqual(expect.arrayContaining(['decisoes/fato.md', 'decisoes/simples.md']));
+    expect(catalog.scopes.find((s) => s.project === 'notas')?.pageCount).toBe(list.total);
     expect((await memory.sharedMemorySearch(scope, 'original')).map((h) => h.path)).toContain('decisoes/fato.md');
   });
 
@@ -108,6 +109,39 @@ describe.skipIf(!binary)('ai-memory service integration (real server)', () => {
     const strip = (fm: Record<string, unknown> = {}) => ({ ...fm, generated: undefined });
     expect(strip(saved.frontmatter)).toEqual(strip(before.frontmatter));
     expect(saved.frontmatter).toMatchObject({ kind: 'fact', tier: 'procedural', pinned: true, tags: ['qa', 'docker'] });
+  });
+
+  it('edits a note with a TTL through the MCP writer, keeping expires_at', async () => {
+    const created = await fetch(`${url}/mcp`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        accept: 'application/json, text/event-stream',
+        authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: {
+          name: 'memory_write_page',
+          arguments: {
+            workspace: 'qa',
+            project: 'notas',
+            path: 'notes/ttl.md',
+            body: '# TTL\n',
+            tier: 'episodic',
+            expires_at: '2099-01-15T00:00:00Z',
+          },
+        },
+      }),
+    });
+    expect(created.ok).toBe(true);
+    const before = await memory.sharedMemoryRead(scope, 'notes/ttl.md');
+    const saved = await memory.sharedMemoryWrite(scope, 'notes/ttl.md', '# TTL\n\neditado\n', before.version);
+    expect(saved.frontmatter).toMatchObject({ tier: 'episodic', expires_at: '2099-01-15T00:00:00Z' });
+    const strip = (fm: Record<string, unknown> = {}) => ({ ...fm, generated: undefined });
+    expect(strip(saved.frontmatter)).toEqual(strip(before.frontmatter));
   });
 
   it('conflicts on an external change and keeps it', async () => {

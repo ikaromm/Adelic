@@ -159,7 +159,7 @@ function createWindow(iconPath: string) {
     minWidth: 860,
     minHeight: 620,
     show: false,
-    backgroundColor: '#0b0d12',
+    backgroundColor: '#0f1015',
     darkTheme: true,
     autoHideMenuBar: true,
     ...(existsSync(iconPath) ? { icon: iconPath } : {}),

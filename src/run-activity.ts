@@ -62,6 +62,21 @@ export function actionNeedsDisclosure(event: RunEvent): boolean {
   return event.toolName === 'commandExecution' || event.text.length > 160;
 }
 
+/** One-line preview of an action; shell commands lose the `bash -lc '…'` wrapper added by runtimes. */
+export function commandPreview(text: string, maxLength = 240): string {
+  const trimmed = text.trim();
+  const wrapped = trimmed.match(/^(?:\S*\/)?(?:bash|sh|zsh)\s+-l?c\s+(['"])([\s\S]*)\1$/);
+  let inner = trimmed;
+  if (wrapped) {
+    const [, quote, body] = wrapped;
+    // Unwrap only when the quotes form one shell word; otherwise show the command as received.
+    if (quote === "'" && !body.replaceAll(`'\\''`, '').includes("'")) inner = body.replaceAll(`'\\''`, "'");
+    if (quote === '"' && !/(^|[^\\])"/.test(body)) inner = body.replace(/\\(["\\$`])/g, '$1');
+  }
+  const line = inner.split('\n').map((item) => item.trim()).find(Boolean) || '';
+  return line.length > maxLength ? `${line.slice(0, maxLength - 1)}…` : line;
+}
+
 export function statusLabel(status?: string): string {
   if (!status) return 'Registrada';
   if (isActionInProgress(status)) return 'Em andamento';

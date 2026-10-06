@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { DelegatedTask, RunEvent } from '../shared/contracts';
-import { activityForRun, activityIsVisible, actionNeedsDisclosure, runStatusLabel, statusLabel } from '../src/run-activity';
+import { activityForRun, activityIsVisible, actionNeedsDisclosure, commandPreview, runStatusLabel, statusLabel } from '../src/run-activity';
 
 const task = (id: string, runId: string): DelegatedTask => ({ id, runId, sessionId: 's', projectId: null, role: 'worker', title: id, instructions: '', scope: [], dependsOn: [], providerId: 'codex', status: 'completed', createdAt: '2026-10-01T00:00:00Z' });
 const event = (id: string, runId: string, type: RunEvent['type'], status?: string, text = 'npm test'): RunEvent => ({ id, runId, sessionId: 's', type, status, toolName: type === 'tool' ? 'commandExecution' : undefined, text, createdAt: `2026-10-01T00:00:0${id.slice(-1)}Z` });
@@ -51,5 +51,19 @@ describe('conversation activity grouping', () => {
     expect(actionNeedsDisclosure(event('short-1', 'r', 'tool', 'completed', 'ls'))).toBe(true);
     expect(actionNeedsDisclosure({ ...event('short-2', 'r', 'tool', 'completed', 'arquivo alterado'), toolName: 'fileChange' })).toBe(false);
     expect(actionNeedsDisclosure({ ...event('long-3', 'r', 'tool', 'completed', 'x'.repeat(161)), toolName: 'mcpToolCall' })).toBe(true);
+  });
+
+  it('previews the command itself on one line, without the runtime shell wrapper', () => {
+    expect(commandPreview(`/usr/bin/bash -lc 'grep -n "routeMessage" server/router.ts'`)).toBe('grep -n "routeMessage" server/router.ts');
+    expect(commandPreview('bash -lc "git diff --check; echo \\"ok\\""')).toBe('git diff --check; echo "ok"');
+    expect(commandPreview('sh -c \'npm test\nnpm run build\'')).toBe('npm test');
+    expect(commandPreview('npm run typecheck')).toBe('npm run typecheck');
+    expect(commandPreview(`bash -lc 'cat a' && rm -rf b`)).toBe(`bash -lc 'cat a' && rm -rf b`);
+    expect(commandPreview(`bash -lc 'cat a' && echo 'x'`)).toBe(`bash -lc 'cat a' && echo 'x'`);
+    expect(commandPreview(`bash -lc 'echo '\\''oi'\\'''`)).toBe(`echo 'oi'`);
+    expect(commandPreview(`bash -lc "a" && echo "b"`)).toBe(`bash -lc "a" && echo "b"`);
+    const long = commandPreview(`bash -lc '${'x'.repeat(400)}'`);
+    expect(long).toHaveLength(240);
+    expect(long.endsWith('…')).toBe(true);
   });
 });

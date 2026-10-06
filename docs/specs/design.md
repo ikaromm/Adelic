@@ -53,4 +53,4 @@ Estado implementado: Codex app-server é separado por diretório e política de 
 
 ## Aparência
 
-Workspace claro com sidebar grafite, acento azul índigo discreto, tipografia de sistema refinada, espaçamento amplo, divisórias sutis e cards enxutos. Evitar aspecto genérico de painel com dezenas de badges. Estado inicial útil, sugestões de perguntas, seletor visível do caminho rápido/completo, toolbar compacta. Activity, Memória e Configurações são páginas funcionais. Responsivo a partir de 360px, navegação por teclado e labels acessíveis.
+Tema escuro único, inspirado no Dracula e um pouco mais escuro, com interação baseada no T3 Code: barra lateral mais escura que o chat, mensagens do usuário em bolha e respostas em texto corrido, atividade do turno compacta, campo de mensagem arredondado com controles em pílulas e menus ancorados. Tokens, contraste, tipografia e aceite em [tema e interface](visual-theme.md). Evitar aspecto genérico de painel com dezenas de badges. Activity, Memória e Configurações são páginas funcionais. Responsivo a partir de 360px, navegação por teclado e labels acessíveis.

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Project, Session } from '../shared/contracts.js';
-import { bootstrapSelection } from '../src/selection.js';
+import { bootstrapSelection, sidebarSessions } from '../src/selection.js';
 
 const projects = [{ id: 'a' }, { id: 'b' }] as Project[];
 const sessions = [
@@ -46,5 +46,28 @@ describe('bootstrap selection after an async refresh', () => {
 
   it('does not pair a project with a conversation from another project', () => {
     expect(bootstrapSelection({ projects, sessions }, 'b', 'a1', true)).toEqual({ projectId: 'a', sessionId: 'a1' });
+  });
+});
+
+describe('sidebar conversation list', () => {
+  const list = Array.from({ length: 9 }, (_, index) => ({ id: `s${index}`, updatedAt: `2026-10-0${index + 1}T10:00:00Z` }));
+
+  it('orders by recent activity and reports how many are hidden', () => {
+    const { items, hidden } = sidebarSessions(list, 6, false, '');
+    expect(items.map((item) => item.id)).toEqual(['s8', 's7', 's6', 's5', 's4', 's3']);
+    expect(hidden).toBe(3);
+  });
+
+  it('keeps the selected conversation visible even when it is older than the limit', () => {
+    const { items, hidden } = sidebarSessions(list, 6, false, 's0');
+    expect(items.map((item) => item.id)).toEqual(['s8', 's7', 's6', 's5', 's4', 's3', 's0']);
+    expect(hidden).toBe(2);
+  });
+
+  it('shows everything when expanded or under the limit, without mutating the input', () => {
+    const before = list.map((item) => item.id);
+    expect(sidebarSessions(list, 6, true, '').items).toHaveLength(9);
+    expect(sidebarSessions(list.slice(0, 4), 6, false, 's1')).toMatchObject({ hidden: 0 });
+    expect(list.map((item) => item.id)).toEqual(before);
   });
 });

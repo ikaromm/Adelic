@@ -1,24 +1,24 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import {
-  Activity, ArrowDown, ArrowUp, Bot, Check, ChevronDown, CircleHelp, Clock3, Code2,
+  Activity, ArrowDown, ArrowUp, Bot, Check, ChevronDown, ChevronRight, CircleHelp, Clock3, Code2,
   Command, FileText, Folder, FolderPlus, Gauge, History, Layers3, LoaderCircle,
   GitBranch, MessageSquare, Plus, RefreshCw, Search, Settings as SettingsIcon, Shield, Sparkles, Square,
   X, Zap, Brain, PanelLeftClose, PanelLeftOpen, Menu,
 } from 'lucide-react';
-import type { Bootstrap, DelegatedTask, GraphifyQueryResult, GraphifyStatus, Message, Mode, OrchestrationConfig, Project, ProjectCoordination, Run, Session, SessionDetail, StreamEvent, Thinking } from '../shared/contracts';
+import type { Bootstrap, DelegatedTask, GraphifyQueryResult, GraphifyStatus, Message, OrchestrationConfig, Project, ProjectCoordination, Run, Session, SessionDetail, StreamEvent } from '../shared/contracts';
 import { api } from './api';
 import SharedMemoryPage from './MemoryPage';
-import { bootstrapSelection } from './selection';
-import { activityForRun, activityIsVisible, actionNeedsDisclosure, commandTitle, runStatusLabel, statusLabel } from './run-activity';
+import { bootstrapSelection, sidebarSessions } from './selection';
+import { activityForRun, activityIsVisible, actionNeedsDisclosure, commandPreview, commandTitle, runStatusLabel, statusLabel } from './run-activity';
 import { compatibleThinking, supportedThinking, thinkingLabel } from './reasoning';
-import { ChoiceMenu, ModelMenu } from './ComposerMenus';
+import { ChoiceMenu, ConversationMenu, ModelMenu } from './ComposerMenus';
+import { CopyButton, Markdown } from './Markdown';
+import { formatDuration, newConversationShortcut, relativeTime } from './format';
+import { useNow } from './useNow';
 import { projectOrchestration } from '../shared/contracts';
 
 type Page = 'chat' | 'activity' | 'memory' | 'settings';
 type LocalStream = { runId: string; messageId: string; content: string };
-const MODE_LABELS: Record<Mode, string> = { auto: 'Auto', fast: 'Rápido', deep: 'Completo' };
 
 function timeLabel(value?: string) {
   if (!value) return '—';
@@ -58,7 +58,12 @@ export default function App() {
   const [projectBusy, setProjectBusy] = useState(false);
   const [taskOutputs, setTaskOutputs] = useState<Record<string, string | null>>({});
   const [loadingTaskOutputs, setLoadingTaskOutputs] = useState<Set<string>>(() => new Set());
-  const bottomRef = useRef<HTMLDivElement>(null);
+  const conversationRef = useRef<HTMLElement>(null);
+  const stickToBottomRef = useRef(true);
+  const focusComposerRef = useRef(false);
+  const [showJump, setShowJump] = useState(false);
+  const [expandedLists, setExpandedLists] = useState<Record<string, boolean>>({});
+  const now = useNow(60_000);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const activeRunIdRef = useRef<string | undefined>(undefined);
   const bootstrapRequestRef = useRef(0);
@@ -226,7 +231,21 @@ export default function App() {
     return () => events.close();
   }, [refreshBootstrap, refreshDetail, refreshProjectViews, selectedSession]);
 
-  useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }); }, [detail?.messages.length, stream?.content]);
+  // Follow new content only while the reader is at the end; reading history is never interrupted.
+  // Approvals, tasks and error rows count as new content too, not only messages and streamed text.
+  const pendingApprovalCount = detail?.approvals.filter((item) => item.status === 'pending').length ?? 0;
+  useLayoutEffect(() => { stickToBottomRef.current = true; setShowJump(false); }, [selectedSession, page]);
+  useLayoutEffect(() => {
+    const element = conversationRef.current;
+    if (element && stickToBottomRef.current) element.scrollTop = element.scrollHeight;
+  }, [detail?.messages.length, detail?.session.id, detail?.tasks?.length, detail?.events.length, pendingApprovalCount, stream?.content, selectedSession, page]);
+  const onConversationScroll = () => {
+    const element = conversationRef.current;
+    if (!element) return;
+    const atBottom = element.scrollHeight - element.scrollTop - element.clientHeight < 96;
+    stickToBottomRef.current = atBottom;
+    setShowJump(!atBottom);
+  };
 
   const project = data?.projects.find((p) => p.id === selectedProject);
   const currentDetail = detail?.session.id === selectedSession ? detail : null;
@@ -245,6 +264,21 @@ export default function App() {
   const messages = currentDetail?.messages || [];
   const activityEvents = currentDetail?.events || [];
   const activityTasks = currentDetail?.tasks || [];
+
+  // Grow the message field with its content; CSS caps the height and scrolls beyond it.
+  useLayoutEffect(() => {
+    const element = composerRef.current;
+    if (!element) return;
+    element.style.height = 'auto';
+    element.style.height = `${element.scrollHeight}px`;
+  }, [composer, selectedSession, page, session?.activeRunId]);
+  useEffect(() => {
+    if (!focusComposerRef.current || page !== 'chat') return;
+    const element = composerRef.current;
+    if (!element || element.disabled) return;
+    focusComposerRef.current = false;
+    element.focus();
+  }, [selectedSession, page, currentDetail?.session.id]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -277,6 +311,7 @@ export default function App() {
       const created = await api.createSession({ projectId, providerId: data.settings.defaultProviderId, mode: data.settings.defaultMode });
       invalidateBootstrapRefreshes();
       setData((current) => current ? { ...current, sessions: [created, ...current.sessions] } : current);
+      focusComposerRef.current = true;
       selectProject(created.projectId || ''); selectSession(created.id); setPage('chat'); setSidebarOpen(false);
     } catch (error) { setNotice((error as Error).message); } finally { setBusy(false); }
   }
@@ -302,6 +337,7 @@ export default function App() {
     pendingSendRef.current = pendingSend;
     setPendingSendSession(sessionId);
     setDrafts((current) => ({ ...current, [sessionId]: '' })); setBusy(true); setNotice('');
+    stickToBottomRef.current = true; setShowJump(false);
     const optimistic: Message = { id: `local-${crypto.randomUUID()}`, sessionId, role: 'user', content, createdAt: new Date().toISOString() };
     setDetail((current) => current?.session.id === sessionId ? { ...current, messages: [...current.messages, optimistic] } : current);
     let accepted = false;
@@ -504,96 +540,118 @@ export default function App() {
 
   const createTitle = (text: string) => text.trim().split(/\s+/).slice(0, 6).join(' ') || 'Nova conversa';
 
+  const shortcut = newConversationShortcut();
+  const memoryIntegration = data?.integrations.find((item) => item.kind === 'memory');
+  const memoryStatus = memoryIntegration?.status === 'ready' ? 'conectada' : memoryIntegration?.status === 'planned' ? 'verificando' : 'indisponível';
+  const detachedList = sidebarSessions(detachedSessions, SIDEBAR_LIMIT, Boolean(expandedLists.detached), selectedSession);
+  const projectList = sidebarSessions(projectSessions, SIDEBAR_LIMIT, Boolean(expandedLists[selectedProject]), selectedSession);
+  const latestSession = (projectId: string) => sidebarSessions((data?.sessions || []).filter((item) => item.projectId === projectId), 1, false, '').items[0];
+  const goTo = (next: Page) => { if (next === 'memory') setMemoryVisited(true); setPage(next); setSidebarOpen(false); };
+  const openConversation = (id: string) => { selectConversation(id); setPage('chat'); setSidebarOpen(false); };
+  const toggleList = (key: string, expanded: boolean) => setExpandedLists((current) => ({ ...current, [key]: expanded }));
+  const conversationContext = conversationProject ? conversationProject.orchestration?.enabled === false ? 'Execução direta, sem delegação.' : `Orquestração ativa: ${provider?.name || 'agente da conversa'} coordena tarefas com contexto enxuto.` : 'Conversa avulsa: sem contexto ou configuração de projeto.';
+  const pageTitle = page === 'chat' ? (session ? conversationProject?.name || 'Conversa avulsa' : project?.name || 'Conversas') : page === 'activity' ? 'Atividade' : page === 'memory' ? 'Memória' : 'Configurações';
+  const scrollToLatest = () => {
+    const element = conversationRef.current;
+    if (!element) return;
+    stickToBottomRef.current = true;
+    setShowJump(false);
+    const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+    element.scrollTo({ top: element.scrollHeight, behavior: reduceMotion ? 'auto' : 'smooth' });
+  };
+
   return <div className={`app-shell ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
-    <aside className={`sidebar ${sidebarOpen ? 'sidebar-mobile-open' : ''}`}>
-      <div className="brand-row">
-        <div className="brand-mark"><span>A</span></div><span className="brand-name">adelic</span>
-        <button className="icon-button sidebar-collapse" aria-label="Recolher navegação" onClick={() => setSidebarCollapsed(!sidebarCollapsed)}><PanelLeftClose size={16} /></button>
+    <aside className={`sidebar ${sidebarOpen ? 'sidebar-mobile-open' : ''}`} aria-label="Barra lateral">
+      <div className="sidebar-header">
+        <div className="brand"><span className="brand-mark" aria-hidden="true">A</span><span className="brand-name">adelic</span></div>
+        <button className="icon-button sidebar-collapse" aria-label={sidebarCollapsed ? 'Expandir navegação' : 'Recolher navegação'} title={sidebarCollapsed ? 'Expandir navegação' : 'Recolher navegação'} aria-expanded={!sidebarCollapsed} onClick={() => setSidebarCollapsed(!sidebarCollapsed)}>{sidebarCollapsed ? <PanelLeftOpen size={16} /> : <PanelLeftClose size={16} />}</button>
+        <button className="icon-button sidebar-close" aria-label="Fechar navegação" title="Fechar navegação" onClick={() => setSidebarOpen(false)}><X size={16} /></button>
       </div>
-      <button className="new-chat-button" onClick={() => void newConversation()} disabled={busy}>
-        <Plus size={17} /><span>Nova conversa</span><kbd>⌘ K</kbd>
+      <button className="new-chat-button" title={`Nova conversa (${shortcut})`} onClick={() => void newConversation()} disabled={busy}>
+        <Plus size={16} /><span className="sidebar-label">Nova conversa</span><kbd>{shortcut}</kbd>
       </button>
-      <div className="sidebar-section-label">ESPAÇO DE TRABALHO</div>
-      <nav className="main-nav" aria-label="Navegação principal">
-        <button className={page === 'activity' ? 'nav-item active' : 'nav-item'} onClick={() => { setPage('activity'); setSidebarOpen(false); }}><Activity size={16} /><span>Atividade</span></button>
-        <button className={page === 'memory' ? 'nav-item active' : 'nav-item'} onClick={() => { setMemoryVisited(true); setPage('memory'); setSidebarOpen(false); }}><Brain size={16} /><span>Memória</span></button>
-        <button className={page === 'settings' ? 'nav-item active' : 'nav-item'} onClick={() => { setPage('settings'); setSidebarOpen(false); }}><SettingsIcon size={16} /><span>Configurações</span></button>
+      <div className="sidebar-scroll">
+        <section className="sidebar-section sidebar-detached" aria-labelledby="sidebar-detached-title">
+          <div className="sidebar-section-heading"><h2 id="sidebar-detached-title" className="sidebar-label">Conversas avulsas</h2></div>
+          <div className="session-list detached-conversations">
+            {detachedList.items.map((itemSession) => <SessionItem key={itemSession.id} session={itemSession} selected={itemSession.id === selectedSession} now={now} onSelect={() => openConversation(itemSession.id)} />)}
+            {detachedList.hidden > 0 && <button type="button" className="sidebar-more" onClick={() => toggleList('detached', true)}>Mostrar mais ({detachedList.hidden})</button>}
+            {expandedLists.detached && detachedSessions.length > SIDEBAR_LIMIT && <button type="button" className="sidebar-more" onClick={() => toggleList('detached', false)}>Mostrar menos</button>}
+            {detachedSessions.length === 0 && <p className="sidebar-empty">Nenhuma conversa avulsa.</p>}
+          </div>
+        </section>
+        <section className="sidebar-section sidebar-projects" aria-labelledby="sidebar-projects-title">
+          <div className="sidebar-section-heading"><h2 id="sidebar-projects-title" className="sidebar-label">Projetos</h2><button className="icon-button sidebar-add" aria-label="Adicionar projeto" title="Adicionar projeto" onClick={() => setProjectForm(true)}><Plus size={15} /></button></div>
+          <div className="project-list">
+            {data?.projects.map((item) => {
+              const expanded = item.id === selectedProject;
+              return <div key={item.id} className="project-group">
+                <div className={`project-row ${expanded ? 'selected' : ''}`}>
+                  <button className="project-item" aria-expanded={expanded} title={item.name} onClick={() => { const latest = latestSession(item.id); selectProject(item.id); selectSession(latest?.id || ''); setPage('chat'); }}>
+                    <Folder size={15} className="project-icon" aria-hidden="true" /><span className="sidebar-label">{item.name}</span><ChevronRight size={14} className="project-chevron" aria-hidden="true" />
+                  </button>
+                  <button className="project-new-chat" aria-label={`Nova conversa em ${item.name}`} title={`Nova conversa em ${item.name}`} disabled={busy} onClick={() => void newConversation(item.id)}><Plus size={14} /></button>
+                </div>
+                {expanded && projectSessions.length > 0 && <div className="session-list">
+                  {projectList.items.map((itemSession) => <SessionItem key={itemSession.id} session={itemSession} selected={itemSession.id === selectedSession} now={now} onSelect={() => openConversation(itemSession.id)} />)}
+                  {projectList.hidden > 0 && <button type="button" className="sidebar-more" onClick={() => toggleList(item.id, true)}>Mostrar mais ({projectList.hidden})</button>}
+                  {expandedLists[item.id] && projectSessions.length > SIDEBAR_LIMIT && <button type="button" className="sidebar-more" onClick={() => toggleList(item.id, false)}>Mostrar menos</button>}
+                </div>}
+              </div>;
+            })}
+            {data?.projects.length === 0 && <p className="sidebar-empty">Nenhum projeto cadastrado.</p>}
+          </div>
+        </section>
+      </div>
+      <nav className="sidebar-footer" aria-label="Navegação principal">
+        <button className={`nav-item ${page === 'activity' ? 'active' : ''}`} aria-current={page === 'activity' ? 'page' : undefined} title="Atividade" onClick={() => goTo('activity')}><Activity size={16} aria-hidden="true" /><span className="sidebar-label">Atividade</span></button>
+        <button className={`nav-item ${page === 'memory' ? 'active' : ''}`} aria-current={page === 'memory' ? 'page' : undefined} title={`Memória · ${memoryStatus}`} onClick={() => goTo('memory')}><Brain size={16} aria-hidden="true" /><span className="sidebar-label">Memória</span><span className={`nav-status ${memoryIntegration?.status === 'ready' ? 'ready' : 'muted'}`} aria-hidden="true" /><span className="visually-hidden">, {memoryStatus}</span></button>
+        <button className={`nav-item ${page === 'settings' ? 'active' : ''}`} aria-current={page === 'settings' ? 'page' : undefined} title="Configurações" onClick={() => goTo('settings')}><SettingsIcon size={16} aria-hidden="true" /><span className="sidebar-label">Configurações</span></button>
       </nav>
-      <div className="sidebar-group-heading"><span>CONVERSAS AVULSAS</span></div>
-      <div className="session-list detached-conversations">
-        {detachedSessions.map((itemSession) => <button key={itemSession.id} className={`session-item ${itemSession.id === selectedSession ? 'selected' : ''}`} onClick={() => { selectConversation(itemSession.id); setPage('chat'); setSidebarOpen(false); }}><MessageSquare size={13} /><span>{itemSession.title || 'Nova conversa'}</span></button>)}
-        {detachedSessions.length === 0 && <p className="sidebar-empty">Sem conversas avulsas.</p>}
-      </div>
-      <div className="sidebar-group-heading"><span>PROJETOS</span><button className="subtle-icon" aria-label="Adicionar projeto" onClick={() => setProjectForm(true)}><Plus size={15} /></button></div>
-      <div className="project-list">
-        {data?.projects.map((item) => <div key={item.id} className="project-wrap">
-          <div className="project-row"><button className={`project-item ${item.id === selectedProject ? 'selected' : ''}`} onClick={() => { const firstSession = data.sessions.find((s) => s.projectId === item.id); selectProject(item.id); selectSession(firstSession?.id || ''); setPage('chat'); }}>
-            <Folder size={15} /><span>{item.name}</span><ChevronDown size={13} className="project-chevron" />
-          </button><button className="project-new-chat" aria-label={`Nova conversa em ${item.name}`} title={`Nova conversa em ${item.name}`} disabled={busy} onClick={() => void newConversation(item.id)}><Plus size={14} /></button></div>
-          {item.id === selectedProject && projectSessions.length > 0 && <div className="session-list">
-            {projectSessions.map((itemSession) => <button key={itemSession.id} className={`session-item ${itemSession.id === selectedSession ? 'selected' : ''}`} onClick={() => { selectConversation(itemSession.id); setPage('chat'); setSidebarOpen(false); }}><MessageSquare size={13} /><span>{itemSession.title || 'Nova conversa'}</span></button>)}
-          </div>}
-        </div>)}
-        {data?.projects.length === 0 && <p className="sidebar-empty">Nenhum projeto cadastrado.</p>}
-      </div>
-      <div className="sidebar-bottom">
-        <div className="integration-status"><span className={`status-dot ${data?.integrations.some((item) => item.kind === 'memory' && item.status === 'ready') ? 'green' : 'muted'}`} /><span>Memória</span><span className="status-caption">{data?.integrations.find((item) => item.kind === 'memory')?.status === 'ready' ? 'conectada' : data?.integrations.find((item) => item.kind === 'memory')?.status === 'planned' ? 'verificando' : 'indisponível'}</span></div>
-        <div className="user-profile"><div className="avatar-small">I</div><div className="profile-copy"><strong>Workspace local</strong><span>somente neste computador</span></div><button className="subtle-icon" aria-label="Ajuda" onClick={() => setHelpOpen(true)}><CircleHelp size={16} /></button></div>
-      </div>
     </aside>
     {sidebarOpen && <button className="mobile-scrim" aria-label="Fechar navegação" onClick={() => setSidebarOpen(false)} />}
 
     <main className="main-area">
       <header className="topbar">
-        <div className="topbar-left"><button className="icon-button mobile-menu" aria-label="Abrir navegação" onClick={() => setSidebarOpen(true)}><Menu size={19} /></button><div className="breadcrumbs"><span>{page === 'chat' ? (session ? conversationProject?.name || 'Conversa avulsa' : project?.name || 'Conversas') : page === 'activity' ? 'Atividade' : page === 'memory' ? 'Memória' : 'Configurações'}</span>{page === 'chat' && session && <><span className="crumb-separator">/</span><strong>{session.title || 'Nova conversa'}</strong></>}</div></div>
-        <div className="topbar-right"><div className="local-badge"><span className="status-dot green" />Local</div><button className="icon-button help-button" aria-label="Ajuda" onClick={() => setHelpOpen(true)}><CircleHelp size={18} /></button></div>
+        <div className="topbar-left"><button className="icon-button mobile-menu" aria-label="Abrir navegação" onClick={() => setSidebarOpen(true)}><Menu size={18} /></button><div className="breadcrumbs"><span className="crumb">{pageTitle}</span>{page === 'chat' && session && <><span className="crumb-separator" aria-hidden="true">/</span><strong title={session.title || 'Nova conversa'}>{session.title || 'Nova conversa'}</strong></>}</div></div>
+        <div className="topbar-right"><span className="local-badge" title="Executa neste computador; o servidor escuta somente em 127.0.0.1"><span className="status-dot ready" aria-hidden="true" />Local</span><button className="icon-button help-button" aria-label="Ajuda" title="Ajuda" onClick={() => setHelpOpen(true)}><CircleHelp size={17} /></button></div>
       </header>
 
-      {!data && <div className="loading-screen"><LoaderCircle className="spin" size={24} /><span>Conectando ao Adelic…</span>{notice && <p className="error-text">{notice}</p>}</div>}
-      {data && page === 'chat' && <>
-        {!session ? <div className="welcome-view">
-          <div className="welcome-orb"><Sparkles size={24} /></div><div className="eyebrow">SEU ESPAÇO DE TRABALHO</div><h1>O que vamos construir hoje?</h1><p>Comece sem uma pasta ou escolha um projeto depois.</p>
-          <button className="primary-button" onClick={() => void newConversation()} disabled={busy}><Plus size={17} /> Começar uma conversa</button>
-          <div className="welcome-suggestions">{['Resuma uma ideia para mim', 'Encontre um caminho para começar', 'Revise uma ideia que estou explorando'].map((suggestion) => <button key={suggestion} onClick={() => void startSuggestedPrompt(suggestion)} disabled={busy}>{suggestion}<ArrowUp size={14} /></button>)}</div>
-        </div> : <>
-          <section className="conversation" aria-label="Conversa">
-            <div className="message-column">
-              {messages.length === 0 && !stream && <div className="conversation-empty"><div className="empty-icon"><MessageSquare size={19} /></div><h2>Uma boa conversa começa com uma pergunta.</h2><p>{conversationProject ? <>O agente usa o contexto de <strong>{conversationProject.name}</strong> quando necessário.</> : 'Você pode conversar livremente ou anexar um projeto nas opções da conversa.'}</p><div className="prompt-chips">{(conversationProject ? ['Explique a estrutura deste projeto', 'Quais são os próximos passos?', 'Me ajude a resolver um problema'] : ['Explique o que é recursão', 'Me ajude a organizar uma ideia', 'Me ajude a resolver um problema']).map((text) => <button key={text} onClick={() => void sendMessage(text)}>{text}<ArrowUp size={13} /></button>)}</div></div>}
-              {messages.filter((message) => message.id !== stream?.messageId).map((message) => <div className="timeline-message" key={message.id}><MessageCard message={message} providerName={data.providers.find((p) => p.id === (message.providerId || session.providerId))?.name || 'Adelic'} />{message.role === 'user' && message.runId && <RunActivityPanel runId={message.runId} runStatus={currentDetail?.runs.find((run) => run.id === message.runId)?.status} tasks={activityTasks} events={activityEvents} providers={data.providers} active={session.activeRunId === message.runId} taskOutputs={taskOutputs} loadingTaskOutputs={loadingTaskOutputs} onLoadTaskOutput={loadTaskOutput} />}</div>)}
-              {stream && <div className="message-row assistant-row"><div className="assistant-avatar"><Sparkles size={15} /></div><div className="message-body"><div className="message-author">{provider?.name || 'Agente'} <span className="streaming-label"><i /> escrevendo</span></div><div className="markdown-content"><ReactMarkdown remarkPlugins={[remarkGfm]}>{stream.content || ' '}</ReactMarkdown>{!stream.content && <span className="typing-caret" />}</div></div></div>}
-              {activityEvents.filter((item) => item.type === 'error' && !messages.some((message) => message.role === 'user' && message.runId === item.runId)).map((item) => <RunEventRow key={item.id} event={item} />)}
-              {currentDetail?.approvals.filter((item) => item.status === 'pending').map((approval) => <div className="approval-card" key={approval.id}><div className="approval-icon"><Shield size={17} /></div><div className="approval-copy"><strong>{approval.title || 'Aprovação necessária'}</strong><p>{approval.detail}</p><span>{approval.kind === 'command' ? 'Comando' : approval.kind === 'file' ? 'Arquivo' : 'Ferramenta'} · confirme esta ação para continuar</span></div><div className="approval-actions"><button className="secondary-button" onClick={() => void api.approve(approval.id, 'deny').then(() => refreshDetail(session.id)).catch((e: Error) => setNotice(e.message))}>Negar</button><button className="primary-button compact" onClick={() => void api.approve(approval.id, 'approve').then(() => refreshDetail(session.id)).catch((e: Error) => setNotice(e.message))}><Check size={14} /> Aprovar</button></div></div>)}
-              <div ref={bottomRef} />
-            </div>
-          </section>
-          <div className="composer-wrap">
-            {notice && <div className="inline-notice error-notice"><span>{notice}</span><button className="subtle-icon" onClick={() => setNotice('')} aria-label="Dispensar aviso"><X size={15} /></button></div>}
-            {activeRun && <div className="run-strip"><span className="run-pulse" />{activeRun.route.level === 'fast' ? 'Modo rápido' : 'Modo completo'} · {activeRun.route.reason}<span className="run-start">iniciado às {timeLabel(activeRun.startedAt)}</span></div>}
-            <details className="composer-options">
-              <summary>Opções · Projeto: {conversationProject?.name || 'Sem projeto'} · Modo: {MODE_LABELS[session.mode]}</summary>
-              <div className="composer-options-content">
-                <label className="select-wrap project-select"><Folder size={14} /><select aria-label="Projeto da conversa" value={session.projectId || ''} disabled={busy || Boolean(session.activeRunId)} onChange={(event) => void changeSession({ projectId: event.target.value || null })}><option value="">Sem projeto</option>{data.projects.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select><ChevronDown size={13} /></label>
-                <div className="mode-switch" role="group" aria-label="Modo de resposta">{(['auto', 'fast', 'deep'] as Mode[]).map((mode) => <button key={mode} className={session.mode === mode ? 'selected' : ''} onClick={() => void changeSession({ mode })} disabled={busy || Boolean(session.activeRunId)}>{mode === 'auto' ? <Sparkles size={12} /> : mode === 'fast' ? <Zap size={12} /> : <Layers3 size={12} />}{MODE_LABELS[mode]}</button>)}</div>
-                <div className="composer-context">
-                  <span className={`coordination-dot ${conversationProject?.orchestration?.enabled === false ? 'muted' : ''}`} />
-                  <span>{conversationProject ? conversationProject.orchestration?.enabled === false ? 'Execução direta, sem delegação.' : `Orquestração ativa: ${provider?.name || 'agente da conversa'} coordena tarefas com contexto enxuto.` : 'Conversa avulsa: sem contexto ou configuração de projeto.'}</span>
-                  {conversationProject && <button type="button" onClick={() => { selectProject(conversationProject.id); setPage('settings'); setSidebarOpen(false); }}>Configurar projeto</button>}
-                </div>
-              </div>
-            </details>
-            <div className="composer-box">
+      {!data && <div className="loading-screen"><LoaderCircle className="spin" size={22} /><span>Conectando ao Adelic…</span>{notice && <p className="error-text">{notice}</p>}</div>}
+      {data && page === 'chat' && (!session ? <div className="welcome-view">
+        <div className="welcome-orb" aria-hidden="true"><Sparkles size={22} /></div>
+        <h1>O que vamos construir hoje?</h1>
+        <p>Comece sem uma pasta ou escolha um projeto depois.</p>
+        <button className="primary-button" onClick={() => void newConversation()} disabled={busy}><Plus size={16} /> Começar uma conversa</button>
+        <div className="welcome-suggestions">{['Resuma uma ideia para mim', 'Encontre um caminho para começar', 'Revise uma ideia que estou explorando'].map((suggestion) => <button key={suggestion} onClick={() => void startSuggestedPrompt(suggestion)} disabled={busy}><span>{suggestion}</span><ArrowUp size={14} aria-hidden="true" /></button>)}</div>
+      </div> : <div className="chat-view">
+        <section className="conversation" aria-label="Conversa" ref={conversationRef} onScroll={onConversationScroll}>
+          <div className="message-column">
+            {messages.length === 0 && !stream && <div className="conversation-empty"><div className="empty-icon" aria-hidden="true"><MessageSquare size={18} /></div><h2>Uma boa conversa começa com uma pergunta.</h2><p>{conversationProject ? <>O agente usa o contexto de <strong>{conversationProject.name}</strong> quando necessário.</> : 'Converse livremente ou vincule um projeto no menu de projeto e modo, junto ao campo de mensagem.'}</p><div className="prompt-chips">{(conversationProject ? ['Explique a estrutura deste projeto', 'Quais são os próximos passos?', 'Me ajude a resolver um problema'] : ['Explique o que é recursão', 'Me ajude a organizar uma ideia', 'Me ajude a resolver um problema']).map((text) => <button key={text} onClick={() => void sendMessage(text)}><span>{text}</span><ArrowUp size={13} aria-hidden="true" /></button>)}</div></div>}
+            {messages.filter((message) => message.id !== stream?.messageId).map((message) => <div className="timeline-message" key={message.id}><MessageCard message={message} providerName={data.providers.find((p) => p.id === (message.providerId || session.providerId))?.name || 'Adelic'} />{message.role === 'user' && message.runId && <RunActivityPanel runId={message.runId} run={currentDetail?.runs.find((run) => run.id === message.runId)} tasks={activityTasks} events={activityEvents} providers={data.providers} active={session.activeRunId === message.runId} taskOutputs={taskOutputs} loadingTaskOutputs={loadingTaskOutputs} onLoadTaskOutput={loadTaskOutput} />}</div>)}
+            {stream && <div className="message-row assistant-row streaming"><div className="message-author"><span className="assistant-glyph" aria-hidden="true"><Sparkles size={12} /></span><strong>{provider?.name || 'Agente'}</strong><span className="streaming-label"><i aria-hidden="true" />escrevendo</span></div>{stream.content ? <Markdown>{stream.content}</Markdown> : <div className="markdown-content"><span className="typing-caret" aria-hidden="true" /></div>}</div>}
+            {activityEvents.filter((item) => item.type === 'error' && !messages.some((message) => message.role === 'user' && message.runId === item.runId)).map((item) => <RunEventRow key={item.id} event={item} />)}
+            {currentDetail?.approvals.filter((item) => item.status === 'pending').map((approval) => <div className={`approval-card ${approval.kind}`} key={approval.id} role="region" aria-label={approval.title || 'Aprovação necessária'}><div className="approval-icon" aria-hidden="true"><Shield size={16} /></div><div className="approval-copy"><strong>{approval.title || 'Aprovação necessária'}</strong><p>{approval.detail}</p><span>{approval.kind === 'command' ? 'Comando' : approval.kind === 'file' ? 'Arquivo' : 'Ferramenta'} · confirme esta ação para continuar</span></div><div className="approval-actions"><button className="secondary-button" onClick={() => void api.approve(approval.id, 'deny').then(() => refreshDetail(session.id)).catch((e: Error) => setNotice(e.message))}>Negar</button><button className="primary-button" onClick={() => void api.approve(approval.id, 'approve').then(() => refreshDetail(session.id)).catch((e: Error) => setNotice(e.message))}><Check size={14} /> Aprovar</button></div></div>)}
+          </div>
+        </section>
+        <div className="composer-wrap">
+          {showJump && <button type="button" className="jump-to-latest" aria-label="Ir para a mensagem mais recente" title="Ir para a mensagem mais recente" onClick={scrollToLatest}><ArrowDown size={16} /></button>}
+          {notice && <div className="inline-notice error-notice" role="alert"><span>{notice}</span><button className="icon-button" onClick={() => setNotice('')} aria-label="Dispensar aviso"><X size={15} /></button></div>}
+          <div className={`composer-box ${session.activeRunId ? 'is-running' : ''}`}>
+            <textarea ref={composerRef} className="composer-input" value={composer} onChange={(event) => setDrafts((current) => ({ ...current, [session.id]: event.target.value }))} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void sendMessage(); } }} placeholder={session.activeRunId ? 'Executando… cancele para enviar outra mensagem.' : 'Escreva uma mensagem…'} aria-label="Mensagem para o agente" rows={1} disabled={Boolean(session.activeRunId)} />
+            <div className="composer-toolbar">
               <div className="composer-controls">
                 <ModelMenu providers={data.providers} providerId={session.providerId} sessionId={session.id} modelId={session.model} disabled={busy || Boolean(session.activeRunId)} onChange={(providerId, model) => void changeSession(providerId === session.providerId ? { model: model || null } : { providerId, model: model || null })} />
-                <ChoiceMenu label="Thinking para próximas mensagens" icon={<Brain size={14} />} value={session.thinking || 'auto'} options={thinkingOptions.map((value) => ({ value, label: thinkingLabel(value), detail: value === 'auto' && thinkingOptions.length === 1 ? reasoningUnavailable ? 'Este agente não oferece ajuste. O esforço Automático fica a cargo do runtime.' : 'O catálogo deste modelo não anuncia níveis adicionais; Automático usa o padrão do runtime.' : 'Define o esforço de raciocínio das próximas mensagens.' }))} disabled={busy || Boolean(session.activeRunId)} onChange={(value) => void changeSession({ thinking: value })} />
-                <ChoiceMenu label="Permissões" icon={<Shield size={14} />} value={`${data.settings.sandbox}|${data.settings.approvalMode || 'auto-safe'}`} disabled={settingsPending} options={[{ value: 'read-only|auto-safe', label: 'Leitura · Auto', detail: 'Confirmação automática quando disponível.' }, { value: 'read-only|manual', label: 'Leitura · Manual', detail: 'Pede confirmação quando o agente oferece essa opção.' }, { value: 'workspace-write|auto-safe', label: 'Escrita · Auto', detail: 'Alterações permitidas no projeto.' }, { value: 'workspace-write|manual', label: 'Escrita · Manual', detail: 'Pede confirmação quando o agente oferece essa opção.' }]} hint={<>O Codex aprova leituras reconhecidas. No Kiro, os pedidos ainda exigem confirmação; Claude não oferece confirmação pelo Adelic. Leituras e alterações feitas sem solicitação e scripts podem alterar ou excluir arquivos.</>} onChange={(value) => { const [sandbox, approvalMode] = value.split('|') as ['read-only' | 'workspace-write', 'auto-safe' | 'manual']; void updatePermissions(sandbox, approvalMode); }} />
+                <ChoiceMenu label="Thinking para próximas mensagens" icon={<Brain size={14} />} value={session.thinking || 'auto'} options={thinkingOptions.map((value) => ({ value, label: thinkingLabel(value), detail: value === 'auto' ? thinkingOptions.length === 1 ? reasoningUnavailable ? 'Este agente não oferece ajuste. O esforço Automático fica a cargo do runtime.' : 'O catálogo deste modelo não anuncia níveis adicionais; Automático usa o padrão do runtime.' : 'Escolhido pela rota de cada pedido.' : undefined }))} hint={thinkingOptions.length > 1 ? 'Define o esforço de raciocínio das próximas mensagens. Os níveis seguem o catálogo do modelo escolhido.' : undefined} disabled={busy || Boolean(session.activeRunId)} onChange={(value) => void changeSession({ thinking: value })} />
+                <ChoiceMenu label="Permissões" icon={<Shield size={14} />} width={340} value={`${data.settings.sandbox}|${data.settings.approvalMode || 'auto-safe'}`} disabled={settingsPending} options={[{ value: 'read-only|auto-safe', label: 'Leitura · Auto', detail: 'Confirmação automática quando disponível.' }, { value: 'read-only|manual', label: 'Leitura · Manual', detail: 'Pede confirmação quando o agente oferece essa opção.' }, { value: 'workspace-write|auto-safe', label: 'Escrita · Auto', detail: 'Alterações permitidas no projeto.' }, { value: 'workspace-write|manual', label: 'Escrita · Manual', detail: 'Pede confirmação quando o agente oferece essa opção.' }]} hint={<>O Codex aprova leituras reconhecidas. No Kiro, os pedidos ainda exigem confirmação; Claude não oferece confirmação pelo Adelic. Leituras e alterações feitas sem solicitação e scripts podem alterar ou excluir arquivos.</>} onChange={(value) => { const [sandbox, approvalMode] = value.split('|') as ['read-only' | 'workspace-write', 'auto-safe' | 'manual']; void updatePermissions(sandbox, approvalMode); }} />
+                <ConversationMenu projects={data.projects} projectId={session.projectId} mode={session.mode} disabled={busy || Boolean(session.activeRunId)} context={conversationContext} onProject={(projectId) => void changeSession({ projectId })} onMode={(mode) => void changeSession({ mode })} onConfigure={conversationProject ? () => { selectProject(conversationProject.id); setPage('settings'); setSidebarOpen(false); } : undefined} />
               </div>
-              {reasoningUnavailable && <span className="visually-hidden">Este agente não oferece ajustes de Thinking; somente Automático está disponível.</span>}
-              <textarea ref={composerRef} value={composer} onChange={(event) => setDrafts((current) => ({ ...current, [session.id]: event.target.value }))} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void sendMessage(); } }} placeholder="Escreva sua mensagem…" aria-label="Mensagem para o agente" rows={1} disabled={Boolean(session.activeRunId)} />
-              <div className="composer-bottom"><div className="composer-hints"><span><kbd>↵</kbd> enviar</span><span><kbd>⇧ ↵</kbd> nova linha</span>{session.mode === 'auto' && <span className="auto-hint"><Sparkles size={12} /> escolhe o modo por você</span>}</div><button className={`send-button ${canCancelCurrentSend ? 'stop' : ''}`} aria-label={canCancelCurrentSend ? 'Cancelar execução' : 'Enviar mensagem'} onClick={() => session.activeRunId ? void api.cancel(session.id).then(() => refreshDetail(session.id)).catch((e: Error) => setNotice(e.message)) : pendingSendForSession ? void cancelPendingSend(session.id) : void sendMessage()} disabled={canCancelCurrentSend ? false : !composer.trim() || busy || settingsPending}>{canCancelCurrentSend ? <Square size={14} fill="currentColor" /> : busy ? <LoaderCircle className="spin" size={17} /> : <ArrowUp size={17} />}</button></div>
-            </div><div className="composer-footnote"><Shield size={12} /> Execução local no computador <span>·</span> confira ações de escrita antes de aprovar</div>
+              <button className={`send-button ${canCancelCurrentSend ? 'stop' : ''}`} aria-label={canCancelCurrentSend ? 'Cancelar execução' : 'Enviar mensagem'} title={canCancelCurrentSend ? 'Cancelar execução' : 'Enviar (Enter)'} onClick={() => session.activeRunId ? void api.cancel(session.id).then(() => refreshDetail(session.id)).catch((e: Error) => setNotice(e.message)) : pendingSendForSession ? void cancelPendingSend(session.id) : void sendMessage()} disabled={canCancelCurrentSend ? false : !composer.trim() || busy || settingsPending}>{canCancelCurrentSend ? <Square size={12} fill="currentColor" /> : busy ? <LoaderCircle className="spin" size={16} /> : <ArrowUp size={17} />}</button>
+            </div>
+            {reasoningUnavailable && <span className="visually-hidden">Este agente não oferece ajustes de Thinking; somente Automático está disponível.</span>}
           </div>
-        </>}
-      </>}
+        </div>
+      </div>)}
 
       {data && page === 'activity' && <ActivityPage runs={data.runs} providers={data.providers} />}
       {data && memoryVisited && <SharedMemoryPage activated={memoryVisited} visible={page === 'memory'} />}
@@ -601,25 +659,40 @@ export default function App() {
       {data && page === 'settings' && <SettingsPage key={project?.id || 'global'} data={data} project={project} coordination={coordination} graphifyStatus={graphifyStatus} graphQueryResult={graphQueryResult} projectQuery={projectQuery} projectBusy={projectBusy} coordinatorProviderId={session && session.projectId === project?.id ? session.providerId : data.settings.defaultProviderId} onProjectQueryChange={setProjectQuery} onProjectQuery={queryProjectGraph} onOrchestration={(patch) => project && void changeProjectOrchestration(project.id, patch)} onGraphifyEnabled={(enabled) => project && void changeGraphifyEnabled(project.id, enabled)} onIndexGraphify={() => project && void indexProject(project.id)} onRefreshProject={() => project && void refreshProjectViews(project.id)} onProjectMemoryScope={(workspace, memoryProject) => project && void changeProjectMemoryScope(project.id, workspace, memoryProject)} onSetting={updateSetting} onSkill={async (id, enabled) => { try { const result = await api.skill(id, enabled); setData((current) => current ? { ...current, skills: current.skills.map((skill) => skill.id === id ? result : skill) } : current); } catch (error) { setNotice((error as Error).message); } }} notice={notice} />}
     </main>
 
-    {projectForm && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setProjectForm(false); }}><form className="modal-card" onSubmit={(event) => void createProject(event)}><div className="modal-heading"><div className="project-avatar"><FolderPlus size={17} /></div><div><h2>Novo projeto</h2><p>Conecte uma pasta do seu computador.</p></div><button type="button" className="icon-button" aria-label="Fechar" onClick={() => setProjectForm(false)}><X size={17} /></button></div><label>Nome do projeto<input autoFocus value={projectName} onChange={(event) => { setProjectName(event.target.value); if (!projectMemoryProjectCustom) setProjectMemoryProject(event.target.value.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')); }} placeholder="Ex.: Meu aplicativo" required /></label><label>Caminho da pasta<input value={projectPath} onChange={(event) => setProjectPath(event.target.value)} placeholder="/home/voce/projetos/app" required /></label><div className="memory-scope-modal"><div><Brain size={14} /> Escopo de memória explícito</div><label>Workspace<input value={projectMemoryWorkspace} onChange={(event) => setProjectMemoryWorkspace(event.target.value)} placeholder="pessoal" required /></label><label>Projeto na memória<input value={projectMemoryProject} onChange={(event) => { setProjectMemoryProject(event.target.value); setProjectMemoryProjectCustom(true); }} placeholder="identificador único" required /></label><small>O identificador começa pelo nome do projeto e pode ser ajustado.</small></div><div className="modal-note"><Shield size={14} /> O agente usará esta pasta conforme a permissão definida.</div>{notice && <div className="form-error">{notice}</div>}<div className="modal-actions"><button type="button" className="secondary-button" onClick={() => setProjectForm(false)}>Cancelar</button><button type="submit" className="primary-button" disabled={busy || !projectName.trim() || !projectPath.trim() || !projectMemoryWorkspace.trim() || !projectMemoryProject.trim()}>{busy ? <LoaderCircle className="spin" size={15} /> : <Plus size={15} />} Criar projeto</button></div></form></div>}
-    {helpOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setHelpOpen(false); }}><div className="modal-card help-card" role="dialog" aria-modal="true" aria-labelledby="help-title"><div className="modal-heading"><div className="project-avatar"><CircleHelp size={17} /></div><div><h2 id="help-title">Como usar o Adelic</h2><p>Um espaço local para trabalhar com seus agentes.</p></div><button type="button" className="icon-button" aria-label="Fechar ajuda" onClick={() => setHelpOpen(false)}><X size={17} /></button></div><div className="help-items"><p><strong>Comece por um projeto.</strong> Selecione a pasta e defina o escopo da memória.</p><p><strong>Escolha um modo.</strong> Auto adapta o caminho ao pedido. Rápido prioriza respostas diretas e pode consultar o computador quando necessário.</p><p><strong>Revise aprovações.</strong> Ações que o agente pedir aparecem na conversa para você aceitar ou negar.</p><p><strong>Interrompa quando precisar.</strong> O botão quadrado cancela a execução atual.</p></div><button type="button" className="primary-button help-done" onClick={() => setHelpOpen(false)}>Entendi</button></div></div>}
+    {projectForm && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setProjectForm(false); }}><form className="modal-card" role="dialog" aria-modal="true" aria-labelledby="project-form-title" onSubmit={(event) => void createProject(event)}><div className="modal-heading"><div className="project-avatar" aria-hidden="true"><FolderPlus size={17} /></div><div><h2 id="project-form-title">Novo projeto</h2><p>Conecte uma pasta do seu computador.</p></div><button type="button" className="icon-button" aria-label="Fechar" onClick={() => setProjectForm(false)}><X size={17} /></button></div><label>Nome do projeto<input autoFocus value={projectName} onChange={(event) => { setProjectName(event.target.value); if (!projectMemoryProjectCustom) setProjectMemoryProject(event.target.value.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')); }} placeholder="Ex.: Meu aplicativo" required /></label><label>Caminho da pasta<input value={projectPath} onChange={(event) => setProjectPath(event.target.value)} placeholder="/home/voce/projetos/app" required /></label><div className="memory-scope-modal"><div><Brain size={14} /> Escopo de memória explícito</div><label>Workspace<input value={projectMemoryWorkspace} onChange={(event) => setProjectMemoryWorkspace(event.target.value)} placeholder="pessoal" required /></label><label>Projeto na memória<input value={projectMemoryProject} onChange={(event) => { setProjectMemoryProject(event.target.value); setProjectMemoryProjectCustom(true); }} placeholder="identificador único" required /></label><small>O identificador começa pelo nome do projeto e pode ser ajustado.</small></div><div className="modal-note"><Shield size={14} /> O agente usará esta pasta conforme a permissão definida.</div>{notice && <div className="form-error">{notice}</div>}<div className="modal-actions"><button type="button" className="secondary-button" onClick={() => setProjectForm(false)}>Cancelar</button><button type="submit" className="primary-button" disabled={busy || !projectName.trim() || !projectPath.trim() || !projectMemoryWorkspace.trim() || !projectMemoryProject.trim()}>{busy ? <LoaderCircle className="spin" size={15} /> : <Plus size={15} />} Criar projeto</button></div></form></div>}
+    {helpOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setHelpOpen(false); }}><div className="modal-card help-card" role="dialog" aria-modal="true" aria-labelledby="help-title"><div className="modal-heading"><div className="project-avatar" aria-hidden="true"><CircleHelp size={17} /></div><div><h2 id="help-title">Como usar o Adelic</h2><p>Um espaço local para trabalhar com seus agentes.</p></div><button type="button" className="icon-button" aria-label="Fechar ajuda" onClick={() => setHelpOpen(false)}><X size={17} /></button></div><div className="help-items"><p><strong>Comece por uma conversa.</strong> Nova conversa cria uma conversa avulsa; o + ao lado de um projeto cria uma conversa vinculada à pasta e ao escopo de memória dele.</p><p><strong>Ajuste a conversa no campo de mensagem.</strong> Escolha agente, modelo, thinking, permissões, projeto e modo. Auto adapta o caminho ao pedido; Rápido prioriza respostas diretas e pode consultar o computador quando necessário.</p><p><strong>Revise aprovações.</strong> A execução acontece neste computador. Confira ações de escrita antes de aprovar.</p><p><strong>Interrompa quando precisar.</strong> O botão de parar cancela a execução atual.</p></div><dl className="shortcut-list"><div><dt>Enviar mensagem</dt><dd><kbd>Enter</kbd></dd></div><div><dt>Nova linha</dt><dd><kbd>Shift</kbd><kbd>Enter</kbd></dd></div><div><dt>Nova conversa</dt><dd><kbd>{shortcut}</kbd></dd></div><div><dt>Fechar menus e janelas</dt><dd><kbd>Esc</kbd></dd></div></dl><button type="button" className="primary-button help-done" onClick={() => setHelpOpen(false)}>Entendi</button></div></div>}
   </div>;
+}
+
+const SIDEBAR_LIMIT = 6;
+
+function SessionItem({ session, selected, now, onSelect }: { session: Session; selected: boolean; now: number; onSelect: () => void }) {
+  const title = session.title || 'Nova conversa';
+  return <button className={`session-item ${selected ? 'selected' : ''}`} aria-current={selected ? 'page' : undefined} title={title} onClick={onSelect}>
+    {session.activeRunId ? <span className="session-running" aria-hidden="true" /> : <MessageSquare size={14} className="session-icon" aria-hidden="true" />}
+    <span className="session-title">{title}</span>
+    {session.activeRunId && <span className="visually-hidden">, em execução</span>}
+    <time className="session-time" dateTime={session.updatedAt}>{relativeTime(session.updatedAt, now)}</time>
+  </button>;
 }
 
 function MessageCard({ message, providerName }: { message: Message; providerName: string }) {
-  const isUser = message.role === 'user';
-  return <div className={`message-row ${isUser ? 'user-row' : 'assistant-row'}`}>
-    {isUser ? <div className="user-avatar">I</div> : <div className="assistant-avatar"><Sparkles size={15} /></div>}
-    <div className="message-body"><div className="message-author">{isUser ? 'Você' : providerName}{!isUser && message.route && <span className="route-pill" title={message.route.reason}>{message.route.level === 'fast' ? 'Rápido' : 'Completo'} · Thinking {thinkingLabel(message.route.effort)}</span>}<time>{timeLabel(message.createdAt)}</time></div>
-      <div className={isUser ? 'user-content' : 'markdown-content'}>{isUser ? message.content : <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content || (message.status === 'failed' ? 'A execução falhou antes de gerar uma resposta.' : '')}</ReactMarkdown>}</div>
-      {!isUser && message.status === 'failed' && <div className="message-error"><X size={13} /> Execução falhou</div>}
-    </div>
+  if (message.role === 'user') return <div className="message-row user-row">
+    <div className="user-bubble">{message.content}</div>
+    <div className="message-meta"><time dateTime={message.createdAt}>{timeLabel(message.createdAt)}</time><CopyButton text={message.content} label="Copiar mensagem" /></div>
+  </div>;
+  const content = message.content || (message.status === 'failed' ? 'A execução falhou antes de gerar uma resposta.' : '');
+  return <div className="message-row assistant-row">
+    <div className="message-author"><span className="assistant-glyph" aria-hidden="true"><Sparkles size={12} /></span><strong>{providerName}</strong>{message.route && <span className="route-pill" title={message.route.reason}>{message.route.level === 'fast' ? 'Rápido' : 'Completo'} · Thinking {thinkingLabel(message.route.effort)}</span>}<time dateTime={message.createdAt}>{timeLabel(message.createdAt)}</time></div>
+    {content && <Markdown>{content}</Markdown>}
+    {message.status === 'failed' && <div className="message-error"><X size={13} /> Execução falhou</div>}
+    {message.content && <div className="message-actions"><CopyButton text={message.content} label="Copiar resposta" /></div>}
   </div>;
 }
 
-function RunActivityPanel({ runId, runStatus, tasks, events, providers, active, taskOutputs, loadingTaskOutputs, onLoadTaskOutput }: {
+function RunActivityPanel({ runId, run, tasks, events, providers, active, taskOutputs, loadingTaskOutputs, onLoadTaskOutput }: {
   runId: string;
-  runStatus?: Run['status'];
+  run?: Run;
   tasks: DelegatedTask[];
   events: SessionDetail['events'];
   providers: Bootstrap['providers'];
@@ -629,33 +702,49 @@ function RunActivityPanel({ runId, runStatus, tasks, events, providers, active, 
   onLoadTaskOutput: (task: DelegatedTask) => Promise<void>;
 }) {
   const activity = activityForRun(runId, tasks, events);
+  const runStatus = run?.status;
+  const running = runStatus === 'running' || (!runStatus && active);
+  const now = useNow(1000, running);
   const outcome = runStatusLabel(runStatus) || (active ? 'Em andamento' : null);
   if (!activityIsVisible(activity) && !outcome) return null;
-  return <section className="run-activity" aria-label="Atividade desta execução">
+  const startedAt = run?.startedAt ? new Date(run.startedAt).getTime() : Number.NaN;
+  const elapsed = formatDuration(running ? (Number.isFinite(startedAt) ? Math.max(0, now - startedAt) : undefined) : run?.durationMs);
+  const tone = running ? 'running' : runStatus || 'completed';
+  const headline = running ? (elapsed ? `Trabalhando · ${elapsed}` : 'Trabalhando')
+    : tone === 'completed' ? (elapsed ? `Trabalhou por ${elapsed}` : 'Atividade')
+      : `${outcome}${elapsed ? ` após ${elapsed}` : ''}`;
+  const counts = [
+    activity.tasks.length ? `${activity.tasks.length} ${activity.tasks.length === 1 ? 'tarefa' : 'tarefas'}` : '',
+    activity.actions.length ? `${activity.actions.length} ${activity.actions.length === 1 ? 'ação' : 'ações'}` : '',
+  ].filter(Boolean).join(' · ');
+  const icon = running ? <LoaderCircle className="spin" size={14} /> : tone === 'completed' ? <Activity size={14} /> : <X size={14} />;
+  return <section className={`run-activity ${tone}`} aria-label="Atividade desta execução">
     {activity.errors.map((event) => <RunEventRow key={event.id} event={event} />)}
-    {activityIsVisible(activity) ? <details>
-      <summary><Activity size={13} /><span>Atividade · {activity.tasks.length} {activity.tasks.length === 1 ? 'tarefa' : 'tarefas'} · {activity.actions.length} {activity.actions.length === 1 ? 'ação' : 'ações'}</span>{outcome && <span className={`activity-outcome ${runStatus || 'running'}`}>{runStatus === 'running' || (!runStatus && active) ? <i /> : null}{outcome}</span>}<ChevronDown className="activity-chevron" size={12} /></summary>
+    {activityIsVisible(activity) ? <details className="activity-details">
+      <summary><span className="activity-icon" aria-hidden="true">{icon}</span><span className="activity-headline">{headline}</span>{counts && <span className="activity-counts">{counts}</span>}<ChevronDown className="activity-chevron" size={14} aria-hidden="true" /></summary>
       <div className="run-activity-content">
         {activity.tasks.map((task) => {
           const hasCachedOutput = Object.hasOwn(taskOutputs, task.id);
           const loadingOutput = loadingTaskOutputs.has(task.id);
           return <article className="activity-task" key={task.id}>
-            <div className="activity-task-heading"><i className={`run-status-dot ${task.status}`} /><strong>{task.title}</strong><span>{taskStatusName(task.status)}</span></div>
+            <div className="activity-task-heading"><i className={`run-status-dot ${task.status}`} aria-hidden="true" /><strong>{task.title}</strong><span className="activity-task-status">{taskStatusName(task.status)}</span></div>
             <div className="activity-meta">{taskRoleName(task.role)} · {providers.find((item) => item.id === task.providerId)?.name || task.providerId}{task.model ? ` / ${task.model}` : ''}{task.effort ? ` · Thinking ${thinkingLabel(task.effort)}` : ''}</div>
             {task.summary && <details className="activity-summary"><summary>Ver resumo</summary><p>{task.summary}</p></details>}
             {task.scope.length > 0 && <div className="activity-scope">Escopo: {task.scope.slice(0, 3).join(' · ')}{task.scope.length > 3 ? ` · +${task.scope.length - 3}` : ''}</div>}
             {hasCachedOutput ? <details className="activity-output"><summary>Ver saída completa</summary><pre>{taskOutputs[task.id] || 'Saída vazia.'}</pre></details> : task.status !== 'running' && task.status !== 'queued' ? <button className="task-output-button" onClick={() => void onLoadTaskOutput(task)} disabled={loadingOutput}>{loadingOutput ? <LoaderCircle className="spin" size={12} /> : <FileText size={12} />}{loadingOutput ? 'Carregando saída…' : 'Carregar saída completa'}</button> : null}
           </article>;
         })}
-        {activity.actions.map((event) => actionNeedsDisclosure(event) ? <details className="activity-command" key={event.id}><summary><Code2 size={12} />{commandTitle(event.toolName)} · {statusLabel(event.status)}<time>{timeLabel(event.createdAt)}</time></summary><pre>{event.text}</pre></details> : <div className="activity-action" key={event.id}><Code2 size={12} /><span>{event.text}</span><small>{statusLabel(event.status)}</small></div>)}
-        {activity.events.map((event) => <div className="activity-event" key={event.id}><Activity size={12} /><span>{event.text}</span><time>{timeLabel(event.createdAt)}</time></div>)}
+        {activity.actions.map((event) => actionNeedsDisclosure(event)
+          ? <details className="activity-command" key={event.id}><summary><Code2 size={13} aria-hidden="true" /><span className="visually-hidden">{commandTitle(event.toolName)}: </span><code className="command-preview">{commandPreview(event.text)}</code><span className={`activity-action-status ${event.status || ''}`}>{statusLabel(event.status)}</span><time>{timeLabel(event.createdAt)}</time></summary><pre>{event.text}</pre></details>
+          : <div className="activity-action" key={event.id}><Code2 size={13} aria-hidden="true" /><span>{event.text}</span><small className={`activity-action-status ${event.status || ''}`}>{statusLabel(event.status)}</small></div>)}
+        {activity.events.map((event) => <div className="activity-event" key={event.id}><Activity size={13} aria-hidden="true" /><span>{event.text}</span><time>{timeLabel(event.createdAt)}</time></div>)}
       </div>
-    </details> : outcome ? <div className={`run-progress ${runStatus || 'running'}`}><span className={`activity-outcome ${runStatus || 'running'}`}>{runStatus === 'running' || (!runStatus && active) ? <i /> : null}{outcome}</span>{runStatus === 'running' || (!runStatus && active) ? <span>Preparando resposta</span> : null}</div> : null}
+    </details> : <div className="run-progress"><span className="activity-icon" aria-hidden="true">{icon}</span><span className="activity-headline">{headline}</span>{running && <span className="activity-counts">Preparando resposta</span>}</div>}
   </section>;
 }
 
 function RunEventRow({ event }: { event: SessionDetail['events'][number] }) {
-  return <div className="run-event error"><span className="run-event-icon"><X size={12} /></span><span>{event.text}</span><time>{timeLabel(event.createdAt)}</time></div>;
+  return <div className="run-event error"><span className="run-event-icon" aria-hidden="true"><X size={12} /></span><span>{event.text}</span><time>{timeLabel(event.createdAt)}</time></div>;
 }
 
 function ActivityPage({ runs, providers }: { runs: Run[]; providers: Bootstrap['providers'] }) {
@@ -665,8 +754,8 @@ function ActivityPage({ runs, providers }: { runs: Run[]; providers: Bootstrap['
   const avg = (numbers: number[]) => numbers.length ? numbers.reduce((sum, item) => sum + item, 0) / numbers.length : null;
   const meanDuration = avg(durations), meanFirst = avg(firstTokens);
   return <section className="page-content"><div className="page-heading"><div><div className="eyebrow">USO E EXECUÇÕES</div><h1>Atividade</h1><p>Acompanhe execuções reais dos seus agentes.</p></div><span className="period-chip"><History size={14} /> Todo o histórico</span></div>
-    <div className="metrics-grid"><MetricCard icon={<Activity size={17} />} label="Execuções" value={String(runs.length)} hint={`${completed.length} concluídas`} /><MetricCard icon={<Zap size={17} />} label="1ª resposta média" value={meanFirst == null ? '—' : `${(meanFirst / 1000).toFixed(1)} s`} hint={meanFirst == null ? 'Sem medição disponível' : 'até o primeiro texto'} /><MetricCard icon={<Clock3 size={17} />} label="Duração média" value={meanDuration == null ? '—' : `${(meanDuration / 1000).toFixed(1)} s`} hint={meanDuration == null ? 'Sem medição disponível' : 'das execuções registradas'} /><MetricCard icon={<Gauge size={17} />} label="Custo" value="—" hint="Indisponível pelo provedor" /> </div>
-    <div className="activity-section"><div className="section-title-row"><div><h2>Execuções recentes</h2><p>Os dados são registrados localmente.</p></div><span className="count-chip">{runs.length}</span></div>{runs.length === 0 ? <div className="empty-panel activity-empty"><div className="empty-icon"><Activity size={18} /></div><strong>Nenhuma execução ainda</strong><span>As conversas concluídas aparecerão aqui.</span></div> : <div className="run-table"><div className="run-table-head"><span>AGENTE / MODO</span><span>STATUS</span><span>HORÁRIO</span><span>DURAÇÃO</span><span>CUSTO</span></div>{[...runs].sort((a, b) => b.startedAt.localeCompare(a.startedAt)).map((run) => <div className="run-table-row" key={run.id}><div className="run-provider-cell"><div className="provider-avatar"><Bot size={15} /></div><span><strong>{providers.find((p) => p.id === run.providerId)?.name || run.providerId}</strong><small>{run.route.level === 'fast' ? 'Rápido' : 'Completo'} · {run.route.reason}</small></span></div><span><i className={`run-status-dot ${run.status}`} />{statusName(run.status)}</span><span>{shortDate(run.startedAt)} às {timeLabel(run.startedAt)}</span><span>{run.durationMs == null ? '—' : `${(run.durationMs / 1000).toFixed(1)} s`}</span><span>{run.costUsd == null ? '—' : `$${run.costUsd.toFixed(4)}`}</span></div>)}</div>}</div>
+    <div className="metrics-grid"><MetricCard icon={<Activity size={17} />} label="Execuções" value={String(runs.length)} hint={`${completed.length} concluídas`} /><MetricCard icon={<Zap size={17} />} label="1ª resposta média" value={meanFirst == null ? '—' : formatDuration(meanFirst)} hint={meanFirst == null ? 'Sem medição disponível' : 'até o primeiro texto'} /><MetricCard icon={<Clock3 size={17} />} label="Duração média" value={meanDuration == null ? '—' : formatDuration(meanDuration)} hint={meanDuration == null ? 'Sem medição disponível' : 'das execuções registradas'} /><MetricCard icon={<Gauge size={17} />} label="Custo" value="—" hint="Indisponível pelo provedor" /> </div>
+    <div className="activity-section"><div className="section-title-row"><div><h2>Execuções recentes</h2><p>Os dados são registrados localmente.</p></div><span className="count-chip">{runs.length}</span></div>{runs.length === 0 ? <div className="empty-panel activity-empty"><div className="empty-icon"><Activity size={18} /></div><strong>Nenhuma execução ainda</strong><span>As conversas concluídas aparecerão aqui.</span></div> : <div className="run-table"><div className="run-table-head"><span>AGENTE / MODO</span><span>STATUS</span><span>HORÁRIO</span><span>DURAÇÃO</span><span>CUSTO</span></div>{[...runs].sort((a, b) => b.startedAt.localeCompare(a.startedAt)).map((run) => <div className="run-table-row" key={run.id}><div className="run-provider-cell"><div className="provider-avatar"><Bot size={15} /></div><span><strong>{providers.find((p) => p.id === run.providerId)?.name || run.providerId}</strong><small>{run.route.level === 'fast' ? 'Rápido' : 'Completo'} · {run.route.reason}</small></span></div><span><i className={`run-status-dot ${run.status}`} />{statusName(run.status)}</span><span>{shortDate(run.startedAt)} às {timeLabel(run.startedAt)}</span><span>{run.durationMs == null ? '—' : formatDuration(run.durationMs)}</span><span>{run.costUsd == null ? '—' : `$${run.costUsd.toFixed(4)}`}</span></div>)}</div>}</div>
   </section>;
 }
 function MetricCard({ icon, label, value, hint }: { icon: React.ReactNode; label: string; value: string; hint: string }) { return <div className="metric-card"><div className="metric-top"><span className="metric-icon">{icon}</span><span>{label}</span></div><strong>{value}</strong><small>{hint}</small></div>; }
@@ -678,6 +767,22 @@ function ProjectTools({ project, data, coordination, graphifyStatus, graphQueryR
   onOrchestration: (patch: Partial<OrchestrationConfig>) => void; onGraphifyEnabled: (enabled: boolean) => void; onIndexGraphify: () => void; onRefreshProject: () => void;
 }) {
   const config = projectOrchestration(project);
+  const [briefExpanded, setBriefExpanded] = useState(false);
+  const [briefClipped, setBriefClipped] = useState(false);
+  const objectiveRef = useRef<HTMLParagraphElement>(null);
+  const summaryRef = useRef<HTMLParagraphElement>(null);
+  // The brief is clamped by rendered lines (CSS), so overflow must be measured, not guessed from length.
+  useLayoutEffect(() => {
+    if (briefExpanded) return;
+    const nodes = [objectiveRef.current, summaryRef.current].filter((node): node is HTMLParagraphElement => Boolean(node));
+    if (!nodes.length) { setBriefClipped(false); return; }
+    const measure = () => setBriefClipped(nodes.some((node) => node.scrollHeight > node.clientHeight + 1));
+    measure();
+    if (typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(measure);
+    nodes.forEach((node) => observer.observe(node));
+    return () => observer.disconnect();
+  }, [briefExpanded, coordination?.brief?.objective, coordination?.brief?.summary]);
   const providerFor = (providerId?: string) => data.providers.find((provider) => provider.id === (providerId || coordinatorProviderId));
   const modelOptions = (providerId?: string) => providerFor(providerId)?.models || [];
   const graphEnabled = project.graphify?.enabled !== false;
@@ -698,7 +803,7 @@ function ProjectTools({ project, data, coordination, graphifyStatus, graphQueryR
           return <div className="project-agent-card" key={role}><strong>{title}</strong><label>{title}<select value={selectedProvider || ''} onChange={(event) => onOrchestration(isWorker ? { workerProviderId: event.target.value as OrchestrationConfig['workerProviderId'] || undefined, workerModel: undefined } : { reviewerProviderId: event.target.value as OrchestrationConfig['reviewerProviderId'] || undefined, reviewerModel: undefined })}><option value="">Herdar agente da conversa</option>{data.providers.map((provider) => <option key={provider.id} value={provider.id}>{provider.name}{provider.available ? '' : ' · indisponível'}</option>)}</select></label><label>Modelo<select value={selectedModel || ''} onChange={(event) => onOrchestration(isWorker ? { workerModel: event.target.value || undefined } : { reviewerModel: event.target.value || undefined })}><option value="">Padrão do agente</option>{models.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}</select></label><small>{selectedProvider ? providerFor(selectedProvider)?.available ? 'Catálogo descoberto neste computador' : 'Agente indisponível neste computador' : `Herdado da conversa (${providerFor()?.name || coordinatorProviderId})`}</small></div>;
         })}</div>
       </>}
-      <div className="project-overview"><div className="project-overview-heading"><strong>Contexto do coordenador</strong><button className="icon-button" title="Atualizar visão do projeto" aria-label="Atualizar visão do projeto" onClick={onRefreshProject}><RefreshCw size={14} /></button></div>{coordination?.brief ? <><p className="brief-objective">{coordination.brief.objective || 'Objetivo ainda não registrado.'}</p><p>{coordination.brief.summary || 'Sem resumo disponível.'}</p><div className="brief-paths">{coordination.brief.paths.slice(0, 8).map((path) => <code key={path}>{path}</code>)}{coordination.brief.paths.length > 8 && <span>+{coordination.brief.paths.length - 8} caminhos</span>}</div>{coordination.brief.truncated && <small>Mapa limitado ao contexto relevante.</small>}</> : <p className="muted-empty">Ainda não há mapa ou resumo do projeto.</p>}
+      <div className="project-overview"><div className="project-overview-heading"><strong>Contexto do coordenador</strong><button className="icon-button" title="Atualizar visão do projeto" aria-label="Atualizar visão do projeto" onClick={onRefreshProject}><RefreshCw size={14} /></button></div>{coordination?.brief ? <><p ref={objectiveRef} className={`brief-objective ${briefExpanded ? 'expanded' : ''}`}>{coordination.brief.objective || 'Objetivo ainda não registrado.'}</p><p ref={summaryRef} className={`brief-summary ${briefExpanded ? 'expanded' : ''}`}>{coordination.brief.summary || 'Sem resumo disponível.'}</p>{(briefExpanded || briefClipped) && <button type="button" className="link-button brief-toggle" aria-expanded={briefExpanded} onClick={() => setBriefExpanded((value) => !value)}>{briefExpanded ? 'Mostrar menos' : 'Mostrar resumo completo'}</button>}<div className="brief-paths">{coordination.brief.paths.slice(0, 8).map((path) => <code key={path}>{path}</code>)}{coordination.brief.paths.length > 8 && <span>+{coordination.brief.paths.length - 8} caminhos</span>}</div>{coordination.brief.truncated && <small>Mapa limitado ao contexto relevante.</small>}</> : <p className="muted-empty">Ainda não há mapa ou resumo do projeto.</p>}
         {coordination?.tasks.length ? <div className="recent-project-tasks"><strong>Tarefas recentes</strong>{coordination.tasks.slice(0, 4).map((task) => <div key={task.id}><span className={`run-status-dot ${task.status}`} /><span>{task.title}</span><small>{taskStatusName(task.status)}</small>{task.summary && <p>{task.summary}</p>}</div>)}</div> : null}</div>
     </section>
     <section className="settings-card graphify-card">
@@ -707,7 +812,7 @@ function ProjectTools({ project, data, coordination, graphifyStatus, graphQueryR
       <div className="graph-status-row"><span className={`run-status-dot ${status === 'ready' ? 'completed' : status === 'error' ? 'failed' : status === 'indexing' ? 'running' : ''}`} /><strong>{graphStatusName(status)}</strong><span>{graphifyStatus?.nodes != null && graphifyStatus.edges != null ? `${graphifyStatus.nodes} nós · ${graphifyStatus.edges} relações` : graphifyStatus?.detail || (graphEnabled ? 'Aguardando estado do índice.' : 'Desativado')}</span>{graphifyStatus?.updatedAt && <small>Atualizado {shortDate(graphifyStatus.updatedAt)}</small>}</div>
       {graphifyStatus?.detail && graphifyStatus.status !== 'ready' && <p className="graph-detail">{graphifyStatus.detail}</p>}
       <div className="graph-actions"><button className="secondary-button" onClick={onIndexGraphify} disabled={!graphEnabled || projectBusy || status === 'indexing'}>{projectBusy ? <LoaderCircle className="spin" size={13} /> : <RefreshCw size={13} />}{status === 'ready' || status === 'stale' ? 'Indexar novamente' : 'Criar índice'}</button></div>
-      {graphEnabled && <form className="graph-query" onSubmit={onProjectQuery}><label htmlFor="graph-query-input">Consultar mapa</label><div><input id="graph-query-input" value={projectQuery} onChange={(event) => onProjectQueryChange(event.target.value)} placeholder="Ex.: onde ficam as rotas da API?" /><button type="submit" disabled={projectBusy || !projectQuery.trim() || status !== 'ready'}>{projectBusy ? <LoaderCircle className="spin" size={13} /> : <Search size={13} />}Consultar</button></div></form>}
+      {graphEnabled && <form className="graph-query" onSubmit={onProjectQuery}><label htmlFor="graph-query-input">Consultar mapa</label><div><input id="graph-query-input" value={projectQuery} onChange={(event) => onProjectQueryChange(event.target.value)} placeholder="Ex.: onde ficam as rotas da API?" /><button type="submit" className="secondary-button" disabled={projectBusy || !projectQuery.trim() || status !== 'ready'}>{projectBusy ? <LoaderCircle className="spin" size={13} /> : <Search size={13} />}Consultar</button></div></form>}
       {graphQueryResult && <div className="graph-query-result"><strong>Resultado para “{graphQueryResult.query}”</strong>{graphQueryResult.context ? <pre>{graphQueryResult.context.slice(0, 1800)}{graphQueryResult.context.length > 1800 ? '\n…' : ''}</pre> : <p>O Graphify não retornou contexto para esta consulta.</p>}</div>}
     </section>
   </>;

@@ -1,5 +1,7 @@
 # Chat com controles no rodapé
 
+> Atualização 2026-10-06: o disclosure `composer-options` foi substituído pelo menu **Projeto e modo** dentro do campo de mensagem, ao lado de modelo, thinking e permissões; o rodapé de avisos e as dicas de teclado foram removidos (atalhos na Ajuda). Ver [tema e interface](visual-theme.md). Os critérios de aceite abaixo continuam valendo.
+
 2026-10-05 — Pedido do usuário: validar projetos pequenos e mini fixes usando o próprio Adelic, começando por uma UI menos poluída e controles do chat movidos do topo para a parte inferior.
 
 ## Mudança

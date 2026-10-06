@@ -1,5 +1,14 @@
 # Changelog
 
+## Não publicado
+
+- Tema escuro inspirado no Dracula, um pouco mais escuro, com tokens de cor e contraste AA calculado; fontes Inter e JetBrains Mono incluídas no aplicativo.
+- Interface baseada no T3 Code: barra lateral com conversas recentes e tempo relativo, navegação no rodapé e trilho recolhido; mensagem do usuário em bolha; atividade do turno como “Trabalhou por …” com cronômetro; campo de mensagem com modelo, thinking, permissões e projeto/modo em pílulas.
+- Menus posicionados junto ao botão, com foco no item selecionado; rolagem segue o fim só quando você já está lá, com botão para voltar à mensagem mais recente.
+- Botões de copiar em mensagens e blocos de código; links externos abrem fora do aplicativo; textos visíveis com pelo menos 11 px.
+
+Evidências e limites em [validação](docs/validation.md).
+
 ## 0.2.0 — 2026-10-06
 
 - Memória compartilhada com ai-memory: biblioteca independente de projeto, pesquisa por escopo, edição e atualização externa com proteção de rascunhos e conflitos.

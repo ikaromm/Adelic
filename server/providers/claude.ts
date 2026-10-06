@@ -18,16 +18,16 @@ export class ClaudeProvider {
     if (this.shuttingDown) return this.shutdownInfo();
     if (this.infoCache && Date.now() - this.infoCache.at < 5 * 60_000) return this.infoCache.value;
     this.binary ??= await findProviderBinary('claude');
-    if (!this.binary) return this.cache({ id: 'claude', name: 'Claude Code', installed: false, available: false, status: hasProviderBinaryOverride('claude') ? 'error' : 'missing', detail: providerBinaryMissingDetail('claude'), models: [], capabilities: { fast: true, tools: true, approvals: false, cancel: true } });
+    if (!this.binary) return this.cache({ id: 'claude', name: 'Claude Code', installed: false, available: false, status: hasProviderBinaryOverride('claude') ? 'error' : 'missing', detail: providerBinaryMissingDetail('claude'), models: [], capabilities: { fast: true, tools: true, approvals: false, cancel: true, reasoning:true } });
     const result = await this.commands.run(this.binary, ['auth', 'status', '--json'], 4000);
     if (this.shuttingDown) return this.shutdownInfo();
     let loggedIn = false;
     try { loggedIn = JSON.parse(result.stdout).loggedIn === true; } catch { /* auth status did not return a valid status */ }
-    return this.cache({ id: 'claude', name: 'Claude Code', installed: true, available: loggedIn, status: loggedIn ? 'ready' : 'error', detail: loggedIn ? 'Claude Code instalado; autenticação verificada.' : 'Claude Code instalado, mas não autenticado no runtime.', models: [], capabilities: { fast: true, tools: true, approvals: false, cancel: true } });
+    return this.cache({ id: 'claude', name: 'Claude Code', installed: true, available: loggedIn, status: loggedIn ? 'ready' : 'error', detail: loggedIn ? 'Claude Code instalado; autenticação verificada.' : 'Claude Code instalado, mas não autenticado no runtime.', models: [], capabilities: { fast: true, tools: true, approvals: false, cancel: true, reasoning:true } });
   }
   private cache(value: ProviderInfo) { this.infoCache = { at: Date.now(), value }; return value; }
   private shutdownInfo(): ProviderInfo {
-    return { id: 'claude', name: 'Claude Code', installed: Boolean(this.binary), available: false, status: 'error', detail: 'Claude Code provider is shutting down.', models: [], capabilities: { fast: true, tools: true, approvals: false, cancel: true } };
+    return { id: 'claude', name: 'Claude Code', installed: Boolean(this.binary), available: false, status: 'error', detail: 'Claude Code provider is shutting down.', models: [], capabilities: { fast: true, tools: true, approvals: false, cancel: true, reasoning:true } };
   }
 
   async run(input: RunInput, emit: (event: ProviderEvent) => void, signal: AbortSignal): Promise<RunResult> {
@@ -35,9 +35,10 @@ export class ClaudeProvider {
     this.binary ??= await findProviderBinary('claude');
     if (!this.binary) throw new Error(providerBinaryMissingDetail('claude'));
     const runtimeDirs = [path.join(os.homedir(), '.claude/projects'), path.join(os.homedir(), '.claude/sessions')];
-    const toolsAllowed = input.plan.tools && input.plan.level === 'deep';
+    const toolsAllowed = input.plan.tools;
     const tools = toolsAllowed ? (input.sandbox === 'workspace-write' ? 'Read,Glob,Grep,Edit,Write,Bash' : 'Read,Glob,Grep') : '';
-    const args = ['--print', '--output-format', 'stream-json', '--include-partial-messages', '--verbose', '--restricted', '--safe-mode', '--strict-mcp-config', '--mcp-config', JSON.stringify({ mcpServers: {} }), '--tools', toolsAllowed ? tools : '', '--permission-mode', 'manual', '--permission-prompts', 'none', '--effort', input.plan.effort];
+    const args = ['--print', '--output-format', 'stream-json', '--include-partial-messages', '--verbose', '--restricted', '--safe-mode', '--strict-mcp-config', '--mcp-config', JSON.stringify({ mcpServers: {} }), '--tools', toolsAllowed ? tools : '', '--permission-mode', 'manual', '--permission-prompts', 'none'];
+    if (input.plan.effort) args.push('--effort', input.plan.effort);
     if (input.model) args.push('--model', input.model);
     const wrapped = await bubblewrap(this.binary, args, input.cwd, input.sandbox, runtimeDirs);
     if (signal.aborted) throw abortError(signal);

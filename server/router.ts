@@ -19,7 +19,7 @@ const toolPatterns: [RegExp,string][] = [
 
 export function routeMessage(content:string, mode:Mode, history:Message[] = [], memoryEnabled = false):RoutePlan {
   const text=content.trim();
-  if (mode==='fast') return {level:'fast',reason:'Modo Rápido selecionado pelo operador',tools:false,memory:false,effort:'low',contextBudget:6000};
+  if (mode==='fast') return {level:'fast',reason:'Modo Rápido selecionado pelo operador',tools:true,memory:false,effort:'low',contextBudget:6000};
   if (mode==='deep') return {level:'deep',reason:'Modo Completo selecionado pelo operador',tools:needsTools(text),memory:memoryEnabled && /mem[oó]ria|memory|lembra|lembre/i.test(text),effort:'high',contextBudget:24000};
   if (actionPattern.test(text) && hasFileReference(text)) {
     return {level:'deep',reason:'O pedido aponta explicitamente para um arquivo ou projeto',tools:true,memory:false,effort:'high',contextBudget:24000};
@@ -35,7 +35,7 @@ export function routeMessage(content:string, mode:Mode, history:Message[] = [], 
     return {level:'deep',reason:'Continuação de um pedido anterior que exige contexto ampliado',tools:needsTools(lastUser.content),memory:false,effort:'high',contextBudget:24000};
   }
   // Long conceptual prompts can stay on the cheap route; length alone never promotes.
-  return {level:'fast',reason:'Pergunta direta, sem necessidade identificada de ferramentas',tools:false,memory:false,effort:'low',contextBudget:6000};
+  return {level:'fast',reason:'Pergunta direta; ferramentas disponíveis se forem necessárias',tools:true,memory:false,effort:'low',contextBudget:6000};
 }
 
 function needsTools(text:string) {

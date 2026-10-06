@@ -8,14 +8,14 @@ import type { ProviderRegistry, RunInput } from '../shared/contracts.js';
 import { createBackend } from '../server/index.js';
 import { Store } from '../server/store.js';
 import { Orchestrator } from '../server/orchestrator.js';
-import type { Approval, Project, Session } from '../shared/contracts.js';
+import type { Approval, Project, Run, Session } from '../shared/contracts.js';
 
 const servers:Server[]=[]; const dirs:string[]=[];
 afterEach(async()=>{ await Promise.all(servers.splice(0).map(s=>new Promise<void>(r=>s.close(()=>r())))); for(const d of dirs.splice(0))rmSync(d,{recursive:true,force:true}); });
-function setup() {
+function setup(listProviders?:ProviderRegistry['list']) {
   const dir=mkdtempSync(join(tmpdir(),'adelic-test-'));dirs.push(dir);const store=new Store(dir);let calls=0;
   const providers:ProviderRegistry={
-    async list(){return [{id:'codex',name:'stub',installed:true,available:true,status:'ready' as const,detail:'test',models:[],capabilities:{fast:true,tools:true,approvals:true,cancel:true}}];},
+    async list(){return listProviders?listProviders():[{id:'codex',name:'stub',installed:true,available:true,status:'ready' as const,detail:'test',models:[{id:'m1',name:'m1',isDefault:true,efforts:['low','medium']}],defaultModel:'m1',capabilities:{fast:true,tools:true,approvals:true,cancel:true,reasoning:true}},{id:'claude',name:'stub claude',installed:true,available:true,status:'ready' as const,detail:'test',models:[{id:'new',name:'new'}],capabilities:{fast:true,tools:true,approvals:false,cancel:true,reasoning:true}}];},
     async run(_input,emit,signal){calls++;emit({type:'delta',text:'ok'});await new Promise<void>((resolve,reject)=>{const timer=setTimeout(resolve,35);signal.addEventListener('abort',()=>{clearTimeout(timer);reject(new Error('aborted'));},{once:true});});return {text:'ok',stopReason:'completed'};},
     async approve(){},async shutdown(){}
   };
@@ -26,6 +26,31 @@ async function ready(server:Server) { await new Promise<void>(r=>server.listenin
 const headers=(base:string)=>({'content-type':'application/json','origin':base});
 
 describe('backend persistence and API',()=>{
+  it('rejects unknown explicit models without persistence and coalesces concurrent catalog discovery with retry after failure',async()=>{
+    let calls=0,release!:()=>void,started!:()=>void,fail=true;let gate=new Promise<void>(r=>{release=r;});let discoveryStarted=new Promise<void>(r=>{started=r;});
+    const models=[{id:'m1',name:'Model 1',efforts:['high']}];
+    const {store,server}=setup(async()=>{calls++;started();await gate;if(fail)throw new Error('temporary discovery failure');return [{id:'codex',name:'Stub',installed:true,available:true,status:'ready',detail:'test',models,capabilities:{fast:true,tools:true,approvals:true,cancel:true,reasoning:true}}];});const base=await ready(server);
+    const post=(model:string)=>fetch(`${base}/api/sessions`,{method:'POST',headers:headers(base),body:JSON.stringify({providerId:'codex',model})});
+    const a=post('m1'),b=post('m1');
+    let timeout:ReturnType<typeof setTimeout>|undefined;
+    try {
+      await Promise.race([discoveryStarted,new Promise<never>((_,reject)=>{timeout=setTimeout(()=>reject(new Error('timed out waiting for catalog discovery to start')),2000);})]);
+      expect(calls).toBe(1);
+    } finally { if(timeout)clearTimeout(timeout);release(); }
+    const ra=await a,rb=await b;expect([ra.status,rb.status]).toEqual([400,400]);expect(await ra.text()).toContain('temporary discovery failure');expect(store.listSessions()).toHaveLength(0);
+    fail=false;gate=Promise.resolve();const valid=await post('m1');expect(valid.status).toBe(201);expect(calls).toBeGreaterThanOrEqual(2);
+    const unknown=await post('unknown');expect(unknown.status).toBe(400);expect(store.listSessions()).toHaveLength(1);
+    const session=await valid.json() as Session;const patch=await fetch(`${base}/api/sessions/${session.id}`,{method:'PATCH',headers:headers(base),body:JSON.stringify({model:'unknown'})});expect(patch.status).toBe(400);expect(store.getSession(session.id)?.model).toBe('m1');store.close();
+  });
+
+  it('revalidates PATCH after catalog awaits when the session is deleted or becomes active',async()=>{
+    let release!:()=>void;let gate=new Promise<void>(r=>{release=r;});const {store,server}=setup(async()=>{await gate;return [{id:'codex',name:'Stub',installed:true,available:true,status:'ready',detail:'test',models:[{id:'m1',name:'Model 1'}],capabilities:{fast:true,tools:true,approvals:true,cancel:true,reasoning:true}}];});const base=await ready(server);const now=new Date().toISOString();
+    const create=async(id:string)=>{const s:Session={id,projectId:null,title:'T',providerId:'codex',mode:'fast',createdAt:now,updatedAt:now};store.putSession(s);return s;};
+    await create('gone');const deletion=fetch(`${base}/api/sessions/gone`,{method:'PATCH',headers:headers(base),body:JSON.stringify({model:'m1'})});await new Promise(r=>setTimeout(r,15));store.deleteSession('gone');release();expect((await deletion).status).toBe(404);store.close();
+    let releaseActive!:()=>void;const activeGate=new Promise<void>(r=>{releaseActive=r;});const second=setup(async()=>{await activeGate;return [{id:'codex',name:'Stub',installed:true,available:true,status:'ready',detail:'test',models:[{id:'m1',name:'Model 1'}],capabilities:{fast:true,tools:true,approvals:true,cancel:true,reasoning:true}}];});const activeBase=await ready(second.server);second.store.putSession({id:'active',projectId:null,title:'T',providerId:'codex',mode:'fast',createdAt:now,updatedAt:now});const active=fetch(`${activeBase}/api/sessions/active`,{method:'PATCH',headers:headers(activeBase),body:JSON.stringify({model:'m1'})});await new Promise(r=>setTimeout(r,15));second.store.putSession({...second.store.getSession('active')!,activeRunId:'run-active'});releaseActive();expect((await active).status).toBe(409);expect(second.store.getSession('active')).toMatchObject({activeRunId:'run-active'});expect(second.store.getSession('active')).not.toHaveProperty('model');second.store.close();
+    let releaseChange!:()=>void;const changeGate=new Promise<void>(r=>{releaseChange=r;});const third=setup(async()=>{await changeGate;return [{id:'codex',name:'Stub',installed:true,available:true,status:'ready',detail:'test',models:[{id:'m1',name:'Model 1'}],capabilities:{fast:true,tools:true,approvals:true,cancel:true,reasoning:true}}];});const changeBase=await ready(third.server);third.store.putSession({id:'changed',projectId:null,title:'Before',providerId:'codex',mode:'fast',createdAt:now,updatedAt:now});const changing=fetch(`${changeBase}/api/sessions/changed`,{method:'PATCH',headers:headers(changeBase),body:JSON.stringify({model:'m1'})});await new Promise(r=>setTimeout(r,15));third.store.putSession({...third.store.getSession('changed')!,title:'Concurrent update'});releaseChange();expect((await changing).status).toBe(409);expect(third.store.getSession('changed')).toMatchObject({title:'Concurrent update'});expect(third.store.getSession('changed')).not.toHaveProperty('model');third.store.close();
+  });
+
   it('migrates populated project-bound tables to nullable project IDs and keeps foreign keys intact',()=>{
     const dir=mkdtempSync(join(tmpdir(),'adelic-legacy-schema-'));dirs.push(dir);const db=new DatabaseSync(join(dir,'adelic.sqlite'));
     db.exec(`PRAGMA foreign_keys=ON;
@@ -61,6 +86,113 @@ describe('backend persistence and API',()=>{
     const runDone=new Promise<void>(resolve=>orchestrator.subscribe(event=>{if(event.type==='run'&&event.run.sessionId===detached.id&&event.run.status==='completed')resolve();}));
     const busy=await fetch(`${base}/api/sessions/${detached.id}/messages`,{method:'POST',headers:headers(base),body:JSON.stringify({content:'hello'})});expect(busy.status).toBe(202);
     const duringRun=await fetch(`${base}/api/sessions/${detached.id}`,{method:'PATCH',headers:headers(base),body:JSON.stringify({projectId:'p1',title:'should not change'})});expect(duringRun.status).toBe(409);expect(store.getSession(detached.id)).toMatchObject({projectId:null,title:'hello'});await runDone;store.close();
+  });
+
+  it('validates and persists the independent thinking selection on sessions',async()=>{
+    const {store,server}=setup();const base=await ready(server);
+    const post=async(body:unknown)=>fetch(`${base}/api/sessions`,{method:'POST',headers:headers(base),body:JSON.stringify(body)});
+    const invalidCreate=await post({thinking:'maximum'});expect(invalidCreate.status).toBe(400);
+    const created=await post({thinking:'medium'});expect(created.status).toBe(201);const session=await created.json() as Session;
+    expect(session.thinking).toBe('medium');expect(store.getSession(session.id)?.thinking).toBe('medium');
+    const invalidPatch=await fetch(`${base}/api/sessions/${session.id}`,{method:'PATCH',headers:headers(base),body:JSON.stringify({thinking:'maximum',title:'must stay unchanged'})});
+    expect(invalidPatch.status).toBe(400);expect(store.getSession(session.id)).toMatchObject({thinking:'medium',title:'Nova conversa'});
+    const setAuto=await fetch(`${base}/api/sessions/${session.id}`,{method:'PATCH',headers:headers(base),body:JSON.stringify({thinking:'auto'})});
+    expect(setAuto.status).toBe(200);expect((await setAuto.json()).thinking).toBe('auto');expect(store.getSession(session.id)?.thinking).toBe('auto');
+    const unsupported=await post({thinking:'high'});expect(unsupported.status).toBe(400);expect(store.listSessions()).toHaveLength(1);
+    const dataDir=store.dataDir;store.close();const reopened=new Store(dataDir);expect(reopened.getSession(session.id)?.thinking).toBe('auto');reopened.close();
+  });
+
+  it('applies a manual thinking override to every delegated phase without changing routing policy',async()=>{
+    const dir=mkdtempSync(join(tmpdir(),'adelic-thinking-phases-'));dirs.push(dir);const store=new Store(dir);const now=new Date().toISOString();
+    store.putProject({id:'p',name:'P',path:dir,createdAt:now,memoryWorkspace:'w',memoryProject:'p',graphify:{enabled:false},orchestration:{enabled:true,maxWorkers:1,review:true,workerProviderId:'kiro',workerModel:'model-luna',reviewerProviderId:'claude',reviewerModel:'model-astra'}});
+    const session:Session={id:'s',projectId:'p',title:'T',providerId:'codex',model:'model-a',mode:'deep',thinking:'ultra',createdAt:now,updatedAt:now};store.putSession(session);
+    const inputs:RunInput[]=[];
+    const providers:ProviderRegistry={
+      async list(){return [
+        {id:'codex',name:'Sol',installed:true,available:true,status:'ready',detail:'test',models:[{id:'model-a',name:'Model A',efforts:['low','medium','high','ultra'],isDefault:true}],defaultModel:'model-a',capabilities:{fast:true,tools:true,approvals:true,cancel:true,reasoning:true}},
+        {id:'kiro',name:'Luna',installed:true,available:true,status:'ready',detail:'test',models:[{id:'model-luna',name:'Luna Model',efforts:['low','medium','high','max']}],defaultModel:'model-luna',capabilities:{fast:true,tools:true,approvals:true,cancel:true,reasoning:true}},
+        {id:'claude',name:'Astra',installed:true,available:true,status:'ready',detail:'test',models:[{id:'model-astra',name:'Astra Model',efforts:['low','medium','high','ultra']}],defaultModel:'model-astra',capabilities:{fast:true,tools:true,approvals:true,cancel:true,reasoning:true}}
+      ];},
+      async run(input,emit){inputs.push(input);if(input.prompt.includes('Produza somente JSON válido'))return {text:JSON.stringify({tasks:[{id:'work',title:'Work',instructions:'Inspect target',scope:[],dependsOn:[]}] }),stopReason:'completed'};if(input.prompt.includes('Faça revisão independente'))return {text:'Reviewed',stopReason:'completed'};if(input.prompt.includes('Responda ao pedido completo')){emit({type:'delta',text:'Done'});return {text:'Done',stopReason:'completed'};}return {text:'Worker output',stopReason:'completed'};},
+      async approve(){},async shutdown(){}
+    };
+    const orchestrator=new Orchestrator(store,providers);const done=new Promise<void>(resolve=>orchestrator.subscribe(event=>{if(event.type==='run'&&event.run.sessionId==='s'&&event.run.status==='completed')resolve();}));
+    await orchestrator.start(session,'Implemente um endpoint para esta aplicação');await done;
+    expect(inputs.map(input=>input.plan.effort)).toEqual(['ultra','max','ultra','ultra']);
+    expect(inputs.map(input=>input.prompt.includes('Produza somente JSON válido')?'planner':input.prompt.includes('Faça revisão independente')?'reviewer':input.prompt.includes('Responda ao pedido completo')?'synthesis':'worker')).toEqual(['planner','worker','reviewer','synthesis']);
+    expect(inputs.find(input=>input.prompt.includes('Produza somente JSON válido'))?.plan.tools).toBe(false);
+    expect(inputs.find(input=>input.prompt.includes('Produza somente JSON válido'))?.plan.level).toBe('fast');
+    expect(inputs.filter(input=>input.prompt.includes('Responda ao pedido completo'))[0].plan.tools).toBe(false);
+    expect(store.listRuns('s')[0].route.effort).toBe('ultra');
+    expect(store.listSessionTasks('s').find(task=>task.role==='worker')?.effort).toBe('max');
+    await orchestrator.shutdown();store.close();
+  });
+
+  it('rejects unsupported manual thinking before persisting a run',async()=>{
+    const dir=mkdtempSync(join(tmpdir(),'adelic-thinking-unsupported-'));dirs.push(dir);const store=new Store(dir);const now=new Date().toISOString();
+    store.putProject({id:'p',name:'P',path:dir,createdAt:now,memoryWorkspace:'w',memoryProject:'p',orchestration:{enabled:false,maxWorkers:1,review:false}});
+    const models=[{id:'model-a',name:'Model A',efforts:['low']},{id:'model-empty',name:'Model Empty',efforts:[]},{id:'model-xhigh',name:'Model xhigh',efforts:['xhigh']}];
+    const providers:ProviderRegistry={async list(){return [{id:'codex',name:'Stub',installed:true,available:true,status:'ready',detail:'test',models,capabilities:{fast:true,tools:true,approvals:true,cancel:true,reasoning:true}}];},async run(){throw new Error('must not run');},async approve(){},async shutdown(){}};
+    const orchestrator=new Orchestrator(store,providers);
+    for(const [id,model,name] of [['s','model-a','Model A'],['empty','model-empty','Model Empty'],['xhigh','model-xhigh','Model xhigh']]) {
+      const session:Session={id,projectId:'p',title:'T',providerId:'codex',model,mode:'fast',thinking:'high',createdAt:now,updatedAt:now};store.putSession(session);
+      await expect(orchestrator.start(session,'hello')).rejects.toThrow(`não anuncia esforço high para ${name}`);
+      expect(store.listMessages(id)).toEqual([]);expect(store.listRuns(id)).toEqual([]);
+    }
+    await orchestrator.shutdown();store.close();
+  });
+
+  it('keeps quick conceptual turns single-call while exposing tools only if needed',async()=>{
+    const dir=mkdtempSync(join(tmpdir(),'adelic-thinking-fast-'));dirs.push(dir);const store=new Store(dir);const now=new Date().toISOString();
+    store.putProject({id:'p',name:'P',path:dir,createdAt:now,memoryWorkspace:'w',memoryProject:'p',orchestration:{enabled:false,maxWorkers:1,review:false},graphify:{enabled:true}});
+    const session:Session={id:'s',projectId:'p',title:'T',providerId:'codex',mode:'fast',thinking:'high',createdAt:now,updatedAt:now};store.putSession(session);let captured:RunInput|undefined;
+    const providers:ProviderRegistry={async list(){return [{id:'codex',name:'Stub',installed:true,available:true,status:'ready',detail:'test',models:[{id:'m1',name:'m1',isDefault:true,efforts:['high']}],defaultModel:'m1',capabilities:{fast:true,tools:true,approvals:true,cancel:true,reasoning:true}}];},async run(input,emit){captured=input;emit({type:'delta',text:'ok'});return {text:'ok',stopReason:'completed'};},async approve(){},async shutdown(){}};
+    const orchestrator=new Orchestrator(store,providers);const done=new Promise<void>(resolve=>orchestrator.subscribe(event=>{if(event.type==='run'&&event.run.sessionId==='s'&&event.run.status==='completed')resolve();}));
+    await orchestrator.start(session,'Uma pergunta direta');await done;
+    expect(captured?.plan).toMatchObject({level:'fast',effort:'high',tools:true,memory:false});expect(store.listSessionTasks('s')).toEqual([]);
+    await orchestrator.shutdown();store.close();
+  });
+
+  it('reserves sessions across delayed catalog discovery, coalescing retries and rejecting other message IDs',async()=>{
+    const dir=mkdtempSync(join(tmpdir(),'adelic-thinking-race-'));dirs.push(dir);const store=new Store(dir);const now=new Date().toISOString();
+    store.putProject({id:'p',name:'P',path:dir,createdAt:now,memoryWorkspace:'w',memoryProject:'p',orchestration:{enabled:false,maxWorkers:1,review:false}});
+    const session:Session={id:'s',projectId:'p',title:'T',providerId:'codex',mode:'fast',thinking:'auto',createdAt:now,updatedAt:now};store.putSession(session);
+    let releaseCatalog!:()=>void;const catalogGate=new Promise<void>(resolve=>{releaseCatalog=resolve;});let listCalls=0,runCalls=0;
+    const providers:ProviderRegistry={async list(){listCalls++;await catalogGate;return [{id:'codex',name:'Stub',installed:true,available:true,status:'ready',detail:'test',models:[{id:'m1',name:'m1',efforts:['medium']}],capabilities:{fast:true,tools:true,approvals:true,cancel:true,reasoning:true}}];},async run(input,emit){runCalls++;emit({type:'delta',text:'ok'});return {text:'ok',stopReason:'completed'};},async approve(){},async shutdown(){}};
+    const orchestrator=new Orchestrator(store,providers);let runFinished!:()=>void;const finished=new Promise<void>(resolve=>{runFinished=resolve;});orchestrator.subscribe(event=>{if(event.type==='run'&&event.run.sessionId==='s'&&event.run.status==='completed')runFinished();});
+    const first=orchestrator.start(session,'hello','client-1');expect(orchestrator.isActive('s')).toBe(true);
+    const retry=orchestrator.start(session,'hello','client-1');
+    await expect(orchestrator.start(session,'different','client-2')).rejects.toMatchObject({status:409});
+    const [accepted,retried]=await Promise.all([first,retry]);expect(retried).toEqual(accepted);expect(store.listRuns('s')).toHaveLength(1);expect(runCalls).toBe(0);
+    releaseCatalog();await finished;
+    expect(store.listRuns('s')).toHaveLength(1);expect(runCalls).toBe(1);expect(listCalls).toBe(1);expect(orchestrator.isActive('s')).toBe(false);
+    await orchestrator.shutdown();store.close();
+  });
+
+  it('reserves a valid manual-thinking run during slow discovery and retries after cancellation before persistence',async()=>{
+    const dir=mkdtempSync(join(tmpdir(),'adelic-manual-thinking-reservation-'));dirs.push(dir);const store=new Store(dir),now=new Date().toISOString();store.putProject({id:'p',name:'P',path:dir,createdAt:now,memoryWorkspace:'w',memoryProject:'p',orchestration:{enabled:false,maxWorkers:1,review:false}});const session:Session={id:'manual-race',projectId:'p',title:'T',providerId:'codex',model:'m1',mode:'fast',thinking:'high',createdAt:now,updatedAt:now};store.putSession(session);
+    let release!:()=>void,calls=0,runCalls=0;const gate=new Promise<void>(r=>{release=r;});const providers:ProviderRegistry={async list(){calls++;if(calls===1)await gate;return [{id:'codex',name:'Stub',installed:true,available:true,status:'ready',detail:'test',models:[{id:'m1',name:'M1',efforts:['high']}],capabilities:{fast:true,tools:true,approvals:true,cancel:true,reasoning:true}}];},async run(){runCalls++;return {text:'ok',stopReason:'completed'};},async approve(){},async shutdown(){}};const orchestrator=new Orchestrator(store,providers);
+    const first=orchestrator.start(session,'hello');expect(orchestrator.isActive(session.id)).toBe(true);await expect(orchestrator.start(session,'hello','different')).rejects.toMatchObject({status:409});await orchestrator.cancel(session.id);release();await expect(first).rejects.toMatchObject({status:409});expect(store.listRuns(session.id)).toHaveLength(0);let done!:()=>void;const completed=new Promise<void>(r=>{done=r;});orchestrator.subscribe(event=>{if(event.type==='run'&&event.run.sessionId===session.id&&event.run.status==='completed')done();});const retry=await orchestrator.start(session,'hello','retry');expect(retry.runId).toBeTruthy();await completed;expect(runCalls).toBe(1);await orchestrator.shutdown();store.close();
+  });
+
+  it('releases the session reservation when catalog discovery fails',async()=>{
+    const dir=mkdtempSync(join(tmpdir(),'adelic-thinking-retry-'));dirs.push(dir);const store=new Store(dir);const now=new Date().toISOString();
+    store.putProject({id:'p',name:'P',path:dir,createdAt:now,memoryWorkspace:'w',memoryProject:'p',orchestration:{enabled:false,maxWorkers:1,review:false}});
+    const session:Session={id:'s',projectId:'p',title:'T',providerId:'codex',mode:'fast',thinking:'auto',createdAt:now,updatedAt:now};store.putSession(session);let listCalls=0;
+    const providers:ProviderRegistry={async list(){listCalls++;throw new Error('catalog offline');},async run(_input,emit){emit({type:'delta',text:'ok'});return {text:'ok',stopReason:'completed'};},async approve(){},async shutdown(){}};
+    const orchestrator=new Orchestrator(store,providers);const failed=new Promise<void>(resolve=>orchestrator.subscribe(e=>{if(e.type==='run'&&e.run.sessionId==='s'&&e.run.status==='failed')resolve();}));const accepted=await orchestrator.start(session,'first','retry-id');await failed;
+    expect(accepted.runId).toBeTruthy();expect(listCalls).toBe(1);expect(orchestrator.isActive('s')).toBe(false);expect(store.listMessages('s')).toHaveLength(2);expect(store.listRuns('s')).toHaveLength(1);await orchestrator.shutdown();store.close();
+  });
+
+  it('cancels and releases a session reserved during catalog discovery',async()=>{
+    const dir=mkdtempSync(join(tmpdir(),'adelic-thinking-cancel-start-'));dirs.push(dir);const store=new Store(dir);const now=new Date().toISOString();
+    store.putProject({id:'p',name:'P',path:dir,createdAt:now,memoryWorkspace:'w',memoryProject:'p'});
+    const session:Session={id:'s',projectId:'p',title:'T',providerId:'codex',mode:'fast',thinking:'auto',createdAt:now,updatedAt:now};store.putSession(session);
+    let releaseCatalog!:()=>void;const gate=new Promise<void>(resolve=>{releaseCatalog=resolve;});
+    const providers:ProviderRegistry={async list(){await gate;return [{id:'codex',name:'Stub',installed:true,available:true,status:'ready',detail:'test',models:[],capabilities:{fast:true,tools:true,approvals:true,cancel:true,reasoning:true}}];},async run(){throw new Error('must not run');},async approve(){},async shutdown(){}};
+    const orchestrator=new Orchestrator(store,providers);const finished=new Promise<void>(resolve=>orchestrator.subscribe(e=>{if(e.type==='run'&&e.run.sessionId==='s'&&e.run.status==='cancelled')resolve();}));const starting=await orchestrator.start(session,'hello','cancel-id');expect(orchestrator.isActive('s')).toBe(true);
+    await orchestrator.cancel('s');releaseCatalog();await finished;
+    expect(starting.runId).toBeTruthy();expect(orchestrator.isActive('s')).toBe(false);expect(store.listMessages('s')).toHaveLength(2);expect(store.listRuns('s')).toHaveLength(1);await orchestrator.shutdown();store.close();
   });
 
   it('runs detached orchestration in its own folder without project memory, graph, or brief context',async()=>{
@@ -99,6 +231,16 @@ describe('backend persistence and API',()=>{
     store.putBrief({projectId:'p',updatedAt:now,paths:['src/a.ts'],truncated:false,objective:'objective',summary:'summary'});
     const exported=store.exportData() as {tasks:{output:string}[];briefs:{projectId:string}[]};expect(exported.tasks[0].output).toBe('full task output');expect(exported.briefs).toEqual([expect.objectContaining({projectId:'p'})]);
     store.deleteSession('s');expect(store.getTask('t')).toBeUndefined();expect(store.listSessionTasks('s')).toEqual([]);expect(store.exportData().tasks).toEqual([]);expect(store.getBrief('p')?.summary).toBe('summary');store.close();
+  });
+
+  it('returns all task metadata for a session without loading outputs into the detail snapshot',async()=>{
+    const {store,server}=setup();const base=await ready(server);const now=new Date().toISOString();
+    const session:Session={id:'long-session',projectId:null,title:'Long history',providerId:'codex',mode:'auto',createdAt:now,updatedAt:now};store.putSession(session);
+    for(let index=0;index<35;index++)store.putTask({id:`task-${index}`,projectId:null,sessionId:session.id,runId:`run-${Math.floor(index/4)}`,role:'worker',title:`Task ${index}`,instructions:'i'.repeat(800),scope:[`src/${index}.ts`],dependsOn:[],providerId:'codex',model:'model-a',status:'completed',createdAt:now,completedAt:now,summary:`summary ${index}`,output:`FULL-OUTPUT-${index}-`+'x'.repeat(5000)});
+    const detailResponse=await fetch(`${base}/api/sessions/${session.id}`,{headers:headers(base)});expect(detailResponse.status).toBe(200);const detail=await detailResponse.json() as {tasks:Record<string,unknown>[]};
+    expect(detail.tasks).toHaveLength(35);expect(detail.tasks[0]).toMatchObject({id:'task-34',title:'Task 34',role:'worker',model:'model-a',scope:['src/34.ts'],summary:'summary 34'});
+    expect(detail.tasks.every(task=>!Object.hasOwn(task,'output')&&String(task.instructions).length===600)).toBe(true);
+    const fullTask=await fetch(`${base}/api/tasks/task-34`,{headers:headers(base)});expect(await fullTask.json()).toMatchObject({id:'task-34',output:`FULL-OUTPUT-34-${'x'.repeat(5000)}`});store.close();
   });
 
   it('accepts one run per session and makes retries idempotent',async()=>{
@@ -199,10 +341,28 @@ describe('backend persistence and API',()=>{
     store.setSettings({...store.getSettings()!,memoryEnabled:true});let memoryCalls=0;
     store.putBrief({projectId:'p',updatedAt:now,paths:['src/index.ts'],truncated:false,objective:'prior objective',summary:'prior architecture'});
     const session:Session={id:'s',projectId:'p',title:'T',providerId:'codex',mode:'fast',createdAt:now,updatedAt:now};store.putSession(session);
-    const current=`What does 2 + 2 equal? ${'x'.repeat(5000)} END-OF-REQUEST`;let calls=0;let captured:RunInput|undefined;
-    const providers:ProviderRegistry={async list(){return [{id:'codex',name:'stub',installed:true,available:true,status:'ready',detail:'test',models:[],capabilities:{fast:true,tools:true,approvals:true,cancel:true}}];},async run(input,emit){calls++;captured=input;emit({type:'delta',text:'4'});return {text:'4',stopReason:'completed'};},async approve(){},async shutdown(){}};
-    const orchestrator=new Orchestrator(store,providers,async()=>{memoryCalls++;return 'should not load';});const done=new Promise<void>(resolve=>orchestrator.subscribe(e=>{if(e.type==='run'&&e.run.status==='completed')resolve();}));await orchestrator.start(session,current);await done;
-    expect(calls).toBe(1);expect(memoryCalls).toBe(0);expect(captured?.plan.tools).toBe(false);expect(captured?.prompt).toContain('END-OF-REQUEST');expect(captured?.memoryContext).toBeUndefined();expect(captured?.prompt).not.toContain('Procedimentos aplicáveis');expect(orchestrator.coordination('p')?.tasks.map(t=>t.role)).toEqual(['worker']);expect(store.getBrief('p')?.objective).toBe('prior objective');await orchestrator.shutdown();store.close();
+    const current=`What does 2 + 2 equal? ${'x'.repeat(5000)} END-OF-REQUEST`;let calls=0,toolEvents=0;let captured:RunInput|undefined;
+    const providers:ProviderRegistry={async list(){return [{id:'codex',name:'stub',installed:true,available:true,status:'ready',detail:'test',models:[{id:'m1',name:'m1',isDefault:true,efforts:['low']}],defaultModel:'m1',capabilities:{fast:true,tools:true,approvals:true,cancel:true,reasoning:true}}];},async run(input,emit){calls++;captured=input;emit({type:'delta',text:'4'});return {text:'4',stopReason:'completed'};},async approve(){},async shutdown(){}};
+    const orchestrator=new Orchestrator(store,providers,async()=>{memoryCalls++;return 'should not load';});orchestrator.subscribe(event=>{if(event.type==='event'&&event.event.type==='tool')toolEvents++;});const done=new Promise<void>(resolve=>orchestrator.subscribe(e=>{if(e.type==='run'&&e.run.status==='completed')resolve();}));await orchestrator.start(session,current);await done;
+    expect(calls).toBe(1);expect(toolEvents).toBe(0);expect(memoryCalls).toBe(0);expect(captured?.plan).toMatchObject({level:'fast',effort:'low',tools:true,memory:false,contextBudget:3500});expect(captured?.prompt).toContain('END-OF-REQUEST');expect(captured?.memoryContext).toBeUndefined();expect(captured?.prompt).not.toContain('Procedimentos aplicáveis');expect(orchestrator.coordination('p')?.tasks.map(t=>t.role)).toEqual(['worker']);expect(store.getBrief('p')?.objective).toBe('prior objective');await orchestrator.shutdown();store.close();
+  });
+
+  it('keeps explicit quick mode tool-enabled for a file request and tracks its single executor',async()=>{
+    const dir=mkdtempSync(join(tmpdir(),'adelic-fast-file-'));dirs.push(dir);const store=new Store(dir);const now=new Date().toISOString();
+    store.putProject({id:'p',name:'P',path:dir,createdAt:now,memoryWorkspace:'w',memoryProject:'p',graphify:{enabled:true},orchestration:{enabled:true,maxWorkers:3,review:true}});
+    const session:Session={id:'s',projectId:'p',title:'T',providerId:'codex',mode:'fast',createdAt:now,updatedAt:now};store.putSession(session);let calls=0;let captured:RunInput|undefined;
+    const providers:ProviderRegistry={async list(){return [{id:'codex',name:'stub',installed:true,available:true,status:'ready',detail:'test',models:[{id:'m1',name:'m1',isDefault:true,efforts:['low']}],defaultModel:'m1',capabilities:{fast:true,tools:true,approvals:true,cancel:true,reasoning:true}}];},async run(input,emit){calls++;captured=input;emit({type:'tool',name:'read_file',description:'README.md',status:'completed',toolCallId:'read-1'});emit({type:'delta',text:'Found the project overview.'});return {text:'Found the project overview.',stopReason:'completed'};},async approve(){},async shutdown(){}};
+    const orchestrator=new Orchestrator(store,providers);const done=new Promise<void>(resolve=>orchestrator.subscribe(event=>{if(event.type==='run'&&event.run.sessionId==='s'&&event.run.status==='completed')resolve();}));await orchestrator.start(session,'Leia README');await done;
+    expect(calls).toBe(1);expect(captured?.plan).toMatchObject({level:'fast',tools:true,memory:false,effort:'low'});expect(captured?.prompt).toContain('use as ferramentas disponíveis');expect(store.listSessionTasks('s').map(task=>task.role)).toEqual(['worker']);expect(store.listSessionTasks('s')[0]).toMatchObject({status:'completed',output:'Found the project overview.'});expect(store.listEvents('s').some(event=>event.type==='tool'&&event.toolCallId?.endsWith(':read-1'))).toBe(true);
+    await orchestrator.shutdown();store.close();
+  });
+
+  it('reports when a provider cannot honor fast-mode tool availability',async()=>{
+    const dir=mkdtempSync(join(tmpdir(),'adelic-fast-no-tools-'));dirs.push(dir);const store=new Store(dir);const now=new Date().toISOString();
+    store.putProject({id:'p',name:'P',path:dir,createdAt:now,memoryWorkspace:'w',memoryProject:'p',orchestration:{enabled:false,maxWorkers:1,review:false}});const session:Session={id:'s',projectId:'p',title:'T',providerId:'codex',mode:'fast',createdAt:now,updatedAt:now};store.putSession(session);let calls=0;
+    const providers:ProviderRegistry={async list(){return [{id:'codex',name:'stub',installed:true,available:true,status:'ready',detail:'test',models:[],capabilities:{fast:true,tools:false,approvals:false,cancel:true}}];},async run(){calls++;return {text:'unexpected',stopReason:'completed'};},async approve(){},async shutdown(){}};
+    const orchestrator=new Orchestrator(store,providers);const failed=new Promise<Run>(resolve=>orchestrator.subscribe(event=>{if(event.type==='run'&&event.run.sessionId==='s'&&event.run.status==='failed')resolve(event.run);}));await orchestrator.start(session,'O que é uma árvore binária?');const run=await failed;
+    expect(calls).toBe(0);expect(run.error).toContain('não disponibiliza ferramentas');expect(store.listMessages('s').at(-1)?.content).toContain('não disponibiliza ferramentas');await orchestrator.shutdown();store.close();
   });
 
   it('loads memory only when routed and forwards bounded untrusted context to relevant roles',async()=>{
@@ -210,7 +370,7 @@ describe('backend persistence and API',()=>{
     store.putProject({id:'p',name:'P',path:dir,createdAt:now,memoryWorkspace:'w',memoryProject:'p',graphify:{enabled:false},orchestration:{enabled:true,maxWorkers:2,review:true}});
     store.setSettings({...store.getSettings()!,memoryEnabled:true});const session:Session={id:'s',projectId:'p',title:'T',providerId:'codex',mode:'deep',createdAt:now,updatedAt:now};store.putSession(session);
     let memoryLookups=0;const memoryLoader=async(_project:Project,query:string)=>{memoryLookups++;if(query.includes('NO-MATCH'))return undefined;if(query.includes('LOOKUP-FAIL'))throw new Error('simulated memory timeout');return `Private note\n${'memory '.repeat(1000)}`;};const inputs:RunInput[]=[];
-    const providers:ProviderRegistry={async list(){return [{id:'codex',name:'stub',installed:true,available:true,status:'ready',detail:'test',models:[{id:'gpt-6-luna',name:'GPT-6 Luna'},{id:'gpt-6-sol',name:'GPT-6 Sol'}],capabilities:{fast:true,tools:true,approvals:true,cancel:true}}];},async run(input,emit){inputs.push(input);if(input.prompt.includes('Produza somente JSON válido'))return {text:JSON.stringify({tasks:[{id:'inspect',title:'Inspect',instructions:'Read the relevant implementation',scope:['src/a.ts'],dependsOn:[]}] }),stopReason:'completed'};if(input.prompt.includes('Faça revisão independente'))return {text:'Review complete',stopReason:'completed'};if(input.prompt.includes('Responda ao pedido completo')){emit({type:'delta',text:'Answer'});return {text:'Answer',stopReason:'completed'};}return {text:'Worker result',stopReason:'completed'};},async approve(){},async shutdown(){}};
+    const providers:ProviderRegistry={async list(){return [{id:'codex',name:'stub',installed:true,available:true,status:'ready',detail:'test',models:[{id:'gpt-6-luna',name:'GPT-6 Luna',efforts:['low','high']},{id:'gpt-6-sol',name:'GPT-6 Sol',efforts:['low','high']}],capabilities:{fast:true,tools:true,approvals:true,cancel:true}}];},async run(input,emit){inputs.push(input);if(input.prompt.includes('Produza somente JSON válido'))return {text:JSON.stringify({tasks:[{id:'inspect',title:'Inspect',instructions:'Read the relevant implementation',scope:['src/a.ts'],dependsOn:[]}] }),stopReason:'completed'};if(input.prompt.includes('Faça revisão independente'))return {text:'Review complete',stopReason:'completed'};if(input.prompt.includes('Responda ao pedido completo')){emit({type:'delta',text:'Answer'});return {text:'Answer',stopReason:'completed'};}return {text:'Worker result',stopReason:'completed'};},async approve(){},async shutdown(){}};
     const orchestrator=new Orchestrator(store,providers,memoryLoader);const done=new Promise<void>(resolve=>orchestrator.subscribe(e=>{if(e.type==='run'&&e.run.status==='completed')resolve();}));
     await orchestrator.start(session,'Pesquise na memória anterior e implemente uma alteração no arquivo do projeto');await done;
     expect(memoryLookups).toBe(1);expect(inputs).toHaveLength(4);for(const input of inputs){expect(input.memoryContext).toContain('DADOS DE MEMÓRIA NÃO CONFIÁVEIS');expect(input.memoryContext!.length).toBeLessThan(4200);}
@@ -224,7 +384,7 @@ describe('backend persistence and API',()=>{
   it('delegates simple deep inspection directly to one tool-enabled worker',async()=>{
     const dir=mkdtempSync(join(tmpdir(),'adelic-deep-inspection-'));dirs.push(dir);const store=new Store(dir);const now=new Date().toISOString();
     store.putProject({id:'p',name:'P',path:dir,createdAt:now,memoryWorkspace:'w',memoryProject:'p',graphify:{enabled:false}});const session:Session={id:'s',projectId:'p',title:'T',providerId:'codex',mode:'deep',createdAt:now,updatedAt:now};store.putSession(session);
-    let calls=0;let captured:RunInput|undefined;const providers:ProviderRegistry={async list(){return [{id:'codex',name:'stub',installed:true,available:true,status:'ready',detail:'test',models:[],capabilities:{fast:true,tools:true,approvals:true,cancel:true}}];},async run(input,emit){calls++;captured=input;emit({type:'delta',text:'Inspected.'});return {text:'Inspected.',stopReason:'completed'};},async approve(){},async shutdown(){}};
+    let calls=0;let captured:RunInput|undefined;const providers:ProviderRegistry={async list(){return [{id:'codex',name:'stub',installed:true,available:true,status:'ready',detail:'test',models:[{id:'m1',name:'m1',isDefault:true,efforts:['low']}],defaultModel:'m1',capabilities:{fast:true,tools:true,approvals:true,cancel:true,reasoning:true}}];},async run(input,emit){calls++;captured=input;emit({type:'delta',text:'Inspected.'});return {text:'Inspected.',stopReason:'completed'};},async approve(){},async shutdown(){}};
     const orchestrator=new Orchestrator(store,providers);const done=new Promise<void>(resolve=>orchestrator.subscribe(e=>{if(e.type==='run'&&e.run.status==='completed')resolve();}));await orchestrator.start(session,'Leia o arquivo do projeto e explique o fluxo principal');await done;
     expect(calls).toBe(1);expect(captured?.plan.tools).toBe(true);expect(orchestrator.coordination('p')?.tasks.map(t=>t.role)).toEqual(['worker']);await orchestrator.shutdown();store.close();
   });
@@ -274,7 +434,7 @@ describe('backend persistence and API',()=>{
     store.putProject({id:'p',name:'P',path:dir,createdAt:now,memoryWorkspace:'pessoal',memoryProject:'adelic'});
     const session:Session={id:'s',projectId:'p',title:'T',providerId:'codex',mode:'fast',createdAt:now,updatedAt:now};store.putSession(session);
     const providers:ProviderRegistry={
-      async list(){return [{id:'codex',name:'stub',installed:true,available:true,status:'ready',detail:'test',models:[],capabilities:{fast:true,tools:false,approvals:false,cancel:true}}];},
+      async list(){return [{id:'codex',name:'stub',installed:true,available:true,status:'ready',detail:'test',models:[],capabilities:{fast:true,tools:true,approvals:false,cancel:true}}];},
       async run(_input,emit){emit({type:'delta',text:'first'});emit({type:'delta',text:' second'});return {text:'first second',stopReason:'completed'};},
       async approve(){},async shutdown(){}
     };
@@ -290,7 +450,7 @@ describe('backend persistence and API',()=>{
     const session:Session={id:'s',projectId:'p',title:'T',providerId:'codex',mode:'fast',createdAt:now,updatedAt:now};store.putSession(session);
     let releaseList!:()=>void;const gate=new Promise<void>(resolve=>{releaseList=resolve;});let runCalls=0;
     const providers:ProviderRegistry={
-      async list(){await gate;return [{id:'codex',name:'stub',installed:true,available:true,status:'ready',detail:'test',models:[],capabilities:{fast:true,tools:false,approvals:false,cancel:true}}];},
+      async list(){await gate;return [{id:'codex',name:'stub',installed:true,available:true,status:'ready',detail:'test',models:[],capabilities:{fast:true,tools:true,approvals:false,cancel:true}}];},
       async run(){runCalls++;return {text:'unexpected',stopReason:'completed'};},async approve(){},async shutdown(){}
     };
     const orchestrator=new Orchestrator(store,providers);const accepted=await orchestrator.start(session,'hello');await orchestrator.cancel('s');releaseList();await orchestrator.shutdown();
@@ -300,18 +460,20 @@ describe('backend persistence and API',()=>{
   it('keeps execution permissions and style from the accepted turn',async()=>{
     const dir=mkdtempSync(join(tmpdir(),'adelic-settings-'));dirs.push(dir);const store=new Store(dir);const now=new Date().toISOString();
     store.putProject({id:'p',name:'P',path:dir,createdAt:now,memoryWorkspace:'pessoal',memoryProject:'adelic'});
-    const session:Session={id:'s',projectId:'p',title:'T',providerId:'codex',mode:'fast',createdAt:now,updatedAt:now};store.putSession(session);
+    const session:Session={id:'s',projectId:'p',title:'T',providerId:'codex',mode:'fast',createdAt:now,updatedAt:now};store.putSession(session);store.setSettings({...store.getSettings()!,approvalMode:'manual'});
     let releaseList!:()=>void;const gate=new Promise<void>(resolve=>{releaseList=resolve;});let received:RunInput|undefined;
     const providers:ProviderRegistry={
-      async list(){await gate;return [{id:'codex',name:'stub',installed:true,available:true,status:'ready',detail:'test',models:[],capabilities:{fast:true,tools:false,approvals:false,cancel:true}}];},
+      async list(){await gate;return [{id:'codex',name:'stub',installed:true,available:true,status:'ready',detail:'test',models:[{id:'m1',name:'m1',efforts:['low']}],capabilities:{fast:true,tools:true,approvals:false,cancel:true}}];},
       async run(input){received=input;return {text:'ok',stopReason:'completed'};},async approve(){},async shutdown(){}
     };
     const {app,orchestrator}=createBackend(store,providers);const server=createServer(app);servers.push(server);server.listen(0,'127.0.0.1');const base=await ready(server);
     const finished=new Promise<void>(resolve=>orchestrator.subscribe(event=>{if(event.type==='run' && event.run.status==='completed')resolve();}));
     await orchestrator.start(session,'hello');
-    const changed=await fetch(`${base}/api/settings`,{method:'PATCH',headers:headers(base),body:JSON.stringify({sandbox:'workspace-write',responseStyle:'concise'})});
+    const changed=await fetch(`${base}/api/settings`,{method:'PATCH',headers:headers(base),body:JSON.stringify({sandbox:'workspace-write',responseStyle:'concise',approvalMode:'auto-safe'})});
     expect(changed.status).toBe(200);releaseList();await finished;
-    expect(received?.sandbox).toBe('read-only');expect(received?.prompt).toContain('resposta equilibrada');
-    expect(store.getSettings()?.sandbox).toBe('workspace-write');store.close();
+    expect(received?.sandbox).toBe('read-only');expect(received?.approvalMode).toBe('manual');expect(received?.prompt).toContain('resposta equilibrada');
+    expect(store.getSettings()?.sandbox).toBe('workspace-write');expect(store.getSettings()?.approvalMode).toBe('auto-safe');
+    const invalid=await fetch(`${base}/api/settings`,{method:'PATCH',headers:headers(base),body:JSON.stringify({approvalMode:'always'})});expect(invalid.status).toBe(400);
+    const manual=await fetch(`${base}/api/settings`,{method:'PATCH',headers:headers(base),body:JSON.stringify({approvalMode:'manual'})});expect(manual.status).toBe(200);expect((await manual.json()).approvalMode).toBe('manual');store.close();
   });
 });

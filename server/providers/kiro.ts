@@ -8,33 +8,55 @@ import { bubblewrap } from './sandbox';
 import { errorMessage, isRecord, JsonRpcProcess, type JsonRpcMessage } from './process';
 import { findProviderBinary, hasProviderBinaryOverride, providerBinaryMissingDetail } from './discovery';
 
-interface KiroTurn { input: RunInput; emit: (event: ProviderEvent) => void; sessionId: string; text: string; resolve: (result: RunResult) => void; reject: (error: Error) => void; signal: AbortSignal; abort: () => void }
-interface KiroApproval { process: JsonRpcProcess; requestId: string | number; runId: string; sessionId: string; allowOptionId: string; denyOptionId: string }
+interface KiroTurn { input: RunInput; emit: (event: ProviderEvent) => void; process:JsonRpcProcess; sessionId: string; text: string; toolCalls:Map<string,{name:string;description:string}>; resolve: (result: RunResult) => void; reject: (error: Error) => void; signal: AbortSignal; abort: () => void }
+interface KiroApproval { process: JsonRpcProcess; requestId: string | number; runId: string; sessionId: string; allowOptionId?: string; denyOptionId?: string }
+
+export function kiroToolEvent(turn:Pick<KiroTurn,'toolCalls'>,update:Record<string,unknown>,status:string):Extract<ProviderEvent,{type:'tool'}> {
+  const rawId=typeof update.toolCallId==='string'?update.toolCallId:typeof update.tool_call_id==='string'?update.tool_call_id:undefined;
+  const previous=rawId?turn.toolCalls.get(rawId):undefined;
+  const name=typeof update.name==='string'&&update.name.trim()?update.name:typeof update.kind==='string'&&update.kind.trim()?update.kind:previous?.name??'kiro-tool';
+  const description=typeof update.title==='string'&&update.title.trim()?update.title:previous?.description??'Ferramenta Kiro';
+  if(rawId)turn.toolCalls.set(rawId,{name,description});
+  return {type:'tool',name,description,status,...(rawId?{toolCallId:rawId}:{})};
+}
+
+export function parseKiroModelCatalog(stdout:string):{models:ProviderInfo['models'];defaultModel?:string} {
+  let parsed:unknown;try{parsed=JSON.parse(stdout);}catch{return {models:[]};}
+  const source=isRecord(parsed)&&Array.isArray(parsed.models)?parsed.models:[];
+  let defaultModel:string|undefined;
+  const models=source.flatMap((entry):ProviderInfo['models']=>{
+    if(!isRecord(entry)||typeof entry.model_id!=='string')return [];
+    const rawEfforts=entry.supportedReasoningEfforts??entry.supported_reasoning_efforts??entry.efforts;
+    const efforts=Array.isArray(rawEfforts)?rawEfforts.flatMap(value=>{const effort=typeof value==='string'?value:isRecord(value)?value.reasoningEffort:undefined;return typeof effort==='string'?[effort]:[]}):undefined;
+    const isDefault=entry.isDefault===true||entry.is_default===true;
+    if(isDefault)defaultModel=entry.model_id;
+    return [{id:entry.model_id,name:typeof entry.model_name==='string'?entry.model_name:entry.model_id,...(efforts!==undefined?{efforts}:{}),...(isDefault?{isDefault:true}:{})}];
+  });
+  return {models,defaultModel};
+}
 
 export class KiroProvider {
   private binary?: string;
   private turns = new Map<string, KiroTurn>();
-  private bySession = new Map<string, KiroTurn>();
+  private byProcessSession = new Map<JsonRpcProcess, Map<string,KiroTurn>>();
   private approvals = new Map<string, KiroApproval>();
   private processes = new Set<JsonRpcProcess>();
   private infoCache?: { at: number; value: ProviderInfo };
   private shuttingDown = false;
+  private processIds=new WeakMap<JsonRpcProcess,number>();
+  private nextProcessId=1;
   private commands = new CommandScope();
   async info(): Promise<ProviderInfo> {
     if (this.shuttingDown) return this.shutdownInfo();
     if (this.infoCache && Date.now() - this.infoCache.at < 5 * 60_000) return this.infoCache.value;
     this.binary ??= await findProviderBinary('kiro');
-    if (!this.binary) return this.cache({ id: 'kiro', name: 'Kiro', installed: false, available: false, status: hasProviderBinaryOverride('kiro') ? 'error' : 'missing', detail: providerBinaryMissingDetail('kiro'), models: [], capabilities: { fast: true, tools: true, approvals: true, cancel: true } });
+    if (!this.binary) return this.cache({ id: 'kiro', name: 'Kiro', installed: false, available: false, status: hasProviderBinaryOverride('kiro') ? 'error' : 'missing', detail: providerBinaryMissingDetail('kiro'), models: [], capabilities: { fast: true, tools: true, approvals: true, cancel: true, reasoning:true } });
     const [result, authResult] = await Promise.all([
       this.commands.run(this.binary, ['chat', '--list-models', '--format', 'json'], 6000),
       this.commands.run(this.binary, ['doctor', '--all'], 6000),
     ]);
     if (this.shuttingDown) return this.shutdownInfo();
-    let models: ProviderInfo['models'] = [];
-    try {
-      const parsed = JSON.parse(result.stdout) as { models?: { model_id?: string; model_name?: string }[] };
-      models = (parsed.models ?? []).filter((model) => model.model_id).map((model) => ({ id: model.model_id!, name: model.model_name ?? model.model_id! }));
-    } catch { /* Discovery was unavailable; never invent a model list. */ }
+    const {models,defaultModel}=parseKiroModelCatalog(result.stdout);
     const authenticated = authResult.code === 0 && /[✓✔]\s*Auth\b/i.test(`${authResult.stdout}\n${authResult.stderr}`);
     const ready = result.code === 0 && models.length > 0 && authenticated;
     const detail = ready
@@ -42,11 +64,11 @@ export class KiroProvider {
       : models.length && !authenticated
         ? 'Catálogo do Kiro disponível, mas o estado de autenticação não foi confirmado.'
         : 'Kiro instalado, mas descoberta de modelos ou autenticação falhou.';
-    return this.cache({ id: 'kiro', name: 'Kiro', installed: true, available: ready, status: ready ? 'ready' : 'error', detail, models, capabilities: { fast: true, tools: true, approvals: true, cancel: true } });
+    return this.cache({ id: 'kiro', name: 'Kiro', installed: true, available: ready, status: ready ? 'ready' : 'error', detail, models, defaultModel, capabilities: { fast: true, tools: true, approvals: true, cancel: true, reasoning:true } });
   }
   private cache(value: ProviderInfo) { this.infoCache = { at: Date.now(), value }; return value; }
   private shutdownInfo(): ProviderInfo {
-    return { id: 'kiro', name: 'Kiro', installed: Boolean(this.binary), available: false, status: 'error', detail: 'Kiro provider is shutting down.', models: [], capabilities: { fast: true, tools: true, approvals: true, cancel: true } };
+    return { id: 'kiro', name: 'Kiro', installed: Boolean(this.binary), available: false, status: 'error', detail: 'Kiro provider is shutting down.', models: [], capabilities: { fast: true, tools: true, approvals: true, cancel: true, reasoning:true } };
   }
 
   private onMessage(process: JsonRpcProcess, message: JsonRpcMessage) {
@@ -54,27 +76,26 @@ export class KiroProvider {
     if (message.method === 'session/request_permission' && message.id !== undefined) {
       const params = isRecord(message.params) ? message.params : {};
       const sessionId = String(params.sessionId ?? '');
-      const turn = this.bySession.get(sessionId);
+      const turn = this.byProcessSession.get(process)?.get(sessionId);
       const options = Array.isArray(params.options) ? params.options.filter(isRecord) : [];
-      const allow = options.find((option) => option.kind === 'allow_once') ?? options.find((option) => String(option.kind).startsWith('allow_'));
-      const deny = options.find((option) => option.kind === 'reject_once') ?? options.find((option) => String(option.kind).startsWith('reject_'));
-      // Fast turns have no tool budget. Reject at the protocol boundary so an agent cannot run a tool.
-      if (!turn || !turn.input.plan.tools || !allow || !deny) {
-        process.respond(message.id, { outcome: { outcome: 'selected', optionId: String(deny?.optionId ?? 'reject-once') } });
+      const allow = options.find((option) => option.kind === 'allow_once' && typeof option.optionId==='string');
+      const deny = options.find((option) => option.kind === 'reject_once' && typeof option.optionId==='string');
+      // Requests without tools must be denied at the protocol boundary.
+      if (!turn || !this.turns.has(turn.input.runId) || turn.process!==process || !turn.input.plan.tools) {
+        process.respond(message.id, { outcome: { outcome: 'cancelled' } });
         return;
       }
-      const approvalId = `${turn.input.runId}:${String(message.id)}`;
-      this.approvals.set(approvalId, { process, requestId: message.id, runId: turn.input.runId, sessionId, allowOptionId: String(allow.optionId), denyOptionId: String(deny.optionId) });
-      const subject = isRecord(params.subject) ? params.subject : {};
-      const tool = isRecord(params.toolCall) ? params.toolCall : isRecord(subject.toolCall) ? subject.toolCall : {};
-      const rawInput = tool.rawInput;
-      const detail = typeof params.description === 'string' ? params.description : typeof rawInput === 'string' ? rawInput : rawInput ? JSON.stringify(rawInput) : String(tool.title ?? 'Kiro solicita permissão.');
-      emitApproval(turn.input, turn.emit, approvalId, String(params.title ?? tool.title ?? 'Permitir ferramenta Kiro'), detail, String(tool.kind ?? '').includes('edit') ? 'file' : 'tool');
+      const processId=this.processIds.get(process)??this.nextProcessId++;
+      this.processIds.set(process,processId);
+      const approvalId = `${turn.input.runId}:${processId}:${String(message.id)}`;
+      this.approvals.set(approvalId, { process, requestId: message.id, runId: turn.input.runId, sessionId, ...(allow?{allowOptionId:String(allow.optionId)}:{}), ...(deny?{denyOptionId:String(deny.optionId)}:{}) });
+      const detail = 'Kiro ACP v1 não garante comando, diretório nem identidade suficiente para aprovação automática. A solicitação permanecerá pendente para decisão manual.';
+      emitApproval(turn.input, turn.emit, approvalId, String(params.title ?? 'Permitir ferramenta Kiro'), detail, 'tool');
       return;
     }
     if ((message.method !== 'session/notification' && message.method !== 'session/update') || !isRecord(message.params)) return;
     const params = message.params;
-    const turn = this.bySession.get(String(params.sessionId ?? ''));
+    const turn = this.byProcessSession.get(process)?.get(String(params.sessionId ?? ''));
     if (!turn) return;
     const update = isRecord(params.update) ? params.update : {};
     const type = String(update.sessionUpdate ?? update.type ?? '');
@@ -84,13 +105,13 @@ export class KiroProvider {
       if (text) { turn.text += text; turn.emit({ type: 'delta', text }); }
     } else if (type === 'tool_call' || type === 'ToolCall' || type === 'tool_call_update' || type === 'ToolCallUpdate') {
       const status = String(update.status ?? (type.toLowerCase().includes('update') ? 'running' : 'pending'));
-      turn.emit({ type: 'tool', name: String(update.kind ?? 'kiro-tool'), description: String(update.title ?? update.toolCallId ?? 'Ferramenta Kiro'), status });
+      turn.emit(kiroToolEvent(turn,update,status));
     } else if (type === 'turn_end' || type === 'TurnEnd') this.finish(turn, { text: turn.text, nativeSessionId: turn.sessionId, stopReason: 'completed' });
   }
   private finish(turn: KiroTurn, result: RunResult, error?: Error) {
     if (!this.turns.has(turn.input.runId)) return;
-    turn.signal.removeEventListener('abort', turn.abort); this.turns.delete(turn.input.runId); this.bySession.delete(turn.sessionId);
-    for (const [id, pending] of this.approvals) if (pending.runId === turn.input.runId) { pending.process.respond(pending.requestId, { outcome: { outcome: 'selected', optionId: pending.denyOptionId } }); this.approvals.delete(id); }
+    turn.signal.removeEventListener('abort', turn.abort); this.turns.delete(turn.input.runId); this.byProcessSession.get(turn.process)?.delete(turn.sessionId);
+    for (const [id, pending] of this.approvals) if (pending.runId === turn.input.runId && pending.process===turn.process) { pending.process.respond(pending.requestId, { outcome: { outcome: 'cancelled' } }); this.approvals.delete(id); }
     if (error) turn.reject(error); else turn.resolve(result);
   }
   async run(input: RunInput, emit: (event: ProviderEvent) => void, signal: AbortSignal): Promise<RunResult> {
@@ -99,13 +120,13 @@ export class KiroProvider {
     if (!this.binary) throw new Error(providerBinaryMissingDetail('kiro'));
     const args = ['acp', '--agent-engine', 'v2', '--trust-tools='];
     if (input.model) args.push('--model', input.model);
-    args.push('--effort', input.plan.effort);
+    if (input.plan.effort) args.push('--effort', input.plan.effort);
     // A fresh KIRO_HOME keeps global MCP servers, extra agents, memory and steering out of this app.
     // Kiro's credential store is outside KIRO_HOME and remains owned by the CLI.
     const isolatedHome = await mkdtemp(path.join(os.tmpdir(), 'adelic-kiro-home-'));
     const agentDir = path.join(isolatedHome, 'agents');
     const agentName = 'adelic-runtime';
-    const toolsAllowed = input.plan.tools && input.plan.level === 'deep';
+    const toolsAllowed = input.plan.tools;
     await mkdir(agentDir, { recursive: true });
     await writeFile(path.join(agentDir, `${agentName}.json`), JSON.stringify({
       name: agentName,
@@ -137,11 +158,12 @@ export class KiroProvider {
       const sessionId = String(isRecord(sessionRaw) ? sessionRaw.sessionId ?? '' : '');
       if (!sessionId) throw new Error('Kiro não retornou o identificador da sessão ACP.');
       const result = await new Promise<RunResult>((resolve, reject) => {
-        const current: KiroTurn = { input, emit, sessionId, text: '', resolve, reject, signal, abort: () => {
-          process.notify('session/cancel', { sessionId });
-          this.finish(current, { text: current.text, nativeSessionId: sessionId, stopReason: 'cancelled' });
+        const current: KiroTurn = { input, emit, process, sessionId, text: '', toolCalls:new Map(), resolve, reject, signal, abort: () => {
+          try { process.notify('session/cancel', { sessionId }); }
+          catch { /* The provider may close stdin concurrently with cancellation. */ }
+          finally { this.finish(current, { text: current.text, nativeSessionId: sessionId, stopReason: 'cancelled' }); }
         } };
-        turn = current; this.turns.set(input.runId, current); this.bySession.set(sessionId, current);
+        turn = current; this.turns.set(input.runId, current); let sessions=this.byProcessSession.get(process);if(!sessions){sessions=new Map();this.byProcessSession.set(process,sessions);}sessions.set(sessionId,current);
         signal.addEventListener('abort', current.abort, { once: true });
         emit({ type: 'session', nativeSessionId: sessionId });
         const text = boundedPrompt(input);
@@ -166,8 +188,13 @@ export class KiroProvider {
   }
   async approve(approvalId: string, decision: 'approve' | 'deny') {
     const pending = this.approvals.get(approvalId); if (!pending) throw new Error('Aprovação não está mais pendente.');
+    const turn=this.turns.get(pending.runId);
+    if(!turn||turn.process!==pending.process||turn.sessionId!==pending.sessionId||!turn.input.plan.tools||turn.signal.aborted){this.approvals.delete(approvalId);pending.process.respond(pending.requestId,{outcome:{outcome:'cancelled'}});throw new Error('Aprovação não está mais pendente.');}
+    if(decision==='approve'&&!pending.allowOptionId)throw new Error('Kiro não ofereceu allow_once; a solicitação não pode ser aprovada neste adapter.');
     this.approvals.delete(approvalId);
-    pending.process.respond(pending.requestId, { outcome: { outcome: 'selected', optionId: decision === 'approve' ? pending.allowOptionId : pending.denyOptionId } });
+    if(decision==='approve')pending.process.respond(pending.requestId,{outcome:{outcome:'selected',optionId:pending.allowOptionId!}});
+    else if(pending.denyOptionId)pending.process.respond(pending.requestId,{outcome:{outcome:'selected',optionId:pending.denyOptionId}});
+    else pending.process.respond(pending.requestId,{outcome:{outcome:'cancelled'}});
   }
   async shutdown() {
     this.shuttingDown = true;

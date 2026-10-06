@@ -4,7 +4,7 @@ O Adelic é uma aplicação web pessoal para coordenar agentes locais, com rotea
 
 - Preserve o modo local desta etapa: bind em 127.0.0.1; nenhuma publicação, relay, serviço global ou alteração de credenciais sem instrução específica.
 - O escopo atual de distribuição desktop é somente Linux. Planeje e valide o empacotamento para esse sistema; a arquitetura e o formato do pacote devem ser documentados junto às evidências de compatibilidade.
-- Perguntas simples devem seguir um caminho curto. Não use outra chamada de modelo para classificá-las e não carregue memória, ferramentas ou todas as skills sem necessidade.
+- Perguntas simples devem seguir um caminho curto, com ferramentas locais disponíveis para uso quando necessário. Não use outra chamada de modelo para classificá-las e não carregue memória, grafo ou todas as skills automaticamente. Disponibilidade de ferramentas não exige executá-las nem aumentar a orquestração.
 - Cada projeto começa com orquestração e Graphify ativados. O coordenador delega tarefas, recebe resumos limitados e usa o grafo como mapa de caminhos; executores podem fazer consultas específicas e devem confirmar o código antes de alterar. Saídas completas ficam armazenadas separadamente e são carregadas pela tela sob demanda. Perguntas simples usam somente um executor e não consultam o grafo.
 - Conversas podem ser avulsas (`projectId: null`), com delegação adaptativa e pasta própria em dados operacionais. Nunca carregue memória, grafo ou resumo de um projeto não vinculado. O botão global cria uma conversa avulsa; o + de cada projeto cria uma vinculada. Mudanças de vínculo preservam histórico e são bloqueadas durante execução.
 - Mantenha o tema escuro padrão e confira contraste e seletores em telas pequenas ao alterar a interface.

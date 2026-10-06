@@ -3,6 +3,7 @@ import path from 'node:path';
 import type { Sandbox } from '../../shared/contracts';
 
 export interface WrappedCommand { command: string; args: string[] }
+export interface ReadonlyFileBinding { source: string; target: string; directory?: boolean }
 
 const TMP_ROOT = '/tmp';
 
@@ -23,7 +24,7 @@ function addTmpDirectories(args: string[], target: string, alreadyAdded: Set<str
   }
 }
 
-export async function bubblewrap(command: string, args: string[], cwd: string, sandbox: Sandbox, writableRuntimeDirs: string[] = []): Promise<WrappedCommand> {
+export async function bubblewrap(command: string, args: string[], cwd: string, sandbox: Sandbox, writableRuntimeDirs: string[] = [], readonlyFileBindings: ReadonlyFileBinding[] = []): Promise<WrappedCommand> {
   const bwrap = '/usr/bin/bwrap';
   try { await access(bwrap); } catch { throw new Error('Política de filesystem indisponível: bubblewrap não está instalado.'); }
   const requestedRoot = path.resolve(cwd);
@@ -63,6 +64,16 @@ export async function bubblewrap(command: string, args: string[], cwd: string, s
   }
   for (const binding of bindings) {
     argv.push(binding.writable ? '--bind' : '--ro-bind', binding.source, binding.target);
+  }
+  // File-level readonly grants must be last: later writable mounts must never
+  // shadow credentials or another protected file inside a writable directory.
+  for (const binding of readonlyFileBindings) {
+    const source = await realpath(binding.source);
+    const sourceInfo = await stat(source);
+    if (binding.directory ? !sourceInfo.isDirectory() : !sourceInfo.isFile()) throw new Error('Caminho de runtime somente leitura inválido.');
+    const target = path.resolve(binding.target);
+    if (isWithin(target, TMP_ROOT)) addTmpDirectories(argv, path.dirname(target), tmpDirectories);
+    argv.push('--ro-bind', source, target);
   }
   argv.push('--chdir', root, '--', command, ...args);
   return { command: bwrap, args: argv };

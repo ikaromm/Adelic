@@ -1,4 +1,4 @@
-import type { Bootstrap, DelegatedTask, GraphifyQueryResult, GraphifyStatus, MemoryHit, MemoryPage, Project, ProjectCoordination, Session, SessionDetail, Settings, Skill } from '../shared/contracts';
+import type { Bootstrap, DelegatedTask, GraphifyQueryResult, GraphifyStatus, MemoryCatalog, MemoryHit, MemoryListing, MemoryPage, MemoryScope, Project, ProjectCoordination, Session, SessionDetail, Settings, Skill, Thinking } from '../shared/contracts';
 export interface Health { status: string; providers: { id: string; status: string; available: boolean }[]; memory: string; jail: string }
 
 type ProjectPatch = { name?: string; memoryWorkspace?: string; memoryProject?: string; orchestration?: Project['orchestration']; graphify?: Project['graphify'] };
@@ -18,7 +18,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (!response.ok) {
     const body = await response.json().catch(() => ({})) as { error?: string };
-    throw new Error(body.error || `Falha na solicitação (${response.status})`);
+    const error = new Error(body.error || `Falha na solicitação (${response.status})`) as Error & { status: number };
+    error.status = response.status;
+    throw error;
   }
   if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
@@ -36,7 +38,7 @@ export const api = {
   indexGraphify: (id: string) => request<GraphifyStatus>(`/api/projects/${encodeURIComponent(id)}/graphify/index`, { method: 'POST', body: JSON.stringify({}) }),
   queryGraphify: (id: string, query: string) => request<GraphifyQueryResult>(`/api/projects/${encodeURIComponent(id)}/graphify/query`, { method: 'POST', body: JSON.stringify({ query }) }),
   createSession: (data: { projectId?: string | null; providerId: string; model?: string; mode?: string; title?: string }) => request<Session>('/api/sessions', { method: 'POST', body: JSON.stringify(data) }),
-  updateSession: (id: string, data: Partial<Pick<Session, 'title' | 'providerId' | 'mode' | 'projectId'>> & { model?: string | null }) => request<Session>(`/api/sessions/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  updateSession: (id: string, data: Partial<Pick<Session, 'title' | 'providerId' | 'mode' | 'projectId' | 'thinking'>> & { model?: string | null }) => request<Session>(`/api/sessions/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(data) }),
   deleteSession: (id: string) => request<void>(`/api/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   send: (id: string, content: string, clientMessageId: string) => request<{ runId: string; messageId: string }>(`/api/sessions/${encodeURIComponent(id)}/messages`, { method: 'POST', body: JSON.stringify({ content, clientMessageId }) }),
   cancel: (id: string) => request<void>(`/api/sessions/${encodeURIComponent(id)}/cancel`, { method: 'POST' }),
@@ -45,5 +47,10 @@ export const api = {
   memorySearch: (projectId: string, q: string) => request<{ hits: MemoryHit[] }>(`/api/memory/search?projectId=${encodeURIComponent(projectId)}&q=${encodeURIComponent(q)}`),
   memoryPage: (projectId: string, path: string) => request<MemoryPage>(`/api/memory/page?projectId=${encodeURIComponent(projectId)}&path=${encodeURIComponent(path)}`),
   saveMemory: (projectId: string, path: string, body: string) => request<MemoryPage>('/api/memory/page', { method: 'POST', body: JSON.stringify({ projectId, path, body }) }),
+  memoryCatalog: () => request<MemoryCatalog>('/api/memory/catalog'),
+  memoryList: (scope: MemoryScope, offset = 0, limit = 50) => request<MemoryListing>(`/api/memory/pages?workspace=${encodeURIComponent(scope.workspace)}&project=${encodeURIComponent(scope.project)}&offset=${offset}&limit=${limit}`),
+  sharedMemorySearch: (scope: MemoryScope, q: string) => request<{ hits: MemoryHit[] }>(`/api/memory/search?workspace=${encodeURIComponent(scope.workspace)}&project=${encodeURIComponent(scope.project)}&q=${encodeURIComponent(q)}`),
+  sharedMemoryPage: (scope: MemoryScope, path: string) => request<MemoryPage>(`/api/memory/page?workspace=${encodeURIComponent(scope.workspace)}&project=${encodeURIComponent(scope.project)}&path=${encodeURIComponent(path)}`),
+  saveSharedMemory: (scope: MemoryScope, path: string, body: string, expectedVersion: string | null) => request<MemoryPage>('/api/memory/page', { method: 'POST', body: JSON.stringify({ ...scope, path, body, expectedVersion }) }),
   skill: (id: string, enabled: boolean) => request<Skill>(`/api/skills/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ enabled }) }),
 };

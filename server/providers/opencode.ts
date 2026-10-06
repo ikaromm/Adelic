@@ -11,7 +11,7 @@ export class OpenCodeProvider {
     if (this.shuttingDown) return this.shutdownInfo();
     if (this.cache && Date.now() - this.cache.at < 5 * 60_000) return this.cache.value;
     this.binary ??= await findProviderBinary('opencode');
-    if (!this.binary) return this.save({ id: 'opencode', name: 'OpenCode', installed: false, available: false, status: hasProviderBinaryOverride('opencode') ? 'error' : 'missing', detail: providerBinaryMissingDetail('opencode'), models: [], capabilities: { fast: false, tools: false, approvals: false, cancel: false } });
+    if (!this.binary) return this.save({ id: 'opencode', name: 'OpenCode', installed: false, available: false, status: hasProviderBinaryOverride('opencode') ? 'error' : 'missing', detail: providerBinaryMissingDetail('opencode'), models: [], capabilities: { fast: false, tools: false, approvals: false, cancel: false, reasoning:false } });
 
     const providers = await this.commands.run(this.binary, ['providers', 'list', '--pure'], 4000);
     if (this.shuttingDown) return this.shutdownInfo();
@@ -31,11 +31,11 @@ export class OpenCodeProvider {
     const detail = configured
       ? `OpenCode instalado; ${providerNames.size} provider(s) com credencial local e ${models.length} modelo(s) no catálogo. Autenticação e execução ACP ainda não foram verificadas pelo Adelic.`
       : 'OpenCode instalado, mas nenhum provider com credencial local foi descoberto.';
-    return this.save({ id: 'opencode', name: 'OpenCode', installed: true, available: false, status: 'unknown', detail, models, capabilities: { fast: false, tools: false, approvals: false, cancel: false } });
+    return this.save({ id: 'opencode', name: 'OpenCode', installed: true, available: false, status: 'unknown', detail, models, capabilities: { fast: false, tools: false, approvals: false, cancel: false, reasoning:false } });
   }
   private save(value: ProviderInfo) { this.cache = { at: Date.now(), value }; return value; }
   private shutdownInfo(): ProviderInfo {
-    return { id: 'opencode', name: 'OpenCode', installed: Boolean(this.binary), available: false, status: 'error', detail: 'OpenCode provider is shutting down.', models: [], capabilities: { fast: false, tools: false, approvals: false, cancel: false } };
+    return { id: 'opencode', name: 'OpenCode', installed: Boolean(this.binary), available: false, status: 'error', detail: 'OpenCode provider is shutting down.', models: [], capabilities: { fast: false, tools: false, approvals: false, cancel: false, reasoning:false } };
   }
   async run(_input: RunInput, _emit: (event: ProviderEvent) => void, _signal: AbortSignal): Promise<RunResult> { if (this.shuttingDown) throw new Error('OpenCode provider is shutting down'); throw new Error('OpenCode está instalado, mas a integração ACP do Adelic ainda não está implementada.'); }
   async approve(_approvalId: string, _decision: 'approve' | 'deny'): Promise<void> { throw new Error('OpenCode ainda não oferece aprovações pela integração do Adelic.'); }

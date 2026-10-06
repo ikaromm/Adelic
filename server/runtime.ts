@@ -98,7 +98,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Run
     store = new Store(realDataDir);
     if (options.seedProject && !store.listProjects().length) store.putProject(options.seedProject);
     const { createProviderRegistry } = await import('./providers/index.js');
-    providers = createProviderRegistry();
+    providers = createProviderRegistry(realDataDir);
     graphifyService = new GraphifyService(undefined, realDataDir);
     const backend = createBackend(store, providers, graphifyService);
     orchestrator = backend.orchestrator;

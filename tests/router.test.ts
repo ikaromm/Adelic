@@ -20,15 +20,15 @@ describe('adaptive router', () => {
     for (const prompt of ['Leia src/App.tsx','Read scripts/check.py','Open config/project.json','Leia os arquivos','Read two files','Analise os projetos']) {
       expect(routeMessage(prompt,'auto')).toMatchObject({level:'deep',tools:true});
     }
-    expect(routeMessage('Explique a versão 3.14','auto')).toMatchObject({level:'fast',tools:false});
+    expect(routeMessage('Explique a versão 3.14','auto')).toMatchObject({level:'fast',tools:true,memory:false});
   });
   it('honors manual mode and never consults memory in fast mode', () => {
-    expect(routeMessage('Leia o README', 'fast', [], true)).toMatchObject({level:'fast',tools:false,memory:false,effort:'low',contextBudget:6000});
+    expect(routeMessage('Leia o README', 'fast', [], true)).toMatchObject({level:'fast',tools:true,memory:false,effort:'low',contextBudget:6000});
     expect(routeMessage('Explique este conceito', 'deep')).toMatchObject({level:'deep',effort:'high',contextBudget:24000});
   });
-  it('keeps ordinary creative and conceptual prompts off the tool route', () => {
+  it('keeps ordinary creative and conceptual prompts fast while making tools available', () => {
     for (const prompt of ['Crie uma poesia', 'Teste meus conhecimentos de história', 'Como funciona um teste unitário?', 'Explique o que é um teste unitário?', 'O que significa commit?', 'Como a web funciona?', 'Como funciona o comando build?', 'O que significa PR?', 'Defina clima']) {
-      expect(routeMessage(prompt, 'auto')).toMatchObject({level:'fast',tools:false,memory:false});
+      expect(routeMessage(prompt, 'auto')).toMatchObject({level:'fast',tools:true,memory:false});
     }
     expect(routeMessage('Qual é o clima hoje?', 'auto').tools).toBe(true);
     expect(routeMessage('Rode o build do projeto', 'auto').tools).toBe(true);
@@ -42,6 +42,6 @@ describe('adaptive router', () => {
     for (const prompt of ['Implemente uma rota de API', 'Crie um endpoint', 'Adicione um componente de login', 'Create a database migration']) {
       expect(routeMessage(prompt, 'auto')).toMatchObject({ level: 'deep', tools: true });
     }
-    expect(routeMessage('Explique o que é uma API REST', 'auto')).toMatchObject({ level: 'fast', tools: false });
+    expect(routeMessage('Explique o que é uma API REST', 'auto')).toMatchObject({ level: 'fast', tools: true, memory: false });
   });
 });

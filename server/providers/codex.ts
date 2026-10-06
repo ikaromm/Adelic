@@ -1,16 +1,20 @@
 import path from 'node:path';
-import { readFile } from 'node:fs/promises';
+import { lstat, realpath, stat, mkdir, writeFile } from 'node:fs/promises';
 import os from 'node:os';
-import { parse as parseToml } from 'smol-toml';
+import { mkdtemp, chmod, rm } from 'node:fs/promises';
 import type { Approval, ProviderEvent, ProviderInfo, RunInput, RunResult, Sandbox } from '../../shared/contracts';
 import { abortError, boundedPrompt, emitApproval } from './common';
 import { CommandScope, runCommand, type CommandExecutor, type CommandResult } from './command';
 import { errorMessage, isRecord, JsonRpcProcess, type JsonRpcMessage } from './process';
 import { findProviderBinary, hasProviderBinaryOverride, providerBinaryMissingDetail } from './discovery';
+import { canonWritePathWithin, classifyApproval, scanCodexRules } from '../approval-policy';
+import { bubblewrap, type ReadonlyFileBinding, type WrappedCommand } from './sandbox';
 
-interface CodexServer { key: string; cwd: string; tools: boolean; rpc?: JsonRpcProcess; ready: Promise<JsonRpcProcess> }
-interface ActiveTurn { input: RunInput; emit: (event: ProviderEvent) => void; server: CodexServer; threadId?: string; turnId?: string; text: string; resolve: (result: RunResult) => void; reject: (error: Error) => void; signal: AbortSignal; abort: () => void; requestInterrupt: () => void; interruptSent: boolean }
+type CodexToolProfile = 'no-tools' | 'fast-local-tools' | 'deep-tools';
+interface CodexServer { key: string; cwd: string; profile: CodexToolProfile; scratch: string; rpc?: JsonRpcProcess; ready: Promise<JsonRpcProcess>; cleanup?: Promise<void> }
+interface ActiveTurn { input: RunInput; emit: (event: ProviderEvent) => void; server: CodexServer; threadId?: string; turnId?: string; localEnvironmentVerified: boolean; text: string; resolve: (result: RunResult) => void; reject: (error: Error) => void; signal: AbortSignal; abort: () => void; requestInterrupt: () => void; interruptSent: boolean }
 interface PendingApproval { runId: string; sessionId: string; server: CodexServer; requestId: string | number; method: string; params: Record<string, unknown> }
+type CodexWrapper = (command: string, args: string[], cwd: string, sandbox: Sandbox, writableRuntimeDirs?: string[], readonlyFileBindings?: ReadonlyFileBinding[]) => Promise<WrappedCommand>;
 
 function approvalDetail(method: string, params: Record<string, unknown>) {
   if (method === 'item/commandExecution/requestApproval') {
@@ -33,56 +37,31 @@ function approvalDetail(method: string, params: Record<string, unknown>) {
   return [...paths, network, typeof params.reason === 'string' ? `Motivo: ${params.reason}` : ''].filter(Boolean).join('\n') || 'Permissões adicionais solicitadas.';
 }
 
-function approvedPermissions(turn: ActiveTurn, params: Record<string, unknown>): Record<string, unknown> | undefined {
+async function approvedPermissions(turn: ActiveTurn, params: Record<string, unknown>): Promise<Record<string, unknown> | undefined> {
   if (!isRecord(params.permissions)) return undefined;
   const requested = params.permissions;
+  if (Object.keys(requested).some(key => !['fileSystem', 'network'].includes(key))) return undefined;
+  if (requested.network !== undefined && (!isRecord(requested.network) || Object.keys(requested.network).some(key => key !== 'enabled') || typeof requested.network.enabled !== 'boolean')) return undefined;
   const fileSystem = isRecord(requested.fileSystem) ? requested.fileSystem : undefined;
-  if (!fileSystem) return requested;
-  const root = path.resolve(turn.input.cwd);
-  const isWithinWorkspace = (raw: string) => {
-    const resolved = path.resolve(root, raw);
-    return resolved === root || resolved.startsWith(`${root}${path.sep}`);
-  };
-  if (Array.isArray(fileSystem.entries)) {
+  if (requested.fileSystem !== undefined && !fileSystem) return undefined;
+  if (fileSystem && (Object.keys(fileSystem).some(key => !['entries','read','write'].includes(key)) || fileSystem.entries !== undefined && !Array.isArray(fileSystem.entries) || fileSystem.read !== undefined && !Array.isArray(fileSystem.read) || fileSystem.write !== undefined && !Array.isArray(fileSystem.write))) return undefined;
+  let root: string;
+  try { root = await (await import('node:fs/promises')).realpath(turn.input.cwd); } catch { return undefined; }
+  const safeWrite = async (raw: string) => Boolean(await canonWritePathWithin(root, raw));
+  if (Array.isArray(fileSystem?.entries)) {
     for (const entry of fileSystem.entries) {
       if (!isRecord(entry)) return undefined;
-      const access = String(entry.access ?? '');
+      if (Object.keys(entry).some(key => !['access','path'].includes(key))) return undefined; const access = String(entry.access ?? '');
       const permissionPath = isRecord(entry.path) ? entry.path : {};
-      if (access === 'write' && (turn.input.sandbox === 'read-only' || permissionPath.type !== 'path' || typeof permissionPath.path !== 'string' || !isWithinWorkspace(permissionPath.path))) return undefined;
+      if (!['read','write'].includes(access)) return undefined;
+      if (access === 'write' && (turn.input.sandbox === 'read-only' || permissionPath.type !== 'path' || typeof permissionPath.path !== 'string' || !await safeWrite(permissionPath.path))) return undefined;
     }
   }
-  if (Array.isArray(fileSystem.write)) {
-    if (turn.input.sandbox === 'read-only' || fileSystem.write.some((entry) => typeof entry !== 'string' || !isWithinWorkspace(entry))) return undefined;
+  if (Array.isArray(fileSystem?.read) && fileSystem.read.some(entry => typeof entry !== 'string')) return undefined;
+  if (Array.isArray(fileSystem?.write)) {
+    if (turn.input.sandbox === 'read-only' || fileSystem.write.some((entry) => typeof entry !== 'string') || !(await Promise.all(fileSystem.write.map((entry) => safeWrite(entry as string)))).every(Boolean)) return undefined;
   }
   return requested;
-}
-
-async function configuredMcpNames(cwd: string): Promise<string[]> {
-  const codexHome = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
-  const baseConfig = path.join(codexHome, 'config.toml');
-  const files = [baseConfig];
-  try {
-    const config = parseToml(await readFile(baseConfig, 'utf8')) as Record<string, unknown>;
-    const selected = typeof config.profile === 'string' ? config.profile : undefined;
-    if (selected && /^[A-Za-z0-9_-]+$/.test(selected)) files.push(path.join(codexHome, `${selected}.config.toml`));
-  } catch { /* no user config */ }
-  let ancestor = path.resolve(cwd);
-  for (;;) {
-    files.push(path.join(ancestor, '.codex/config.toml'));
-    const parent = path.dirname(ancestor);
-    if (parent === ancestor) break;
-    ancestor = parent;
-  }
-  const names = new Set<string>();
-  for (const file of files) {
-    let config: Record<string, unknown>;
-    try { config = parseToml(await readFile(file, 'utf8')) as Record<string, unknown>; } catch { continue; }
-    const mcpServers = config.mcp_servers;
-    if (mcpServers && typeof mcpServers === 'object' && !Array.isArray(mcpServers)) {
-      for (const name of Object.keys(mcpServers)) names.add(name);
-    }
-  }
-  return [...names];
 }
 
 export class CodexProvider {
@@ -94,17 +73,22 @@ export class CodexProvider {
   private approvals = new Map<string, PendingApproval>();
   private infoCache?: { at: number; value: ProviderInfo };
   private shuttingDown = false;
+  private scratchBase?: string;
+  private ownedScratch = new Set<string>();
+  private serverNonce = 0;
   private commands: CommandScope;
   constructor(
     private resolveBinary = () => findProviderBinary('codex'),
     command: CommandExecutor = runCommand,
     private discoverModelsOverride?: (binary: string) => Promise<ProviderInfo['models']>,
-  ) { this.commands = new CommandScope(command); }
+    dataDir?: string,
+    private wrapCommand: CodexWrapper = bubblewrap,
+  ) { this.commands = new CommandScope(command); this.scratchBase = dataDir ? path.join(dataDir, 'codex-tmp') : undefined; }
   async info(): Promise<ProviderInfo> {
     if (this.shuttingDown) return this.shutdownInfo();
     if (this.infoCache && Date.now() - this.infoCache.at < 5 * 60_000) return this.infoCache.value;
     this.binary ??= await this.resolveBinary();
-    if (!this.binary) return this.cacheInfo({ id: 'codex', name: 'Codex', installed: false, available: false, status: hasProviderBinaryOverride('codex') ? 'error' : 'missing', detail: providerBinaryMissingDetail('codex'), models: [], capabilities: { fast: true, tools: true, approvals: true, cancel: true } });
+    if (!this.binary) return this.cacheInfo({ id: 'codex', name: 'Codex', installed: false, available: false, status: hasProviderBinaryOverride('codex') ? 'error' : 'missing', detail: providerBinaryMissingDetail('codex'), models: [], capabilities: { fast: true, tools: true, approvals: true, cancel: true, reasoning:true } });
     const result = await this.commands.run(this.binary, ['login', 'status'], 3000);
     if (this.shuttingDown) return this.shutdownInfo();
     const auth = parseCodexAuth(result);
@@ -117,12 +101,12 @@ export class CodexProvider {
         ? 'Autenticação por chave de API confirmada; isso não verifica assinatura ChatGPT.'
         : 'Codex instalado, mas a autenticação não foi confirmada.';
     const available = auth.kind !== 'none';
-    const value: ProviderInfo = { id: 'codex', name: 'Codex', installed: true, available, status: available ? 'ready' : 'error', detail: `${authDetail}${available ? modelNote : ''}`, models, capabilities: { fast: true, tools: true, approvals: true, cancel: true } };
+    const value: ProviderInfo = { id: 'codex', name: 'Codex', installed: true, available, status: available ? 'ready' : 'error', detail: `${authDetail}${available ? modelNote : ''}`, models, defaultModel:models.find(model=>model.isDefault)?.id, capabilities: { fast: true, tools: true, approvals: true, cancel: true, reasoning:true } };
     return this.cacheInfo(value);
   }
   private async discoverModels(binary: string): Promise<ProviderInfo['models']> {
     const discoveryCwd = os.tmpdir();
-    const args = await this.serverArgs(discoveryCwd, false);
+    const args = await this.serverArgs(discoveryCwd, 'no-tools');
     if (this.shuttingDown) return [];
     const rpc = new JsonRpcProcess(binary, args, discoveryCwd, (message) => { rpc.dispatch(message); });
     this.discoveryProcesses.add(rpc);
@@ -136,8 +120,10 @@ export class CodexProvider {
         if (!isRecord(response) || !Array.isArray(response.data)) return [];
         for (const raw of response.data) {
           if (!isRecord(raw) || typeof raw.id !== 'string') continue;
-          const efforts = Array.isArray(raw.supportedReasoningEfforts) ? raw.supportedReasoningEfforts.flatMap((item) => isRecord(item) && typeof item.reasoningEffort === 'string' ? [item.reasoningEffort] : []) : [];
-          models.push({ id: raw.id, name: typeof raw.displayName === 'string' ? raw.displayName : raw.id, ...(efforts.length ? { efforts } : {}) });
+          const efforts = Array.isArray(raw.supportedReasoningEfforts) ? raw.supportedReasoningEfforts.flatMap((item) => isRecord(item) && typeof item.reasoningEffort==='string' ? [item.reasoningEffort] : []) : [];
+          const isDefault=raw.isDefault===true;
+          const defaultReasoningEffort=typeof raw.defaultReasoningEffort==='string'?raw.defaultReasoningEffort:undefined;
+          models.push({ id: raw.id, name: typeof raw.displayName === 'string' ? raw.displayName : raw.id, ...(Array.isArray(raw.supportedReasoningEfforts) ? { efforts } : {}), ...(defaultReasoningEffort?{defaultReasoningEffort}:{}), ...(isDefault?{isDefault:true}:{}) });
         }
         cursor = typeof response.nextCursor === 'string' ? response.nextCursor : null;
         if (!cursor) break;
@@ -151,55 +137,142 @@ export class CodexProvider {
   }
   private cacheInfo(value: ProviderInfo) { this.infoCache = { at: Date.now(), value }; return value; }
   private shutdownInfo(): ProviderInfo {
-    return { id: 'codex', name: 'Codex', installed: Boolean(this.binary), available: false, status: 'error', detail: 'Codex provider is shutting down.', models: [], capabilities: { fast: true, tools: true, approvals: true, cancel: true } };
+    return { id: 'codex', name: 'Codex', installed: Boolean(this.binary), available: false, status: 'error', detail: 'Codex provider is shutting down.', models: [], capabilities: { fast: true, tools: true, approvals: true, cancel: true, reasoning:true } };
   }
-  private async serverArgs(cwd: string, tools: boolean) {
+  private async serverArgs(cwd: string, profile: CodexToolProfile) {
     const args = ['app-server', '--listen', 'stdio://'];
-    for (const name of await configuredMcpNames(cwd)) {
-      const key = /^[A-Za-z0-9_-]+$/.test(name) ? name : `"${name.replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"`;
-      args.push('-c', `mcp_servers.${key}.enabled=false`);
-    }
     // Host-global customizations can introduce hooks, plugins, skills, or tools outside
     // the Adelic policy. Keep the runtime profile controlled in every mode.
-    for (const feature of ['hooks', 'skill_search', 'apps', 'plugins', 'memories', 'multi_agent']) args.push('--disable', feature);
-    if (!tools) {
-      for (const feature of ['shell_tool', 'unified_exec', 'browser_use', 'computer_use', 'multi_agent', 'image_generation', 'view_image', 'sleep_tool', 'goals', 'code_mode_host']) args.push('--disable', feature);
+    for (const feature of ['hooks', 'skill_search', 'apps', 'plugins', 'memories', 'multi_agent', 'guardian_approval', 'shell_snapshot']) args.push('--disable', feature);
+    args.push('-c', 'allow_login_shell=false');
+    if (profile !== 'deep-tools') {
+      for (const feature of ['browser_use', 'computer_use', 'image_generation', 'view_image', 'sleep_tool', 'goals']) args.push('--disable', feature);
       args.push('-c', 'project_doc_max_bytes=0');
       args.push('--enable', 'skip_host_skill_discovery');
     }
+    if (profile === 'fast-local-tools') for (const feature of ['shell_tool', 'unified_exec', 'code_mode_host']) args.push('--enable', feature);
+    if (profile === 'no-tools') for (const feature of ['shell_tool', 'unified_exec', 'code_mode_host']) args.push('--disable', feature);
     return args;
   }
-  private async ensureServer(cwd: string, tools: boolean): Promise<CodexServer> {
+  private async ensureServer(cwd: string, sandbox: Sandbox, profile: CodexToolProfile, runId: string, signal: AbortSignal): Promise<CodexServer> {
     if (this.shuttingDown) throw new Error('Codex provider is shutting down');
+    if (signal.aborted) throw abortError(signal);
     if (!this.binary) this.binary = await this.resolveBinary();
+    if (signal.aborted) throw abortError(signal);
     if (!this.binary) throw new Error(providerBinaryMissingDetail('codex'));
-    const resolvedCwd = path.resolve(cwd);
-    const key = `${resolvedCwd}\0${tools ? 'tools' : 'no-tools'}`;
-    let server = this.servers.get(key);
-    if (server) { await server.ready; return server; }
-    server = { key, cwd: resolvedCwd, tools, ready: Promise.resolve(undefined as unknown as JsonRpcProcess) };
+    const resolvedCwd = await realpath(path.resolve(cwd));
+    if (signal.aborted) throw abortError(signal);
+    // App-server state (including unified-exec children) belongs to one run only.
+    const key = `${resolvedCwd}\0${sandbox}\0${profile}\0${runId}\0${++this.serverNonce}`;
+    let server: CodexServer;
+    server = { key, cwd: resolvedCwd, profile, scratch: '', ready: Promise.resolve(undefined as unknown as JsonRpcProcess) };
     this.servers.set(key, server);
-    server.ready = this.startServer(server);
+    server.ready = (async () => {
+      if (signal.aborted) throw abortError(signal);
+      const base = this.scratchBase ?? os.tmpdir();
+      if (this.scratchBase) await mkdir(base, { recursive: true, mode: 0o700 });
+      if (signal.aborted) throw abortError(signal);
+      server!.scratch = await mkdtemp(path.join(base, 'adelic-codex-')); this.ownedScratch.add(server!.scratch);
+      await chmod(server!.scratch, 0o700);
+      if (signal.aborted) throw abortError(signal);
+      return this.startServer(server!, signal);
+    })();
     try { await server.ready; return server; }
-    catch (error) { if (this.servers.get(key) === server) this.servers.delete(key); throw error; }
+    catch (error) { await this.cleanupServer(server); throw error; }
   }
-  private async startServer(server: CodexServer): Promise<JsonRpcProcess> {
-    const args = await this.serverArgs(server.cwd, server.tools);
+  private cleanupServer(server: CodexServer): Promise<void> {
+    if (server.cleanup) return server.cleanup;
+    server.cleanup = (async () => {
+      try { await server.rpc?.kill(); }
+      finally {
+        if (this.servers.get(server.key) === server) this.servers.delete(server.key);
+        if (server.scratch) await this.removeScratch(server.scratch);
+      }
+    })();
+    return server.cleanup;
+  }
+  private async authBinding(scratch: string, cwd: string, sandbox: Sandbox): Promise<ReadonlyFileBinding[]> {
+    const isolatedHome = path.join(scratch, 'CODEX_HOME');
+    await mkdir(isolatedHome, { mode: 0o700 });
+    const placeholder = path.join(isolatedHome, 'auth.json');
+    await writeFile(placeholder, '{}\n', { mode: 0o600 });
+    const configuredHome = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
+    const sourcePath = path.join(configuredHome, 'auth.json');
+    try {
+      const sourceInfo = await lstat(sourcePath);
+      if (!sourceInfo.isFile() || sourceInfo.isSymbolicLink() || typeof process.getuid !== 'function' || sourceInfo.uid !== process.getuid()) return [];
+      const source = await realpath(sourcePath);
+      const verified = await stat(source);
+      if (!verified.isFile() || verified.uid !== process.getuid()) return [];
+      const credentialHome = await realpath(configuredHome);
+      const workspace = await realpath(cwd);
+      const within = (child: string, parent: string) => { const relative = path.relative(parent, child); return relative === '' || (!path.isAbsolute(relative) && relative !== '..' && !relative.startsWith(`..${path.sep}`)); };
+      if (sandbox === 'workspace-write' && within(workspace, credentialHome)) {
+        throw new Error('Sandbox workspace-write incompatível: a pasta de trabalho está dentro do CODEX_HOME, que contém credenciais.');
+      }
+      const bindings: ReadonlyFileBinding[] = [];
+      if (sandbox === 'workspace-write' && within(credentialHome, workspace)) {
+        const relative = path.relative(workspace, credentialHome);
+        const firstChild = path.join(workspace, relative.split(path.sep)[0]!);
+        const canonicalChild = await realpath(firstChild);
+        bindings.push({ source: canonicalChild, target: firstChild, directory: true });
+      }
+      bindings.push({ source, target: placeholder });
+      return bindings;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+      if (error instanceof Error && error.message.includes('workspace-write incompatível')) throw error;
+      throw new Error('Não foi possível validar a autenticação Codex para o sandbox.');
+    }
+  }
+  private async startServer(server: CodexServer, signal: AbortSignal): Promise<JsonRpcProcess> {
+    const args = await this.serverArgs(server.cwd, server.profile);
+    if (signal.aborted) throw abortError(signal);
     if (this.shuttingDown) throw new Error('Codex provider is shutting down');
     if (!this.binary) throw new Error(providerBinaryMissingDetail('codex'));
-    const rpc = new JsonRpcProcess(this.binary, args, server.cwd, (message) => this.onMessage(server, message));
+    const sandbox = server.key.split('\0')[1] as Sandbox;
+    const readonlyAuth = await this.authBinding(server.scratch, server.cwd, sandbox);
+    if (signal.aborted) throw abortError(signal);
+    if (this.shuttingDown) throw new Error('Codex provider is shutting down');
+    const isolatedHome = path.join(server.scratch, 'CODEX_HOME');
+    const wrapped = await this.wrapCommand(this.binary, args, server.cwd, sandbox, [server.scratch], readonlyAuth);
+    if (signal.aborted) throw abortError(signal);
+    if (this.shuttingDown) throw new Error('Codex provider is shutting down');
+    const runtimeEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('BASH_FUNC_') && !key.startsWith('CODEX_EXEC_SERVER') && !['SHELLOPTS','BASHOPTS','PS4'].includes(key))) as NodeJS.ProcessEnv;
+    Object.assign(runtimeEnv, { CODEX_HOME: isolatedHome, TMPDIR: server.scratch, BASH_ENV: '/dev/null', ENV: '/dev/null' });
+    const rpc = new JsonRpcProcess(wrapped.command, wrapped.args, server.cwd, (message) => this.onMessage(server, message), runtimeEnv);
     server.rpc = rpc;
-    void rpc.waitExit().then(() => {
-      if (this.servers.get(server.key) === server) this.servers.delete(server.key);
+    void rpc.waitExit().then(async () => {
+      await this.cleanupServer(server);
       for (const turn of [...this.turns.values()]) {
-        if (turn.server === server) this.finishTurn(turn, { text: turn.text, nativeSessionId: turn.threadId, stopReason: 'completed' }, new Error('Codex app-server encerrou antes de concluir o turno.'));
+        if (turn.server === server && !turn.signal.aborted) this.finishTurn(turn, { text: turn.text, nativeSessionId: turn.threadId, stopReason: 'completed' }, new Error('Codex app-server encerrou antes de concluir o turno.'));
       }
     });
+    const abortStartup = () => { void rpc.kill(); };
+    signal.addEventListener('abort', abortStartup, { once: true });
     try {
+      if (signal.aborted) throw abortError(signal);
       await rpc.request('initialize', { clientInfo: { name: 'adelic', version: '0.1.0' }, capabilities: { experimentalApi: true } });
+      if (signal.aborted) throw abortError(signal);
       rpc.notify('initialized', {});
       return rpc;
-    } catch (error) { await rpc.kill(); throw error; }
+    } catch (error) { await rpc.kill(); if (signal.aborted) throw abortError(signal); throw error; }
+    finally { signal.removeEventListener('abort', abortStartup); }
+  }
+  private async assertNoEnabledMcp(rpc: JsonRpcProcess, cwd: string): Promise<void> {
+    const raw = await rpc.request('config/read', { cwd: await realpath(path.resolve(cwd)), includeLayers: false }, 5000);
+    const object=(value:unknown):value is Record<string,unknown>=>isRecord(value)&&!Array.isArray(value);
+    if (!object(raw) || !object(raw.config) || (raw.config.mcp_servers !== undefined && (!object(raw.config.mcp_servers) || Object.values(raw.config.mcp_servers).some(entry => !object(entry) || (entry.enabled !== undefined && typeof entry.enabled !== 'boolean'))))) {
+      throw new Error('Execução Codex bloqueada: configuração MCP efetiva desconhecida; nenhuma thread foi iniciada.');
+    }
+    const servers = raw.config.mcp_servers ?? {};
+    if (Object.values(servers).some(entry => !isRecord(entry) || entry.enabled !== false)) {
+      throw new Error('Execução Codex bloqueada: MCPs personalizados ativos não são suportados neste perfil isolado. Desative-os na configuração efetiva; MCPs integrados do Adelic permanecem disponíveis.');
+    }
+  }
+  private async removeScratch(directory: string) {
+    await rm(directory, { recursive: true, force: true });
+    this.ownedScratch.delete(directory);
   }
   private onMessage(server: CodexServer, message: JsonRpcMessage) {
     const rpc = server.rpc;
@@ -216,7 +289,7 @@ export class CodexProvider {
       } else if (message.method === 'item/started' || message.method === 'item/completed') {
         const item = isRecord(params.item) ? params.item : {};
         const itemType = String(item.type ?? '');
-        if (itemType === 'commandExecution' || itemType === 'mcpToolCall' || itemType === 'fileChange') turn.emit({ type: 'tool', name: itemType, description: String(item.command ?? item.title ?? itemType), status: message.method === 'item/started' ? 'running' : String(item.status ?? 'completed') });
+        if (itemType === 'commandExecution' || itemType === 'mcpToolCall' || itemType === 'fileChange') turn.emit({ type: 'tool', name: itemType, description: String(item.command ?? item.title ?? itemType), status: message.method === 'item/started' ? 'running' : String(item.status ?? 'completed'), ...(typeof item.id==='string'||typeof item.id==='number'?{toolCallId:String(item.id)}:{}) });
       } else if (message.method === 'turn/started') {
         const info = isRecord(params.turn) ? params.turn : {};
         turn.turnId = String(info.id ?? '');
@@ -242,6 +315,18 @@ export class CodexProvider {
         return;
       }
       const approvalId = `${turn.input.runId}:${String(message.id)}`;
+      const kind = message.method === 'item/commandExecution/requestApproval' ? (params.kind === 'writeStdin' ? 'stdin' : params.kind === undefined || params.kind === 'command' ? 'command' : 'unknown') : message.method.includes('fileChange') ? 'file' : 'permissions';
+      if (kind === 'command') {
+        const environmentTrusted = turn.localEnvironmentVerified && params.environmentId === 'local';
+        void classifyApproval({ tools: turn.input.plan.tools, mode: environmentTrusted ? turn.input.approvalMode ?? 'auto-safe' : 'manual', kind, command: params.command, cwd: params.cwd, workspace: turn.input.cwd, sandbox: turn.input.sandbox, networkApprovalContext: params.networkApprovalContext, trustedNonLoginShell: environmentTrusted }).then(result => {
+          if (this.turns.get(turn.input.runId) !== turn || this.byThread.get(`${server.key}\n${threadId}`) !== turn || turn.signal.aborted) { rpc.respond(message.id as string | number, { decision: 'decline' }); return; }
+          const detail = `${result.reason}\n${approvalDetail(message.method!, params)}`;
+          if (result.decision === 'auto') { rpc.respond(message.id as string | number, { decision: 'accept' }); emitApproval(turn.input, turn.emit, approvalId, 'Comando aprovado automaticamente', detail, 'command', 'approved'); return; }
+          this.approvals.set(approvalId, { runId: turn.input.runId, sessionId: turn.input.sessionId, server, requestId: message.id as string | number, method: message.method!, params });
+          emitApproval(turn.input, turn.emit, approvalId, 'Permitir ferramenta do Codex', detail, 'tool');
+        }).catch(() => rpc.respond(message.id as string | number, { decision: 'decline' }));
+        return;
+      }
       this.approvals.set(approvalId, { runId: turn.input.runId, sessionId: turn.input.sessionId, server, requestId: message.id, method: message.method, params });
       const isFile = message.method.includes('fileChange');
       const detail = approvalDetail(message.method, params);
@@ -262,54 +347,95 @@ export class CodexProvider {
     if (error) turn.reject(error); else turn.resolve(result);
   }
   async run(input: RunInput, emit: (event: ProviderEvent) => void, signal: AbortSignal): Promise<RunResult> {
-    const toolsAllowed = input.plan.tools && input.plan.level === 'deep';
-    const server = await raceAbort(this.ensureServer(input.cwd, toolsAllowed), signal);
+    let ownedServer: CodexServer | undefined;
+    try {
+    const toolsAllowed = input.plan.tools;
+    const profile: CodexToolProfile = !toolsAllowed ? 'no-tools' : input.plan.level === 'fast' ? 'fast-local-tools' : 'deep-tools';
+    if (signal.aborted) throw abortError(signal);
+    if (toolsAllowed) await scanCodexRules({ cwd: input.cwd });
+    const server = ownedServer = await this.ensureServer(input.cwd, input.sandbox, profile, input.runId, signal);
     if (signal.aborted) throw abortError(signal);
     const rpc = server.rpc;
     if (!rpc) throw new Error('Codex app-server não está disponível.');
+    // Recheck on every run because the app-server caches its config while host files may change.
+    await raceAbort(this.assertNoEnabledMcp(rpc, input.cwd), signal);
+    if (signal.aborted) throw abortError(signal);
     const threadRaw = await raceAbort(rpc.request('thread/start', {
-      cwd: input.cwd, ephemeral: true, model: input.model ?? null,
-      sandbox: input.sandbox === 'read-only' ? 'read-only' : 'workspace-write', approvalPolicy: 'on-request',
-      config: toolsAllowed
-        ? { model_reasoning_effort: input.plan.effort }
-        : { model_reasoning_effort: input.plan.effort, web_search: 'disabled', project_doc_max_bytes: 0, features: { apps: false, memories: false, plugins: false, shell_tool: false, unified_exec: false, browser_use: false, computer_use: false, multi_agent: false, hooks: false, skill_search: false, image_generation: false, view_image: false, sleep_tool: false, goals: false, code_mode_host: false, skip_host_skill_discovery: true } },
-      baseInstructions: `Responda em português salvo se o usuário pedir outra língua. ${toolsAllowed ? 'Use ferramentas necessárias, sujeito a sandbox e aprovação.' : 'Responda diretamente sem ferramentas.'}`,
+      cwd: server.cwd, ephemeral: true, model: input.model ?? null,
+      sandbox: input.sandbox === 'read-only' ? 'read-only' : 'workspace-write', approvalPolicy: 'untrusted', approvalsReviewer: 'user',
+      config: { allow_login_shell: false, shell_environment_policy: { set: { TMPDIR: server.scratch, BASH_ENV: '/dev/null', ENV: '/dev/null', PATH: process.env.PATH ?? '/usr/bin:/bin' }, exclude: ['BASH_FUNC_*', 'SHELLOPTS', 'BASHOPTS', 'PS4', 'CODEX_EXEC_SERVER*'] }, ...( profile === 'deep-tools'
+        ? { ...(input.plan.effort ? { model_reasoning_effort: input.plan.effort } : {}), features: { guardian_approval: false, shell_snapshot: false } }
+        : { ...(input.plan.effort ? { model_reasoning_effort: input.plan.effort } : {}), web_search: 'disabled', project_doc_max_bytes: 0, features: { guardian_approval: false, shell_snapshot: false, apps: false, memories: false, plugins: false, shell_tool: toolsAllowed, unified_exec: toolsAllowed, browser_use: false, computer_use: false, multi_agent: false, hooks: false, skill_search: false, image_generation: false, view_image: false, sleep_tool: false, goals: false, code_mode_host: profile === 'fast-local-tools', skip_host_skill_discovery: true } }) },
+      baseInstructions: `Responda em português salvo se o usuário pedir outra língua. ${toolsAllowed ? profile === 'fast-local-tools' ? 'Responda diretamente; use ferramentas locais somente se necessário para verificar informações do computador. Não afirme falta de acesso sem tentar. Sujeito a sandbox e aprovação.' : 'Use ferramentas necessárias, sujeito a sandbox e aprovação.' : 'Responda diretamente sem ferramentas.'}`,
     }), signal);
     if (signal.aborted) throw abortError(signal);
     const thread = isRecord(threadRaw) && isRecord(threadRaw.thread) ? threadRaw.thread : {};
     const threadId = String(thread.id ?? (isRecord(threadRaw) ? threadRaw.id ?? '' : ''));
     if (!threadId) throw new Error('Codex não retornou o identificador da thread.');
-    return new Promise<RunResult>((resolve, reject) => {
-      const turnInput = toolsAllowed === input.plan.tools ? input : { ...input, plan: { ...input.plan, tools: toolsAllowed } };
-      const turn: ActiveTurn = { input: turnInput, emit, server, threadId, text: '', resolve, reject, signal, interruptSent: false, requestInterrupt: () => {
+    // The reserved native ID is trusted only for a complete local announcement
+    // that matches this process's canonical workspace exactly.
+    const environments = Array.isArray(thread.environments) ? thread.environments : [];
+    let localEnvironmentVerified = false;
+    if (environments.length === 1 && isRecord(environments[0]) && environments[0].environmentId === 'local') {
+      const environment = environments[0];
+      const roots = environment.runtimeWorkspaceRoots;
+      if (typeof environment.cwd === 'string' && Array.isArray(roots) && roots.length === 1 && typeof roots[0] === 'string') {
+        try {
+          const announcedCwd = path.resolve(environment.cwd);
+          const announcedRoot = path.resolve(roots[0]);
+          if (announcedCwd === server.cwd && announcedRoot === server.cwd && await realpath(announcedCwd) === server.cwd && await realpath(announcedRoot) === server.cwd) localEnvironmentVerified = true;
+        } catch { /* Unverified environments remain manual. */ }
+      }
+    }
+    if (signal.aborted) throw abortError(signal);
+    return await new Promise<RunResult>((resolve, reject) => {
+      const turn: ActiveTurn = { input, emit, server, threadId, localEnvironmentVerified, text: '', resolve, reject, signal, interruptSent: false, requestInterrupt: () => {
         if (turn.turnId && !turn.interruptSent) {
           turn.interruptSent = true;
           void rpc.request('turn/interrupt', { threadId, turnId: turn.turnId }, 3000).catch(() => undefined);
         }
       }, abort: () => {
-        turn.requestInterrupt();
-        this.finishTurn(turn, { text: turn.text, nativeSessionId: threadId, stopReason: 'cancelled' });
+        // The app-server owns the tool executor process tree. Interrupting a
+        // turn only changes protocol/UI state; kill and reap this run's private
+        // process group before reporting cancellation or removing its scratch.
+        void this.cleanupServer(server).then(() => this.finishTurn(turn, { text: turn.text, nativeSessionId: threadId, stopReason: 'cancelled' }));
       } };
       this.turns.set(input.runId, turn); this.byThread.set(`${server.key}\n${threadId}`, turn);
       signal.addEventListener('abort', turn.abort, { once: true });
-      void rpc.request('turn/start', { threadId, input: [{ type: 'text', text: boundedPrompt(input), text_elements: [] }], cwd: input.cwd, model: input.model ?? null, effort: input.plan.effort, approvalPolicy: 'on-request', sandboxPolicy: input.sandbox === 'read-only' ? { type: 'readOnly', networkAccess: true } : { type: 'workspaceWrite', writableRoots: [path.resolve(input.cwd)], networkAccess: true, excludeTmpdirEnvVar: true, excludeSlashTmp: true } }, 15_000).then((raw) => {
+      void rpc.request('turn/start', { threadId, input: [{ type: 'text', text: boundedPrompt(input), text_elements: [] }], cwd: server.cwd, model: input.model ?? null, ...(input.plan.effort ? { effort: input.plan.effort } : {}), approvalPolicy: 'untrusted', approvalsReviewer: 'user', sandboxPolicy: input.sandbox === 'read-only' ? { type: 'readOnly', networkAccess: true } : { type: 'workspaceWrite', writableRoots: [server.cwd, server.scratch], networkAccess: true, excludeTmpdirEnvVar: true, excludeSlashTmp: true } }, 15_000).then((raw) => {
         if (isRecord(raw) && isRecord(raw.turn)) turn.turnId = String(raw.turn.id ?? '');
         if (signal.aborted) turn.requestInterrupt();
-      }).catch((error) => this.finishTurn(turn, { text: turn.text, stopReason: 'completed' }, new Error(errorMessage(error))));
+      }).catch((error) => { if (!signal.aborted) this.finishTurn(turn, { text: turn.text, stopReason: 'completed' }, new Error(errorMessage(error))); });
     });
+    } finally {
+      if (ownedServer) await this.cleanupServer(ownedServer);
+    }
   }
   async approve(approvalId: string, decision: 'approve' | 'deny') {
     const pending = this.approvals.get(approvalId);
     if (!pending) throw new Error('Aprovação não está mais pendente.');
-    this.approvals.delete(approvalId);
+    const turn = this.turns.get(pending.runId);
     if (pending.method === 'item/permissions/requestApproval') {
-      const turn = this.turns.get(pending.runId);
-      const permissions = decision === 'approve' && turn ? approvedPermissions(turn, pending.params) : undefined;
+      const permissions = decision === 'approve' && turn ? await approvedPermissions(turn, pending.params) : undefined;
+      this.assertPending(approvalId, pending, turn);
+      if (decision === 'approve' && !permissions) throw new Error('Permissão solicitada excede o sandbox; negue a solicitação para continuar.');
+      this.approvals.delete(approvalId);
       pending.server.rpc?.respond(pending.requestId, { permissions: permissions ?? {}, scope: 'turn' });
       return;
     }
+    if (decision === 'approve' && pending.method === 'item/fileChange/requestApproval') {
+      const grant = typeof pending.params.grantRoot === 'string' ? pending.params.grantRoot : undefined;
+      const safeGrant = grant && turn ? await canonWritePathWithin(turn.input.cwd, grant) : undefined;
+      this.assertPending(approvalId, pending, turn);
+      if (!turn || turn.input.sandbox === 'read-only' || (!grant && turn.input.sandbox !== 'workspace-write') || grant && !safeGrant) throw new Error('Alteração solicitada excede o sandbox; negue a solicitação para continuar.');
+    }
+    this.assertPending(approvalId, pending, turn);
+    this.approvals.delete(approvalId);
     const commandDecision = decision === 'approve' ? 'accept' : 'decline';
     pending.server.rpc?.respond(pending.requestId, { decision: commandDecision });
+  }
+  private assertPending(approvalId: string, pending: PendingApproval, turn: ActiveTurn | undefined) {
+    if (this.approvals.get(approvalId) !== pending || this.turns.get(pending.runId) !== turn || !turn || turn.signal.aborted) throw new Error('Aprovação não está mais pendente.');
   }
   async shutdown() {
     this.shuttingDown = true;
@@ -325,9 +451,10 @@ export class CodexProvider {
         ]);
         await rpc?.kill();
       } catch { /* Startup failure already settled; no child remains to close. */ }
-      finally { if (timer) clearTimeout(timer); }
+      finally { if (timer) clearTimeout(timer); if (server.scratch) await this.removeScratch(server.scratch); }
     }), ...[...this.discoveryProcesses].map((rpc) => rpc.kill())]);
     this.servers.clear();
+    await Promise.all([...this.ownedScratch].map(dir => this.removeScratch(dir)));
     this.approvals.clear();
   }
 }

@@ -4,7 +4,7 @@ import { join, resolve } from 'node:path';
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import { projectOrchestration, type Approval, type Bootstrap, type DelegatedTask, type Message, type Project, type ProjectBrief, type Run, type RunEvent, type Session, type Settings, type Skill } from '../shared/contracts.js';
 
-const defaults: Settings = { defaultProviderId: 'codex', defaultMode: 'auto', memoryEnabled: false, sandbox: 'read-only', responseStyle: 'balanced' };
+const defaults: Settings = { defaultProviderId: 'codex', defaultMode: 'auto', memoryEnabled: false, sandbox: 'read-only', responseStyle: 'balanced', approvalMode: 'auto-safe' };
 const seedSkills: Skill[] = [
   { id: 'read-project', name: 'Ler projeto', description: 'Inspeciona estrutura e documentação antes de responder sobre o projeto.', body: 'Leia os arquivos relevantes do projeto antes de responder. Cite caminhos e diferencie fatos observados de inferências.', enabled: true },
   { id: 'review-change', name: 'Revisar alteração', description: 'Procura erros de fluxo, regressões e validações ausentes.', body: 'Revise a alteração pelos fluxos reais. Priorize defeitos reproduzíveis, regressões e falhas de validação; separe sugestões opcionais.', enabled: true },
@@ -71,6 +71,7 @@ export class Store {
   getTask(id:string) { const row=this.db.prepare('SELECT data FROM delegated_tasks WHERE id=?').get(id) as {data:string}|undefined; return row ? JSON.parse(row.data) as DelegatedTask : undefined; }
   listTasks(projectId:string,limit=50) { return (this.db.prepare('SELECT data FROM delegated_tasks WHERE project_id=? ORDER BY rowid DESC LIMIT ?').all(projectId,limit) as {data:string}[]).map(r=>JSON.parse(r.data) as DelegatedTask); }
   listSessionTasks(sessionId:string,limit=30) { return (this.db.prepare('SELECT data FROM delegated_tasks WHERE session_id=? ORDER BY rowid DESC LIMIT ?').all(sessionId,limit) as {data:string}[]).map(r=>JSON.parse(r.data) as DelegatedTask); }
+  listSessionTaskMetadata(sessionId:string) { return (this.db.prepare("SELECT json_remove(data,'$.output') AS data FROM delegated_tasks WHERE session_id=? ORDER BY rowid DESC").all(sessionId) as {data:string}[]).map(row=>{const task=JSON.parse(row.data) as DelegatedTask;return {...task,output:undefined,instructions:task.instructions.slice(0,600)};}); }
   putBrief(brief:ProjectBrief) { this.db.prepare('INSERT INTO project_briefs(project_id,data) VALUES(?,?) ON CONFLICT(project_id) DO UPDATE SET data=excluded.data').run(brief.projectId,JSON.stringify(brief)); return brief; }
   getBrief(projectId:string) { const row=this.db.prepare('SELECT data FROM project_briefs WHERE project_id=?').get(projectId) as {data:string}|undefined; return row ? JSON.parse(row.data) as ProjectBrief : null; }
   listBriefs() { return (this.db.prepare('SELECT data FROM project_briefs ORDER BY rowid').all() as {data:string}[]).map(r=>JSON.parse(r.data) as ProjectBrief); }
@@ -107,12 +108,12 @@ export class Store {
   putApproval(a:Approval) { this.db.prepare('INSERT INTO approvals(id,session_id,data) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET session_id=excluded.session_id,data=excluded.data').run(a.id,a.sessionId,JSON.stringify(a)); }
   getApproval(id:string) { return this.get<Approval>('approvals',id); }
   listApprovals(sessionId:string) { return this.rows<Approval>('approvals','WHERE json_extract(data,\'$.sessionId\')=? ORDER BY rowid',[sessionId]); }
-  getSettings() { const row=this.db.prepare('SELECT data FROM settings WHERE id=1').get() as {data:string}|undefined; return row ? JSON.parse(row.data) as Settings : undefined; }
+  getSettings() { const row=this.db.prepare('SELECT data FROM settings WHERE id=1').get() as {data:string}|undefined; return row ? {approvalMode:'auto-safe' as const,...JSON.parse(row.data) as Settings} : undefined; }
   setSettings(s:Settings) { this.db.prepare('INSERT INTO settings(id,data) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data').run(JSON.stringify(s)); return s; }
   listSkills() { return this.rows<Skill>('skills','ORDER BY rowid'); }
   getSkill(id:string) { return this.get<Skill>('skills',id); }
   setSkill(s:Skill) { this.put('skills',s.id,s); return s; }
   bootstrap(providers: Bootstrap['providers'], integrations: Bootstrap['integrations']):Bootstrap { return { projects:this.listProjects(), sessions:this.listSessions(), providers, settings:this.getSettings()!, integrations, skills:this.listSkills(), runs:this.listRuns().slice(0,100) }; }
-  detail(session:Session) { return { session, messages:this.listMessages(session.id), events:this.listEvents(session.id), approvals:this.listApprovals(session.id), runs:this.listRuns(session.id), tasks:this.listSessionTasks(session.id).map(t=>({...t,output:undefined,instructions:t.instructions.slice(0,600)})) }; }
+  detail(session:Session) { return { session, messages:this.listMessages(session.id), events:this.listEvents(session.id), approvals:this.listApprovals(session.id), runs:this.listRuns(session.id), tasks:this.listSessionTaskMetadata(session.id) }; }
   exportData() { return { projects:this.listProjects(), sessions:this.listSessions(), messages:this.listSessions().flatMap(s=>this.listMessages(s.id)), runs:this.listRuns(), events:this.listSessions().flatMap(s=>this.listEvents(s.id)), tasks:this.rows<DelegatedTask>('delegated_tasks','ORDER BY rowid'), briefs:this.listBriefs(), settings:this.getSettings(), skills:this.listSkills() }; }
 }

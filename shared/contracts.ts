@@ -1,5 +1,7 @@
 export type ProviderId = 'codex' | 'claude' | 'kiro' | 'opencode';
 export type Mode = 'auto' | 'fast' | 'deep';
+export type ReasoningEffort = string;
+export type Thinking = 'auto' | ReasoningEffort;
 export type Sandbox = 'read-only' | 'workspace-write';
 export type RunStatus = 'running' | 'completed' | 'cancelled' | 'failed' | 'interrupted';
 
@@ -32,7 +34,7 @@ export function projectOrchestration(project: Pick<Project, 'orchestration'>): O
 export type AgentRole = 'planner' | 'worker' | 'reviewer' | 'synthesis';
 export interface DelegatedTask {
   id: string; projectId: string | null; sessionId: string; runId: string;
-  role: AgentRole; title: string; instructions: string; scope: string[]; dependsOn: string[];
+  role: AgentRole; title: string; instructions: string; scope: string[]; dependsOn: string[]; effort?: ReasoningEffort;
   providerId: ProviderId; model?: string; status: 'queued' | RunStatus;
   createdAt: string; startedAt?: string; completedAt?: string;
   summary?: string; output?: string; error?: string;
@@ -47,17 +49,19 @@ export interface ProjectCoordination {
 export interface ProviderInfo {
   id: ProviderId; name: string; installed: boolean; available: boolean;
   status: 'ready' | 'missing' | 'error' | 'unknown'; detail: string;
-  models: { id: string; name: string; efforts?: string[] }[];
-  capabilities: { fast: boolean; tools: boolean; approvals: boolean; cancel: boolean };
+  models: { id: string; name: string; efforts?: ReasoningEffort[]; defaultReasoningEffort?: ReasoningEffort; isDefault?: boolean }[];
+  defaultModel?: string;
+  capabilities: { fast: boolean; tools: boolean; approvals: boolean; cancel: boolean; reasoning?: boolean };
 }
 export interface Session {
   id: string; projectId: string | null; title: string; providerId: ProviderId;
-  model?: string; mode: Mode; createdAt: string; updatedAt: string;
+  model?: string; mode: Mode; thinking?: Thinking; createdAt: string; updatedAt: string;
   activeRunId?: string; nativeSessionId?: string;
 }
 export interface RoutePlan {
+  /** Availability for this phase; fast user turns may use tools while internal planning stays false. */
   level: 'fast' | 'deep'; reason: string; tools: boolean;
-  memory: boolean; effort: 'low' | 'high'; contextBudget: number;
+  memory: boolean; effort?: ReasoningEffort; contextBudget: number;
 }
 export interface Message {
   id: string; sessionId: string; runId?: string; role: 'user' | 'assistant' | 'system';
@@ -76,11 +80,12 @@ export interface Approval {
 }
 export interface RunEvent {
   id: string; runId: string; sessionId: string; type: 'status' | 'tool' | 'approval' | 'error';
-  text: string; createdAt: string; toolName?: string; status?: string;
+  text: string; createdAt: string; toolName?: string; toolCallId?: string; status?: string;
 }
 export interface Settings {
   defaultProviderId: ProviderId; defaultMode: Mode; memoryEnabled: boolean;
   sandbox: Sandbox; responseStyle: 'concise' | 'balanced';
+  approvalMode?: 'auto-safe' | 'manual';
 }
 export interface Integration {
   id: string; name: string; kind: 'memory' | 'sandbox' | 'tool';
@@ -93,8 +98,12 @@ export interface Bootstrap {
   runs: Run[];
 }
 export interface SessionDetail { session: Session; messages: Message[]; events: RunEvent[]; approvals: Approval[]; runs: Run[]; tasks?: DelegatedTask[] }
+export interface MemoryScope { workspace: string; project: string }
+export interface MemoryScopeInfo extends MemoryScope { pageCount: number }
+export interface MemoryCatalog { scopes: MemoryScopeInfo[]; totalPages: number }
+export interface MemoryListing { pages: MemoryHit[]; total: number; offset: number; limit: number }
 export interface MemoryHit { path: string; title: string; snippet: string }
-export interface MemoryPage { path: string; title: string; body: string }
+export interface MemoryPage { path: string; title: string; body: string; version?: string; frontmatter?: Record<string, unknown> }
 
 export type StreamEvent =
   | { type: 'message'; message: Message }
@@ -110,12 +119,12 @@ export type StreamEvent =
 export interface RunInput {
   runId: string; sessionId: string; nativeSessionId?: string; providerId: ProviderId;
   model?: string; cwd: string; prompt: string; history: Message[];
-  plan: RoutePlan; sandbox: Sandbox; memoryContext?: string;
+  plan: RoutePlan; sandbox: Sandbox; approvalMode?: 'auto-safe' | 'manual'; memoryContext?: string;
 }
 export type ProviderEvent =
   | { type: 'delta'; text: string }
   | { type: 'status'; text: string }
-  | { type: 'tool'; name: string; description: string; status: string }
+  | { type: 'tool'; name: string; description: string; status: string; toolCallId?: string }
   | { type: 'approval'; approval: Approval }
   | { type: 'session'; nativeSessionId: string }
   | { type: 'usage'; inputTokens?: number; outputTokens?: number; costUsd?: number };

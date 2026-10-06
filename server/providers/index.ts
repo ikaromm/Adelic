@@ -4,9 +4,9 @@ import { ClaudeProvider } from './claude';
 import { KiroProvider } from './kiro';
 import { OpenCodeProvider } from './opencode';
 
-export function createProviderRegistry(): ProviderRegistry {
+export function createProviderRegistry(dataDir?: string): ProviderRegistry {
   const providers = {
-    codex: new CodexProvider(),
+    codex: new CodexProvider(undefined, undefined, undefined, dataDir),
     claude: new ClaudeProvider(),
     kiro: new KiroProvider(),
     opencode: new OpenCodeProvider(),
@@ -26,7 +26,7 @@ export function createProviderRegistry(): ProviderRegistry {
       const provider = providers[input.providerId];
       try {
         return await provider.run(input, (event) => {
-          if (event.type === 'approval') approvalOwners.set(event.approval.id, input.providerId);
+          if (event.type === 'approval' && event.approval.status === 'pending') approvalOwners.set(event.approval.id, input.providerId);
           emit(event);
         }, signal);
       } finally {

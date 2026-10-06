@@ -1,4 +1,8 @@
 import type { Integration, MemoryHit, MemoryPage, Project } from '../shared/contracts.js';
+import type { MemoryScope } from '../shared/contracts.js';
+import { createHash } from 'node:crypto';
+import { memoryPathExists } from './memory-catalog.js';
+import { writeExistingMemoryBody } from './memory-local-writer.js';
 
 const endpoint='http://127.0.0.1:49374/mcp';
 type Tool={name:string;description?:string;inputSchema?:unknown};
@@ -16,7 +20,7 @@ async function rpc(method:string,params:unknown,timeoutMs=2500):Promise<any> {
     const raw=await response.text();
     const line=raw.split('\n').find(l=>l.startsWith('data:'))?.slice(5).trim();
     const data=JSON.parse(line || raw);
-    if (data.error) throw new Error(data.error.message || 'Erro JSON-RPC do ai-memory');
+    if (data.error) { const e:any=new Error(data.error.message || 'Erro JSON-RPC do ai-memory'); e.code=data.error.code; throw e; }
     return data.result;
   } finally { clearTimeout(timer); }
 }
@@ -32,10 +36,23 @@ async function call(kind:'search'|'read'|'write',project:Project,args:Record<str
   const properties=(tool.inputSchema as any)?.properties ?? {};
   if (!Object.hasOwn(properties,'workspace') || !Object.hasOwn(properties,'project')) throw new Error('Ferramenta ai-memory sem escopo explícito de workspace/project');
   if (!project.memoryWorkspace || !project.memoryProject) throw new Error('Projeto sem escopo de memória configurado');
-  const candidates:Record<string,unknown>={workspace:project.memoryWorkspace,project:project.memoryProject,query:args.query,q:args.query,path:args.path,body:args.body,title:args.title};
+  const candidates:Record<string,unknown>={workspace:project.memoryWorkspace,project:project.memoryProject,query:args.query,q:args.query,path:args.path,body:args.body,title:args.title,...(kind==='write'?(args.metadata as Record<string,unknown>??{}):{})};
   const params=Object.fromEntries(Object.entries(candidates).filter(([k,v])=>k in properties && v!==undefined));
   const result=await rpc('tools/call',{name:tool.name,arguments:params},8000);
   if (result?.isError) throw new Error(result.content?.map((x:any)=>x.text).join('\n') || 'Falha da ferramenta ai-memory');
+  return result;
+}
+async function callScope(kind:'search'|'read'|'write',scope:MemoryScope,args:Record<string,unknown>) {
+  const ts=await getTools(); const tool=ts.find(t=>toolNames[kind].includes(t.name as never));
+  if(!tool) throw new Error(`ai-memory não oferece ferramenta de ${kind}`);
+  const properties=(tool.inputSchema as any)?.properties ?? {};
+  if(!Object.hasOwn(properties,'workspace')||!Object.hasOwn(properties,'project')) throw new Error('Ferramenta ai-memory sem escopo explícito de workspace/project');
+  // memory_query accepts either `scopes` OR workspace/project. Prefer its
+  // explicit scopes form so the selected scope is isolated without a union.
+  const candidates:Record<string,unknown>={...(kind==='search'&&Object.hasOwn(properties,'scopes')?{scopes:[scope]}:{workspace:scope.workspace,project:scope.project}),...args};
+  const params=Object.fromEntries(Object.entries(candidates).filter(([k,v])=>k in properties&&v!==undefined));
+  const result=await rpc('tools/call',{name:tool.name,arguments:params},8000);
+  if(result?.isError)throw new Error(result.content?.map((x:any)=>x.text).join('\n')||'Falha da ferramenta ai-memory');
   return result;
 }
 function unwrap(result:any):any {
@@ -52,11 +69,76 @@ export async function memorySearch(project:Project,q:string):Promise<MemoryHit[]
 }
 export async function memoryRead(project:Project,path:string):Promise<MemoryPage> {
   const r=unwrap(await call('read',project,{path}));
-  return {path:String(r.path ?? path),title:String(r.title ?? path),body:String(r.body ?? r.content ?? r.text ?? '')};
+  return {path:String(r.path ?? path),title:String(r.title ?? path),body:String(r.body ?? r.content ?? r.text ?? ''),frontmatter:normalizeFrontmatter(r.frontmatter)} as MemoryPage;
 }
 export async function memoryWrite(project:Project,path:string,body:string):Promise<MemoryPage> {
-  const r=unwrap(await call('write',project,{path,body}));
-  return {path:String(r.path ?? path),title:String(r.title ?? path),body:String(r.body ?? r.content ?? body)};
+  if(project.memoryProject==='_global') throw Object.assign(new Error('Escrita no escopo _global não permitida'),{status:403});
+  return sharedMemoryWrite({workspace:project.memoryWorkspace!,project:project.memoryProject!},path,body,undefined);
+}
+function stable(value:any):any {
+  if(Array.isArray(value)) return value.map(stable);
+  if(value&&typeof value==='object') return Object.fromEntries(Object.keys(value).sort().map(k=>[k,stable(value[k])]));
+  if(value===null||['string','number','boolean'].includes(typeof value)) return value;
+  throw new Error('Frontmatter ai-memory contém valor não JSON-safe');
+}
+const version=(body:string,frontmatter:Record<string,unknown>)=>createHash('sha256').update(JSON.stringify({body,frontmatter:stable(frontmatter)})).digest('hex');
+function acceptsType(schema:unknown,type:string):boolean {
+  if(!schema||typeof schema!=='object'||Array.isArray(schema)) return false;
+  const declared=(schema as {type?:unknown}).type;
+  return declared===type || Array.isArray(declared)&&declared.includes(type);
+}
+export async function sharedMemorySearch(scope:MemoryScope,q:string):Promise<MemoryHit[]> {
+  const r=unwrap(await callScope('search',scope,{query:q})); const hits=Array.isArray(r)?r:(r.hits??r.results??r.pages??[]);
+  return hits.map((h:any)=>({path:String(h.path??h.relative_path??''),title:String(h.title??h.name??h.path??'Nota'),snippet:String(h.snippet??h.excerpt??h.content??'').slice(0,600)}));
+}
+export async function sharedMemoryRead(scope:MemoryScope,path:string):Promise<MemoryPage> {
+  const r=unwrap(await callScope('read',scope,{path})); const body=String(r.body??r.content??r.text??'');
+  const frontmatter=normalizeFrontmatter(r.frontmatter);
+  return {path:String(r.path??path),title:String(r.title??path),body,frontmatter,version:version(body,frontmatter)} as MemoryPage;
+}
+function normalizeFrontmatter(value:unknown):Record<string,unknown> {
+  if(!value||typeof value!=='object'||Array.isArray(value)) return {};
+  return stable(value as Record<string,unknown>);
+}
+const saves=new Map<string,Promise<MemoryPage>>();
+export function sharedMemoryWrite(scope:MemoryScope,path:string,body:string,expectedVersion:string|null|undefined):Promise<MemoryPage> {
+  if(scope.project==='_global') return Promise.reject(Object.assign(new Error('Escrita no escopo _global não permitida'),{status:403}));
+  const key=`${scope.workspace}\0${scope.project}\0${path}`; const prev=saves.get(key)??Promise.resolve({path,title:path,body:'',version:''});
+  const next=prev.catch(()=>({path,title:path,body:'',version:''})).then(async()=>{
+    let current:MemoryPage|undefined;
+    try { current=await sharedMemoryRead(scope,path); } catch(e) {
+      // Only an absent catalog entry permits creation; MCP/network/schema failures must not
+      // be mistaken for a missing note and turned into an overwrite attempt.
+      const missing=`page ${path} not found in resolved scope ${scope.workspace}/${scope.project}`;
+      if((e as any)?.code===-32603 && (e as Error).message===missing) current=undefined;
+      else throw e;
+    }
+    const expected=expectedVersion===undefined?(current?.version??null):expectedVersion;
+    if(expected===null&&memoryPathExists(scope,path)) throw Object.assign(new Error('Já existe uma nota nesse caminho; recarregue antes de editar'),{status:409});
+    if(expected===null ? current!==undefined : !current||current.version!==expected) throw Object.assign(new Error('A nota foi alterada desde a leitura; recarregue antes de salvar'),{status:409});
+    if(current) {
+      // Existing pages are edited in place to preserve frontmatter; incompatible
+      // local service/catalog state fails closed rather than falling back to MCP.
+      await writeExistingMemoryBody(scope,path,body,current.body,async()=>{
+        const latest=await sharedMemoryRead(scope,path);
+        if(latest.version!==current!.version) throw Object.assign(new Error('A nota ou seus metadados foram alterados durante a edição; recarregue antes de salvar'),{status:409});
+      });
+      const confirmed=await sharedMemoryRead(scope,path);
+      if(confirmed.body!==body) throw Object.assign(new Error('O MCP ainda não confirmou o corpo salvo; a reindexação pode estar pendente'),{status:503});
+      return confirmed;
+    }
+    // Validate the write contract before attempting any write. In particular, never
+    // let argument filtering silently remove the explicit scope or note body.
+    const ts=await getTools(); const tool=ts.find(t=>toolNames.write.includes(t.name as never)); if(!tool)throw new Error('ai-memory não oferece ferramenta de escrita');
+    const props=(tool.inputSchema as any)?.properties??{};
+    for(const field of ['workspace','project','path','body']) if(!acceptsType(props[field],'string')) throw new Error(`Schema memory_write_page inválido: ${field} deve aceitar string`);
+    const args={workspace:scope.workspace,project:scope.project,path,body};
+    const result=await rpc('tools/call',{name:tool.name,arguments:args},8000);if(result?.isError)throw new Error(result.content?.map((x:any)=>x.text).join('\n')||'Falha da ferramenta ai-memory');
+    const confirmed=await sharedMemoryRead(scope,path);
+    if(confirmed.body!==body) throw Object.assign(new Error('O MCP não confirmou o corpo recém-criado'),{status:503});
+    return confirmed;
+  });
+  saves.set(key,next); void next.finally(()=>{if(saves.get(key)===next)saves.delete(key);}).catch(()=>{}); return next;
 }
 
 const memoryStopwords=new Set(['a','as','o','os','de','da','das','do','dos','e','em','no','na','nos','nas','um','uma','que','qual','quais','como','para','por','sobre','com','minha','meu','meus','nossa','nosso','isso','essa','esse','antes','anterior','anteriores','lembre','lembra','lembrar','memoria','memory','decidimos','decisao','decisoes','configuracao','configuracoes','what','about','the','and','our','previous','remember']);

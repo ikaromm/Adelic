@@ -1,0 +1,13 @@
+import { afterEach,describe,expect,it,vi } from 'vitest';
+import { mkdtempSync,rmSync,mkdirSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
+import { memoryCatalog,memoryList } from '../server/memory-catalog.js';
+
+const dirs:string[]=[]; const prior=process.env.ADELIC_MEMORY_DATA_DIR; afterEach(()=>{if(prior===undefined)delete process.env.ADELIC_MEMORY_DATA_DIR;else process.env.ADELIC_MEMORY_DATA_DIR=prior;for(const d of dirs.splice(0))rmSync(d,{recursive:true,force:true});});
+function fixture(){const dir=mkdtempSync(join(tmpdir(),'adelic-memory-meta-'));dirs.push(dir);mkdirSync(join(dir,'db'));process.env.ADELIC_MEMORY_DATA_DIR=dir;const db=new DatabaseSync(join(dir,'db/memory.sqlite'));db.exec(`CREATE TABLE workspaces(id BLOB PRIMARY KEY,name TEXT);CREATE TABLE projects(id BLOB PRIMARY KEY,workspace_id BLOB,name TEXT);CREATE TABLE pages(workspace_id BLOB,project_id BLOB,path TEXT,title TEXT,is_latest INTEGER,expires_at INTEGER,updated_at INTEGER,body TEXT,frontmatter TEXT);INSERT INTO workspaces VALUES(X'01','pessoal'),(X'02','repo');INSERT INTO projects VALUES(X'11',X'01','ambiente-ikaromm'),(X'21',X'02','Adelic');`);return db;}
+describe('read-only memory catalog',()=>{
+ it('counts only latest unexpired pages by explicit workspace/project and paginates metadata',()=>{const db=fixture();const now=Date.now()*1000;db.prepare('INSERT INTO pages VALUES(?,?,?,?,?,?,?,?,?)').run(Buffer.from([1]),Buffer.from([17]),'a.md','A',1,null,now,'DO NOT READ','{}');db.prepare('INSERT INTO pages VALUES(?,?,?,?,?,?,?,?,?)').run(Buffer.from([1]),Buffer.from([17]),'b.md','B',1,now-1,now,'PRIVATE','{}');db.prepare('INSERT INTO pages VALUES(?,?,?,?,?,?,?,?,?)').run(Buffer.from([2]),Buffer.from([33]),'c.md','C',1,null,now,'SECRET','{}');db.prepare('INSERT INTO pages VALUES(?,?,?,?,?,?,?,?,?)').run(Buffer.from([1]),Buffer.from([17]),'old.md','Old',0,null,now,'PRIVATE','{}');db.close();const result=memoryCatalog();expect(result.scopes).toContainEqual({workspace:'pessoal',project:'ambiente-ikaromm',pageCount:1});expect(result.totalPages).toBe(2);expect(memoryList({workspace:'repo',project:'Adelic'},0,1)).toMatchObject({total:1,limit:1,pages:[{path:'c.md',title:'C',snippet:''}]});});
+ it('fails clearly for missing or incompatible database and rejects invalid paging',()=>{const missing=mkdtempSync(join(tmpdir(),'adelic-memory-missing-'));dirs.push(missing);process.env.ADELIC_MEMORY_DATA_DIR=missing;expect(()=>memoryCatalog()).toThrow(/Catálogo ai-memory indisponível/);const db=fixture();db.close();expect(()=>memoryList({workspace:'pessoal',project:'ambiente-ikaromm'},0,101)).toThrow(/limit máximo/);});
+});

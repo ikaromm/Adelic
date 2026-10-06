@@ -6,7 +6,7 @@ Decisão do usuário em 2026-10-04: cada projeto começa com um orquestrador que
 
 O agente/modelo escolhido na conversa é o coordenador. Configurações do projeto escolhem executor/revisor, com herança do provedor da conversa e seleção de modelos compatíveis descobertos. Orquestração começa ligada, com até dois executores concorrentes e revisão de trabalhos maiores. Pode ser desligada explicitamente para execução direta. Alterações de configuração valem para o próximo turno.
 
-Perguntas simples são delegadas diretamente a um executor: uma chamada, esforço baixo, sem ferramentas/memória automática nem chamada de planejamento/síntese. Inspeções pontuais também podem usar um executor. Pedidos maiores usam planejamento estruturado sem ferramentas, tarefas reais com escopos/dependências, revisão quando configurada e síntese. Plano inválido produz aviso e delegação de uma tarefa integral; não inventa execução bem-sucedida.
+Perguntas simples são delegadas diretamente a um executor: uma chamada, esforço baixo por padrão, ferramentas locais disponíveis e nenhuma consulta automática de memória/grafo ou chamada de planejamento/síntese. O executor responde diretamente e pode consultar o computador quando precisar de evidências, inclusive em modo Rápido explícito. Disponibilidade de ferramentas não é registro de uso: eventos reais indicam quais ações ocorreram. Essa decisão do usuário em 2026-10-05 substitui a restrição inicial que desligava ferramentas nas perguntas rápidas. Inspeções pontuais também podem usar um executor. Pedidos maiores usam planejamento estruturado sem ferramentas, tarefas reais com escopos/dependências, revisão quando configurada e síntese. Plano inválido produz aviso e delegação de uma tarefa integral; não inventa execução bem-sucedida.
 
 Executores recebem objetivo, instruções da tarefa, arquivos/escopo e contexto pertinente limitado, sem a transcrição completa do coordenador ou dos demais agentes. Coordenador recebe mapa limitado de caminhos, objetivo, resumos recentes e resultados compactos. Saídas detalhadas são guardadas por tarefa em SQLite, fora do histórico entregue ao coordenador. O mapa é um índice de caminhos, não uma leitura de todo o código.
 
@@ -37,7 +37,7 @@ API: GET `/api/projects/:id/graphify` mostra estado, POST `/api/projects/:id/gra
 ## Aceite
 
 1. Projeto novo e projeto anterior sem configuração explícita têm orquestração ligada.
-2. Pergunta simples cria uma tarefa real, faz somente uma chamada e não habilita ferramentas.
+2. Pergunta simples cria uma tarefa real e faz somente uma chamada, com ferramentas locais disponíveis. Uma pergunta conceitual não deve consultar o computador sem necessidade; um diagnóstico deve conseguir executar consultas, respeitando sandbox e aprovações.
 3. Trabalho maior planeja sem ferramentas, executa tarefas e sintetiza usando resumos limitados.
 4. Tarefas independentes de leitura podem ser concorrentes; dependências e escrita não colidem.
 5. Contexto de executor e coordenador é separado e limitado; saídas completas persistidas não entram automaticamente no prompt principal.

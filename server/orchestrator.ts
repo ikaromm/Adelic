@@ -1,50 +1,85 @@
 import { randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import type { Approval, DelegatedTask, Message, Project, ProviderEvent, ProviderInfo, ProviderRegistry, Run, RunEvent, Session, Settings, StreamEvent } from '../shared/contracts.js';
+import type { Approval, DelegatedTask, Message, Project, ProviderEvent, ProviderInfo, ProviderRegistry, Run, RunEvent, Session, Settings, StreamEvent, Thinking } from '../shared/contracts.js';
 import { routeMessage, selectHistory, titleFromMessage } from './router.js';
 import { memoryContextFor } from './memory.js';
 import { Store } from './store.js';
 import { boundedCoordinatorContext, briefFor, graphifyPaths, isSimpleInspectionRequest, parseTaskPlan, resolveAgent, taskRecord, type PlannedTask } from './coordination.js';
 import { graphify, graphifyContext, type GraphifyService } from './graphify.js';
+import { adaptEffort, supportsEffort } from '../shared/reasoning.js';
+
+interface StartingRun { clientMessageId?:string; controller:AbortController; done:Promise<void>; finish:()=>void; result?:{runId:string;messageId:string}; error?:unknown }
 
 export class Orchestrator {
   private active=new Map<string,{runId:string;controller:AbortController;done?:Promise<void>}>();
+  private starting=new Map<string,StartingRun>();
+  private shuttingDown=false;
   private deciding=new Set<string>();
   private listeners=new Set<(event:StreamEvent)=>void>();
   private writingProjects=new Set<string>();
   private writeQueues=new Map<string,Promise<void>>();
   private reservedProjectWrites=new Map<string,string>();
-  constructor(readonly store:Store,readonly providers:ProviderRegistry,private readonly loadMemoryContext:typeof memoryContextFor=memoryContextFor,private readonly graphifyService:GraphifyService=graphify) {}
+  constructor(readonly store:Store,private readonly providers:ProviderRegistry,private readonly loadMemoryContext:typeof memoryContextFor=memoryContextFor,private readonly graphifyService:GraphifyService=graphify,private readonly providerList:()=>Promise<ProviderInfo[]>=()=>providers.list()) {}
   subscribe(listener:(event:StreamEvent)=>void) { this.listeners.add(listener); return ()=>this.listeners.delete(listener); }
   private emit(event:StreamEvent) { for (const l of this.listeners) { try { l(event); } catch {} } }
   private publishEvent(sessionId:string,runId:string,type:RunEvent['type'],text:string,extra:Partial<RunEvent>={}) {
     const event:RunEvent={id:randomUUID(),runId,sessionId,type,text,createdAt:new Date().toISOString(),...extra};
     this.store.addEvent(event); this.emit({type:'event',event}); return event;
   }
-  async start(session:Session,content:string,clientMessageId?:string) {
+  async start(session:Session,content:string,clientMessageId?:string):Promise<{runId:string;messageId:string}> {
+    if(this.shuttingDown)throw Object.assign(new Error('Orquestrador está encerrando'),{status:503});
     if (clientMessageId) { const existing=this.store.findClientMessage(session.id,clientMessageId); if (existing) return {runId:existing,messageId:this.store.listMessages(session.id).find(m=>m.runId===existing&&m.role==='user')?.id ?? ''}; }
+    const pending=this.starting.get(session.id);
+    if(pending) {
+      if(clientMessageId&&pending.clientMessageId===clientMessageId) { await pending.done;if(pending.error)throw pending.error;if(pending.result)return pending.result;throw Object.assign(new Error('A inicialização concorrente não produziu uma execução'),{status:409}); }
+      throw Object.assign(new Error('Já existe uma execução ativa nesta conversa'),{status:409});
+    }
+    session=this.store.getSession(session.id)??session;
+    if (!this.store.getSession(session.id)) throw Object.assign(new Error('Conversa não encontrada'),{status:404});
     if (this.active.has(session.id) || session.activeRunId) throw Object.assign(new Error('Já existe uma execução ativa nesta conversa'),{status:409});
-    const project=session.projectId===null?this.detachedProject(session.id):this.store.getProject(session.projectId); if (!project) throw Object.assign(new Error('Projeto não encontrado'),{status:404});
-    if(this.writingProjects.has(project.id)||this.reservedProjectWrites.has(project.id))throw Object.assign(new Error('Já há uma execução alterando este projeto'),{status:409});
-    const projectSnapshot=structuredClone(project);
-    const history=this.store.listMessages(session.id);
-    const settings=this.store.getSettings()!;
-    const plan=routeMessage(content,session.mode,history,settings.memoryEnabled&&session.projectId!==null);
-    const runId=randomUUID(), userId=randomUUID(), assistantId=randomUUID(), now=new Date().toISOString();
-    const reserveProject=settings.sandbox==='workspace-write'&&(projectSnapshot.orchestration?.enabled!==false||plan.tools);
-    const user:Message={id:userId,sessionId:session.id,runId,role:'user',content,createdAt:now};
-    const assistant:Message={id:assistantId,sessionId:session.id,runId,role:'assistant',content:'',createdAt:now,status:'running',providerId:session.providerId,route:plan};
-    const run:Run={id:runId,sessionId:session.id,providerId:session.providerId,status:'running',route:plan,startedAt:now};
-    session={...session,activeRunId:runId,title:session.title==='Nova conversa'?titleFromMessage(content):session.title,updatedAt:now};
-    this.store.createRun(user,assistant,run,session,clientMessageId);
-    if(reserveProject)this.reservedProjectWrites.set(project.id,runId);
-    this.emit({type:'message',message:user}); this.emit({type:'message',message:assistant}); this.emit({type:'run',run}); this.emit({type:'session',session});
-    const controller=new AbortController(); const active={runId,controller} as {runId:string;controller:AbortController;done?:Promise<void>}; this.active.set(session.id,active);
-    active.done=this.execute(session,projectSnapshot,content,history,plan,run,assistant,controller,structuredClone(settings));
-    return {runId,messageId:userId};
+    const controller=new AbortController();let finish!:()=>void;const done=new Promise<void>(resolve=>{finish=resolve;});
+    const reservation:StartingRun={clientMessageId,controller,done,finish};this.starting.set(session.id,reservation);
+    try {
+      const startingSettings=structuredClone(this.store.getSettings()!);
+      if(controller.signal.aborted)throw Object.assign(new Error('Execução cancelada antes de iniciar'),{status:409});
+      const initialThinking=session.thinking;
+      const catalog=initialThinking&&initialThinking!=='auto'?await this.providerList():undefined;
+      if(this.shuttingDown)throw Object.assign(new Error('Orquestrador está encerrando'),{status:503});
+      if(controller.signal.aborted)throw Object.assign(new Error('Execução cancelada antes de iniciar'),{status:409});
+      // Re-read after discovery. PATCH is blocked by this reservation, and using the
+      // stored snapshot here prevents an older request object from overwriting it.
+      const latest=this.store.getSession(session.id);if(!latest)throw Object.assign(new Error('Conversa não encontrada'),{status:404});
+      if(this.active.has(session.id)||latest.activeRunId)throw Object.assign(new Error('Já existe uma execução ativa nesta conversa'),{status:409});
+      session=latest;
+      if(session.thinking&&session.thinking!=='auto'&&!catalog)throw Object.assign(new Error('A configuração da conversa mudou durante a descoberta; tente novamente.'),{status:409});
+      const project=session.projectId===null?this.detachedProject(session.id):this.store.getProject(session.projectId);if(!project)throw Object.assign(new Error('Projeto não encontrado'),{status:404});
+      if(this.writingProjects.has(project.id)||this.reservedProjectWrites.has(project.id))throw Object.assign(new Error('Já há uma execução alterando este projeto'),{status:409});
+      const projectSnapshot=structuredClone(project),history=this.store.listMessages(session.id),settings=startingSettings;
+      const plan=routeMessage(content,session.mode,history,settings.memoryEnabled&&session.projectId!==null);
+      if(session.thinking&&session.thinking!=='auto'){plan.effort=session.thinking;this.validateCoordinatorThinking(session.providerId,session.model,session.thinking,catalog!);}
+      else plan.effort=undefined;
+      const runId=randomUUID(),userId=randomUUID(),assistantId=randomUUID(),now=new Date().toISOString();
+      const reserveProject=settings.sandbox==='workspace-write'&&(projectSnapshot.orchestration?.enabled!==false||plan.tools);
+      const user:Message={id:userId,sessionId:session.id,runId,role:'user',content,createdAt:now};
+      const assistant:Message={id:assistantId,sessionId:session.id,runId,role:'assistant',content:'',createdAt:now,status:'running',providerId:session.providerId,route:plan};
+      const run:Run={id:runId,sessionId:session.id,providerId:session.providerId,status:'running',route:plan,startedAt:now};
+      session={...session,activeRunId:runId,title:session.title==='Nova conversa'?titleFromMessage(content):session.title,updatedAt:now};
+      this.store.createRun(user,assistant,run,session,clientMessageId);
+      if(reserveProject)this.reservedProjectWrites.set(project.id,runId);
+      const active={runId,controller} as {runId:string;controller:AbortController;done?:Promise<void>};this.active.set(session.id,active);
+      this.starting.delete(session.id);reservation.finish();
+      this.emit({type:'message',message:user});this.emit({type:'message',message:assistant});this.emit({type:'run',run});this.emit({type:'session',session});
+      active.done=this.execute(session,projectSnapshot,content,history,plan,run,assistant,controller,structuredClone(settings));
+      reservation.result={runId,messageId:userId};return reservation.result;
+    } catch(error) {
+      reservation.error=error;throw error;
+    } finally {
+      if(this.starting.get(session.id)===reservation)this.starting.delete(session.id);
+      reservation.finish();
+    }
   }
-  isActive(sessionId:string) { return this.active.has(sessionId); }
+  isActive(sessionId:string) { return this.active.has(sessionId)||this.starting.has(sessionId); }
   private detachedProject(sessionId:string):Project {
     const path=join(this.store.dataDir,'conversations',sessionId);mkdirSync(path,{recursive:true});
     return {id:`detached:${sessionId}`,name:'Conversa avulsa',path,createdAt:new Date().toISOString(),memoryWorkspace:'',memoryProject:'',graphify:{enabled:false}};
@@ -52,10 +87,16 @@ export class Orchestrator {
   private async execute(session:Session,project:Project,content:string,history:Message[],plan:Run['route'],run:Run,assistant:Message,controller:AbortController,settings:Settings) {
     let response='',firstTokenAt:number|undefined; const started=Date.parse(run.startedAt); let memoryContext:string|undefined;
     try {
-      const provider=(await this.providers.list()).find(p=>p.id===session.providerId);
+      const providerCatalog=await this.providerList();const provider=providerCatalog.find(p=>p.id===session.providerId);
       if (controller.signal.aborted) throw new Error('Execução cancelada');
       if (!provider || !provider.available) throw new Error(provider?.detail || 'Provedor indisponível');
-      if (plan.level==='fast' && !provider.capabilities.fast) throw new Error('Este provedor não oferece o modo rápido sem ferramentas');
+      if(!session.thinking||session.thinking==='auto'){
+        plan.effort=adaptEffort(provider,session.model,plan.level==='deep'?'high':'low');
+        run.route.effort=plan.effort;if(assistant.route)assistant.route.effort=plan.effort;
+        this.store.putRun(run);this.store.updateMessage(assistant);this.emit({type:'run',run});this.emit({type:'message',message:assistant});
+      }
+      if (plan.level==='fast' && !provider.capabilities.fast) throw new Error('Este provedor não oferece o caminho rápido');
+      if(plan.tools&&!provider.capabilities.tools)throw new Error('Este provedor não disponibiliza ferramentas para esta conversa. Escolha outro provedor para executar este pedido.');
       if (plan.memory&&session.projectId!==null) {
         try { memoryContext=await this.loadMemoryContext(project,content);if(!memoryContext)memoryContext='[Resultado da busca: nenhuma nota pertinente foi encontrada no escopo de memória deste projeto.]'; }
         catch(e) { const detail=errorText(e);this.publishEvent(session.id,run.id,'error',`Memória indisponível: ${detail}`);memoryContext=`[Resultado da busca: a recuperação de memória falhou (${detail}). Nenhuma decisão anterior foi verificada.]`; }
@@ -74,12 +115,14 @@ export class Orchestrator {
       }
       if (controller.signal.aborted) throw new Error('Execução cancelada');
       const style=settings.responseStyle==='concise'?'Responda de forma concisa, sem omitir os pontos necessários.':'Use uma resposta equilibrada e organizada.';
-      const prompt=`${style}\n\n${memoryGuidance}\n\n${content}${skillContext}`;
-      const directInput={runId:run.id,sessionId:session.id,nativeSessionId:session.nativeSessionId,providerId:session.providerId,model:session.model,cwd:project.path,prompt,history:selectHistory(history,plan.contextBudget),plan,sandbox:settings.sandbox,memoryContext:boundedMemory};
+      const toolGuidance=plan.level==='fast'?'Responda diretamente. Se o pedido exigir verificar algo no computador, use as ferramentas disponíveis para executar as consultas necessárias, respeitando a política de permissões. Um pedido explícito de diagnóstico já solicita essa verificação: realize consultas em vez de apenas oferecer fazê-las. Perguntas conceituais não precisam de inspeção.':'';
+      const prompt=`${style}\n\n${toolGuidance}\n\n${memoryGuidance}\n\n${content}${skillContext}`;
+      const directInput=this.applyThinking({runId:run.id,sessionId:session.id,nativeSessionId:session.nativeSessionId,providerId:session.providerId,model:session.model,cwd:project.path,prompt,history:selectHistory(history,plan.contextBudget),plan,sandbox:settings.sandbox,approvalMode:settings.approvalMode??'auto-safe',memoryContext:boundedMemory},session.thinking,providerCatalog);
+      plan.effort=directInput.plan.effort;run.route.effort=directInput.plan.effort;if(assistant.route)assistant.route.effort=directInput.plan.effort;this.store.putRun(run);this.store.updateMessage(assistant);this.emit({type:'run',run});this.emit({type:'message',message:assistant});
       const perform=()=>this.providers.run(directInput,(event:ProviderEvent)=>{
         if (event.type==='delta') { if (!firstTokenAt) { firstTokenAt=Date.now(); run.firstTokenMs=firstTokenAt-started; assistant.firstTokenMs=run.firstTokenMs; } response+=event.text; assistant.content=response; this.store.updateMessage(assistant); this.emit({type:'delta',sessionId:session.id,runId:run.id,messageId:assistant.id,text:event.text}); }
         else if (event.type==='status') this.publishEvent(session.id,run.id,'status',event.text);
-        else if (event.type==='tool') this.publishEvent(session.id,run.id,'tool',event.description,{toolName:event.name,status:event.status});
+        else if (event.type==='tool') this.publishEvent(session.id,run.id,'tool',event.description,{toolName:event.name,status:event.status,...(event.toolCallId?{toolCallId:`${directInput.runId}:${event.toolCallId}`}:{})});
         else if (event.type==='approval') { const a:Approval={...event.approval,runId:run.id,sessionId:session.id}; this.store.putApproval(a); this.emit({type:'approval',approval:a}); this.publishEvent(session.id,run.id,'approval',a.title,{status:a.status}); }
         else if (event.type==='session') { session.nativeSessionId=event.nativeSessionId; this.store.putSession(session); this.emit({type:'session',session}); }
         else if (event.type==='usage') { run.inputTokens=event.inputTokens; run.outputTokens=event.outputTokens; run.costUsd=event.costUsd; }
@@ -106,7 +149,7 @@ export class Orchestrator {
   }
   private async executeCoordinated(session:Session,project:Project,content:string,history:Message[],route:Run['route'],run:Run,assistant:Message,controller:AbortController,settings:Settings,coordinator:ProviderInfo,memoryContext?:string,skillContext='',memoryGuidance='') {
     const config=project.orchestration ?? {enabled:true,maxWorkers:2,review:true};
-    const catalog=await this.providers.list();
+    const catalog=await this.providerList();
     const worker=resolveAgent(catalog,config.workerProviderId,config.workerModel,'worker',session.providerId,session.model);
     if(route.tools&&!catalog.find(p=>p.id===worker.providerId)?.capabilities.tools)throw new Error('O executor escolhido não oferece ferramentas necessárias para esta tarefa');
     const emitTask=(task:DelegatedTask)=>{this.store.putTask(task);this.emit({type:'task',task:{...task,output:undefined}});};
@@ -114,18 +157,21 @@ export class Orchestrator {
     const startTask=(task:DelegatedTask)=>{task.status='running';task.startedAt=new Date().toISOString();emitTask(task);};
     const finishTask=(task:DelegatedTask,status:DelegatedTask['status'],output:string,error?:string)=>{task.status=status;task.completedAt=new Date().toISOString();task.output=output;task.summary=output.replace(/\s+/g,' ').trim().slice(0,1200);if(error)task.error=error;emitTask(task);};
     const childRun=(task:DelegatedTask)=>`${run.id}:${task.id}`;
-    const baseInput=(providerId:typeof session.providerId,model:string|undefined,task:DelegatedTask,prompt:string,childHistory:Message[],tools:boolean,sandbox=settings.sandbox,taskMemory?:string,level?:'fast'|'deep')=>{const taskLevel=level||(tools?'deep':'fast');return {runId:childRun(task),sessionId:session.id,providerId,model,cwd:project.path,prompt,history:childHistory,plan:{level:taskLevel,reason:`Tarefa delegada: ${task.title}`,tools,memory:false,effort:taskLevel==='deep'?'high' as const:'low' as const,contextBudget:tools?9000:3500},sandbox,memoryContext:taskMemory};};
+    const baseInput=(providerId:typeof session.providerId,model:string|undefined,task:DelegatedTask,prompt:string,childHistory:Message[],tools:boolean,sandbox=settings.sandbox,taskMemory?:string,level?:'fast'|'deep')=>{const taskLevel=level||(tools?'deep':'fast');return {runId:childRun(task),sessionId:session.id,providerId,model,cwd:project.path,prompt,history:childHistory,plan:{level:taskLevel,reason:`Tarefa delegada: ${task.title}`,tools,memory:false,effort:adaptEffort(catalog.find(p=>p.id===providerId),model,session.thinking&&session.thinking!=='auto'?session.thinking:(taskLevel==='deep'?'high':'low')),contextBudget:taskLevel==='deep'&&tools?9000:3500},sandbox,approvalMode:settings.approvalMode??'auto-safe',memoryContext:taskMemory};};
     const call=async(input:ReturnType<typeof baseInput>,task:DelegatedTask,streamDirect=false)=>{
       if(controller.signal.aborted)throw new Error('Execução cancelada');
       let eventInput:number|undefined,eventOutput:number|undefined,eventCost:number|undefined;
-      const result=await this.providers.run(input,(event:ProviderEvent)=>{
+      const effectiveInput=this.applyThinking(input,session.thinking,catalog);
+      task.effort=effectiveInput.plan.effort;this.store.putTask(task);this.publishEvent(session.id,run.id,'status',`Esforço efetivo da tarefa “${task.title}”: ${task.effort??'Auto (nativo)'}`);
+      if(route.level==='fast'&&task.role==='worker'){route.effort=effectiveInput.plan.effort;run.route.effort=effectiveInput.plan.effort;if(assistant.route)assistant.route.effort=effectiveInput.plan.effort;this.store.putRun(run);this.store.updateMessage(assistant);this.emit({type:'run',run});this.emit({type:'message',message:assistant});}
+      const result=await this.providers.run(effectiveInput,(event:ProviderEvent)=>{
         if(event.type==='approval') { const owned:Approval={...event.approval,runId:run.id,sessionId:session.id};this.store.putApproval(owned);this.emit({type:'approval',approval:owned});this.publishEvent(session.id,run.id,'approval',owned.title,{status:owned.status}); }
         else if(event.type==='delta') {
           task.output=(task.output||'')+event.text;this.store.putTask(task);
           if(streamDirect) { if(!assistant.firstTokenMs){run.firstTokenMs=Date.now()-Date.parse(run.startedAt);assistant.firstTokenMs=run.firstTokenMs;}assistant.content+=event.text;this.store.updateMessage(assistant);this.emit({type:'delta',sessionId:session.id,runId:run.id,messageId:assistant.id,text:event.text}); }
         }
         else if(event.type==='status') this.publishEvent(session.id,run.id,'status',event.text);
-        else if(event.type==='tool') this.publishEvent(session.id,run.id,'tool',event.description,{toolName:event.name,status:event.status});
+        else if(event.type==='tool') this.publishEvent(session.id,run.id,'tool',event.description,{toolName:event.name,status:event.status,...(event.toolCallId?{toolCallId:`${input.runId}:${event.toolCallId}`}:{})});
         else if(event.type==='usage') {eventInput=event.inputTokens??eventInput;eventOutput=event.outputTokens??eventOutput;eventCost=event.costUsd??eventCost;}
       },controller.signal);
       const inputTokens=eventInput??result.inputTokens,outputTokens=eventOutput??result.outputTokens,costUsd=eventCost??result.costUsd;
@@ -168,9 +214,11 @@ export class Orchestrator {
     };
     if(route.level==='fast') {
       const task=makeTask('worker','Responder pergunta',content,[],[],worker.providerId,worker.model);startTask(task);
-      if(!catalog.find(p=>p.id===worker.providerId)?.capabilities.fast)throw new Error('O executor escolhido não oferece execução rápida sem ferramentas');
-      const brief=getBrief();const style=settings.responseStyle==='concise'?'Responda de forma concisa, sem omitir pontos necessários.':'Use uma resposta equilibrada e organizada.';const prompt=`${style}\n\nResponda diretamente ao pedido. Use apenas as mensagens recentes e o resumo persistido abaixo quando forem pertinentes.\n\n${boundedCoordinatorContext(history,content,brief,[] ,4200)}`;
-      const input=baseInput(worker.providerId,worker.model,task,prompt,selectHistory(history,2500),false,settings.sandbox);
+      const workerInfo=catalog.find(p=>p.id===worker.providerId);
+      if(!workerInfo?.capabilities.fast)throw new Error('O executor escolhido não oferece o caminho rápido');
+      if(!workerInfo.capabilities.tools)throw new Error('O executor escolhido não disponibiliza ferramentas para esta conversa. Escolha outro executor.');
+      const brief=getBrief();const style=settings.responseStyle==='concise'?'Responda de forma concisa, sem omitir pontos necessários.':'Use uma resposta equilibrada e organizada.';const prompt=`${style}\n\nResponda diretamente ao pedido. Se precisar verificar algo no computador, use as ferramentas disponíveis para executar as consultas necessárias, respeitando a política de permissões. Um pedido explícito de diagnóstico já solicita essa verificação: realize consultas em vez de apenas oferecer fazê-las. Perguntas conceituais não precisam de inspeção. Use apenas as mensagens recentes e o resumo persistido abaixo quando forem pertinentes.\n\n${boundedCoordinatorContext(history,content,brief,[] ,4200)}`;
+      const input=baseInput(worker.providerId,worker.model,task,prompt,selectHistory(history,2500),true,settings.sandbox,undefined,'fast');
       try { const before=assistant.content;const perform=async()=>{if(controller.signal.aborted)throw new Error('Execução cancelada');return call(input,task,true);};const result=settings.sandbox==='workspace-write'?await this.withProjectWrite(project.id,perform):await perform();const output=result.text||task.output||'';if(assistant.content===before&&output){assistant.content+=output;this.store.updateMessage(assistant);this.emit({type:'delta',sessionId:session.id,runId:run.id,messageId:assistant.id,text:output});}finishTask(task,result.stopReason==='cancelled'?'cancelled':'completed',output||assistant.content);if(result.stopReason==='cancelled')throw new Error('Execução cancelada'); }
       catch(e){finishTask(task,controller.signal.aborted?'cancelled':'failed',assistant.content,errorText(e));throw e;}
       return;
@@ -231,13 +279,22 @@ export class Orchestrator {
       saveBrief(content,workerSummary,mapPaths(graphContext).concat(planned.flatMap(t=>t.scope)));
     }catch(e){finishTask(synth,controller.signal.aborted?'cancelled':'failed',assistant.content,errorText(e));throw e;}
   }
+  private validateCoordinatorThinking(providerId:Session['providerId'],model:string|undefined,thinking:Thinking,catalog:ProviderInfo[]):void {
+    const provider=catalog.find(item=>item.id===providerId);
+    if(!supportsEffort(provider,model,thinking)){const selected=provider?.models.find(item=>item.id===model);throw Object.assign(new Error(`${provider?.name??providerId} não anuncia esforço ${thinking} para ${selected?.name??model??'o modelo selecionado'}.`),{status:400});}
+  }
+  private applyThinking<T extends {providerId:Session['providerId'];model?:string;plan:{effort?:Run['route']['effort']}}>(input:T,thinking:Thinking|undefined,catalog:ProviderInfo[]):T {
+    const provider=catalog.find(item=>item.id===input.providerId);
+    const effort=adaptEffort(provider,input.model,thinking&&thinking!=='auto'?thinking:input.plan.effort);
+    return {...input,plan:{...input.plan,effort}};
+  }
   private async withProjectWrite<T>(projectId:string,work:()=>Promise<T>):Promise<T> {
     const previous=this.writeQueues.get(projectId)??Promise.resolve();let release!:()=>void;const gate=new Promise<void>(resolve=>{release=resolve;});const tail=previous.then(()=>gate);this.writeQueues.set(projectId,tail);
     await previous;this.writingProjects.add(projectId);
     try{return await work();}finally{this.writingProjects.delete(projectId);release();if(this.writeQueues.get(projectId)===tail)this.writeQueues.delete(projectId);}
   }
   coordination(projectId:string) { const project=this.store.getProject(projectId);if(!project)return undefined;const config=project.orchestration??{enabled:true,maxWorkers:2,review:true};return {config,brief:this.store.getBrief(projectId),tasks:this.store.listTasks(projectId,30).map(t=>({...t,output:undefined,instructions:t.instructions.slice(0,600)}))}; }
-  async cancel(sessionId:string) { const item=this.active.get(sessionId); if (!item) throw Object.assign(new Error('Não há execução ativa'),{status:409}); item.controller.abort(); }
+  async cancel(sessionId:string) { const item=this.active.get(sessionId);if(item){item.controller.abort();return;}const starting=this.starting.get(sessionId);if(starting){starting.controller.abort();return;}throw Object.assign(new Error('Não há execução ativa'),{status:409}); }
   async decide(approvalId:string,sessionId:string,decision:'approve'|'deny') {
     const approval=this.store.getApproval(approvalId); if (!approval || approval.sessionId!==sessionId || approval.status!=='pending') throw Object.assign(new Error('Aprovação não encontrada ou já respondida'),{status:404});
     const active=this.active.get(sessionId); if (!active || active.runId!==approval.runId) throw Object.assign(new Error('Execução dona da aprovação não está ativa'),{status:409});
@@ -250,7 +307,7 @@ export class Orchestrator {
       current.status=decision==='approve'?'approved':'denied'; this.store.putApproval(current); this.emit({type:'approval',approval:current}); this.publishEvent(sessionId,approval.runId,'approval',decision==='approve'?'Aprovado':'Negado',{status:current.status});
     } finally { this.deciding.delete(approvalId); }
   }
-  async shutdown() { const active=[...this.active.values()]; for (const a of active) a.controller.abort(); await Promise.all(active.map(a=>a.done).filter((p):p is Promise<void>=>Boolean(p))); }
+  async shutdown() { this.shuttingDown=true;const starting=[...this.starting.values()],active=[...this.active.values()];for(const item of starting)item.controller.abort();for(const item of active)item.controller.abort();await Promise.all([...starting.map(item=>item.done),...active.map(item=>item.done).filter((p):p is Promise<void>=>Boolean(p))]); }
 }
 function errorText(e:unknown) { return e instanceof Error?e.message:String(e); }
 function applicableSkillContext(store:Store,content:string,plan:Run['route']) {

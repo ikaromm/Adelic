@@ -218,7 +218,8 @@ jobs:
         run: |
           chmod +x release/Adelic-*-linux-x86_64.AppImage
           useradd -m tester
-          chown -R tester release scripts package.json
+          # The smoke script writes its summary to .desktop/validation in the checkout.
+          mkdir -p .desktop && chown -R tester release scripts package.json .desktop
           set +e
           su tester -c "PATH=/opt/node/bin:\$PATH xvfb-run --auto-servernum --server-args='-screen 0 1280x800x24' node scripts/smoke-desktop.mjs \$(ls release/Adelic-*-linux-x86_64.AppImage)" > smoke.log 2>&1
           status=$?

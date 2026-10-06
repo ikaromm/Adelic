@@ -61,6 +61,12 @@ npm run test:e2e      # Playwright; local: PLAYWRIGHT_CHROMIUM=/usr/bin/chromium
 
 Alguns testes usam o bubblewrap real e esperam `rg` e `pactl` em `/usr/bin`. O commit que formatou o código inteiro está em `.git-blame-ignore-revs`; para o `git blame` ignorá-lo, use `git config blame.ignoreRevsFile .git-blame-ignore-revs`.
 
+Os testes de integração com o ai-memory (`tests/integration-ai-memory.test.ts`) sobem um servidor real isolado, com pasta temporária, token e porta aleatória. Eles rodam quando há um binário em `AI_MEMORY_BIN` ou `ai-memory` no PATH; caso contrário, são pulados.
+
+Release: `npm run release -- 0.5.0 --push` atualiza a versão, fecha a seção do CHANGELOG, cria `docs/releases/v0.5.0.md`, faz o commit e envia a tag. O workflow **Release** testa, gera o AppImage e publica a release com o AppImage, o checksum e o `install-linux.sh`. Use `--dry-run` para conferir antes.
+
+Diagnóstico: em Configurações › Diagnóstico, ou em `GET /api/diagnostics`. O relatório traz versões, caminhos (com a home como `~`) e estado dos serviços, sem credenciais nem conversas.
+
 Os testes E2E (`tests/e2e/`) sobem o backend e o build reais com um provedor simulado, em uma pasta de dados temporária e sem acessar o ai-memory nem os CLIs do computador.
 
 Banco de dados: o esquema é versionado em `PRAGMA user_version` (`server/migrations.ts`). Antes de aplicar uma migração numa base com dados, o Adelic grava uma cópia em `<pasta de dados>/backups/` (permissão 0600, as cinco mais recentes). Uma base criada por uma versão mais nova do Adelic é recusada sem alterações. Para restaurar uma cópia, feche o Adelic e substitua `adelic.sqlite` por ela, removendo `adelic.sqlite-wal` e `adelic.sqlite-shm`.

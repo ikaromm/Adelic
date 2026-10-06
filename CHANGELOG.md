@@ -8,6 +8,11 @@
 - Esquema do SQLite versionado, com cópia automática da base antes de cada migração e recusa de bases criadas por versões mais novas.
 - Validação das requisições com zod, mantendo as mesmas mensagens de erro.
 - Testes E2E com Playwright para os fluxos principais (enviar, aprovar, negar, cancelar, navegação, erro de memória e tela pequena), também no CI.
+- Cartão **Diagnóstico** em Configurações: versões do Adelic, do Node e dos agentes, caminhos, esquema da base, cópias, bubblewrap e estado do ai-memory, com opções de copiar e baixar. Não inclui credenciais nem conversas.
+- Testes de integração com um ai-memory real (2.1.0, com token), também no CI.
+- Dependências atualizadas: Vite 8 (build cerca de 10 vezes mais rápido), plugin React 6, lucide-react 1 e @types/node 26. O TypeScript continua no 5.9 porque o typescript-eslint ainda não suporta a versão 7.
+- Release automatizada: `npm run release -- X.Y.Z` prepara versão, CHANGELOG, notas e tag; a tag publicada gera o AppImage e a release no GitHub.
+- Atalhos e rolagem da conversa extraídos para hooks testados, sem mudança de comportamento.
 
 ## 0.3.0 — 2026-10-06
 

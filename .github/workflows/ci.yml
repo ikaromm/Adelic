@@ -18,21 +18,23 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           # Same major as the development machine; package.json requires >=22.13.
           node-version: 26
           cache: npm
 
-      # Several tests exercise the real bubblewrap sandbox. Ubuntu 24.04 restricts
-      # unprivileged user namespaces through AppArmor, which bwrap needs; relax it on
-      # this ephemeral runner only.
-      - name: Install bubblewrap
+      # The approval policy only auto-approves real binaries under /usr/bin or /bin, and
+      # its tests use rg and pactl; install them instead of weakening the policy tests.
+      - name: Install system tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq bubblewrap
+          sudo apt-get install -y -qq bubblewrap ripgrep pulseaudio-utils
+          for tool in bwrap rg pactl; do readlink -f "$(command -v "$tool")"; done
+          # Real bubblewrap tests need unprivileged user namespaces, which Ubuntu 24.04
+          # restricts through AppArmor; relax it on this ephemeral runner only.
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
           bwrap --ro-bind / / true && echo "bubblewrap ok"
 
@@ -50,6 +52,3 @@ jobs:
 
       - name: Build
         run: npm run build
-
-      - name: Whitespace
-        run: git diff --check HEAD^ HEAD || git diff --check

@@ -53,8 +53,8 @@ export function createBackend(store: Store, providers: ProviderRegistry, graphif
       kind: 'sandbox' as const,
       status: jail ? ('planned' as const) : ('missing' as const),
       detail: jail
-        ? 'ai-jail instalado; os runtimes ainda não estão integrados a ele'
-        : 'ai-jail não encontrado no PATH',
+        ? 'ai-jail instalado, mas não usado: os runtimes usam o bubblewrap do Adelic (docs/specs/ai-jail.md)'
+        : 'ai-jail não encontrado; os runtimes usam o bubblewrap do Adelic (docs/specs/ai-jail.md)',
     };
   }
   function integrations() {

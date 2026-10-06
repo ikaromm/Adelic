@@ -6,9 +6,18 @@ Expor no Adelic a base existente do ai-memory usada por T3/Codex/outros clientes
 
 ## Fonte e compatibilidade
 
-Servidor MCP local existente: `http://127.0.0.1:49374/mcp`, ai-memory 2.1.0. Ferramentas reais: memory_query, memory_recent, memory_read_page, memory_write_page. Leituras de corpos e criação de notas passam pelo MCP com workspace/project explícitos. Edição de notas existentes usa o Markdown canônico local validado, preservando o cabeçalho completo conforme a correção descrita abaixo. O serviço não oferece listagem de escopos. Para o catálogo, consultar SOMENTE metadados no SQLite existente em modo readOnly (não criar arquivo nem escrever): `<AI_MEMORY_DATA_DIR ou ~/.local/share/ai-memory>/db/memory.sqlite`. Override específico ADELIC_MEMORY_DATA_DIR permitido para testes. Configurações com credenciais não são lidas. Erro de arquivo/schema incompatível deve ser claro, sem catálogo vazio que pareça sucesso.
+A biblioteca usa somente o serviço ai-memory, nunca os arquivos dele. Assim funciona igual com o serviço instalado no computador ou em Docker, onde o SQLite e o Markdown ficam no volume `ai-memory-data` (`/data` dentro do contêiner) e não são acessíveis ao usuário do Adelic.
 
-Schema observado: workspaces(id,name), projects(id,workspace_id,name); pages(workspace_id,project_id,path,title,is_latest,expires_at,updated_at). IDs BLOB, join direto. Catálogo retorna workspace/project/pageCount de páginas latest não expiradas (expires_at INTEGER em microssegundos Unix; confirmar unidade com fixture). Listagem paginada de metadados por escopo, 50 por página, limite máximo 100, com total e offset. Nunca SELECT body/frontmatter nesse catálogo. Não esconder projetos além dos projetos cadastrados no Adelic; escopos vazios podem ser mostrados. Incluir default/_global como escopo existente de leitura, mas não implementar promoção automática a preferências globais. Busca de biblioteca deve restringir ao escopo escolhido, evitando união implícita com _global (usar scopes:[{workspace,project}] se necessário conforme capacidade MCP real).
+- Endereço: `ADELIC_MEMORY_URL`, padrão `http://127.0.0.1:49374`. Só loopback (`127.0.0.1`, `localhost`, `::1`), sem credenciais, query ou fragmento na URL.
+- Token: quando o serviço usa `AI_MEMORY_AUTH_TOKEN` (comum em Docker), informe o mesmo valor em `ADELIC_MEMORY_TOKEN` ou num arquivo em `ADELIC_MEMORY_TOKEN_FILE`. Se nenhum for informado, `AI_MEMORY_AUTH_TOKEN` do ambiente é usado. O Adelic lê `ADELIC_MEMORY_TOKEN` ao iniciar e o remove do ambiente, para que os agentes não o herdem. O token vai como `Authorization: Bearer` em todas as chamadas e nunca aparece em logs ou respostas.
+- Capacidades usadas, verificadas no código e no binário do ai-memory 2.1.0 e 2.5.2:
+  - MCP `/mcp`: `memory_query` (busca restrita a `scopes:[{workspace,project}]`), `memory_read_page` (corpo e frontmatter) e `memory_write_page` (criação).
+  - API `/api/v1`, somente leitura: `GET /projects` lista escopos e contagens; `GET /workspaces/{w}/projects/{p}/pages` lista as notas atuais; `GET .../pages/{path}` confirma se um caminho existe. Essa API exige `serve --enable-web`; a imagem Docker oficial e o serviço systemd deste computador já usam essa opção.
+  - `POST /admin/write-page`: reescreve notas existentes.
+- O MCP não oferece listagem de escopos nem catálogo; a API `/api/v1` cumpre essa função. A paginação (50 por página, máximo 100) é feita no Adelic sobre a lista do serviço. As contagens são as do serviço: notas `is_latest`; notas com TTL vencido continuam até a próxima limpeza (sweep).
+- Erros não viram catálogo vazio. Os casos tratados: serviço indisponível (503 com o endereço), token ausente ou errado (indica `ADELIC_MEMORY_TOKEN`), API ausente (indica `--enable-web`), escopo inexistente (404), resposta incompatível, e catálogo vazio enquanto `/admin/status` informa notas atuais.
+
+Nenhuma nota é copiada para o banco do Adelic. A busca automática no chat continua separada (`memoryContextFor`, com o workspace/project do projeto vinculado) e a biblioteca não muda esse escopo.
 
 ## Contrato
 
@@ -36,10 +45,21 @@ Testes com fixtures fora de notas reais: catálogo read-only/escopos distintos/e
 
 Validação em 2026-10-05: catálogo real, roundtrip tela→CLI, CLI→polling, conflito/rascunho, metadados e compatibilidade legada. As notas preexistentes não foram alteradas. Typecheck/build e 122 testes passaram. Detalhes em `docs/dogfooding.md`. Não há transcrições ou corpos privados nos artefatos versionados.
 
-## Correção de preservação em ai-memory 2.1.0
+## Edição de notas existentes
 
-Teste real com nota sintética Fact mostrou que memory_write_page perde kind e outros campos que seu schema não aceita. Atualizações de notas existentes devem editar apenas o corpo do Markdown canônico local, preservando o prefixo YAML byte a byte; novas notas continuam criadas por MCP. O SQLite continua somente leitura. O serviço nativo observa o wiki e reindexa a alteração.
+Até a v0.2.0, notas existentes eram editadas diretamente no Markdown local. Isso exigia acesso ao diretório de dados e não funcionava com Docker. Agora a edição passa pelo próprio serviço, que atualiza o índice, cria o checkpoint Git e executa os hooks de admissão.
 
-Validar /admin/status (data_dir real igual ao catálogo), proprietário local, UUIDs de escopo reais do catálogo e manifestos, caminhos regulares sem symlinks, corpo do arquivo igual à leitura MCP e versão atual antes da substituição. Gravar temporário no mesmo diretório com prefixo .ai-memory-tmp., permissões preservadas, fsync e rename. Divergência ou integração incompatível deve bloquear gravação, sem fallback para MCP que apaga metadados. Hash da versão inclui todo frontmatter estável e corpo.
+Nenhum dos writers do serviço aceita frontmatter arbitrário. `/admin/write-page` reconstrói os metadados a partir de `title`, `kind`, `tier`, `tags` e `pinned`. `memory_write_page` reconstrói a partir de `title`, `tier`, `tags`, `pinned` e `expires_at`, mas não aceita `kind`. Nos dois casos, o servidor deriva `type`, `stale_after` e `generated`. Por isso, `server/memory-edit.ts` só permite editar quando um dos writers reproduz exatamente todos os campos da nota:
 
-Esta edição equivale a um editor local do mesmo usuário: não passa pelos admission hooks/RBAC/atribuição de autor do writer HTTP, não cria checkpoint Git nem preserva todos os contadores internos. Watcher atualiza índice de forma assíncrona. O controle de versão reduz conflitos, mas não fornece CAS atômico entre processos externos. Não representa escrita remota/multiusuário. Preservar frontmatter no disco e confirmar indexação com nota sintética antes do release.
+- Sem `expires_at`: usa `/admin/write-page`. Com `expires_at` e sem `kind`: usa `memory_write_page`.
+- A edição é bloqueada antes de gravar (HTTP 422, com a explicação na tela) quando a nota tem:
+  - campos que nenhum writer preserva;
+  - `type` diferente do derivado;
+  - `kind` junto com `expires_at`;
+  - `tags: []`, `pinned: false` ou tier desconhecido;
+  - `stale_after` diferente de `expires_at`.
+- O conflito é detectado pela versão: hash do corpo e de todo o frontmatter. A versão é conferida no início e de novo logo antes de gravar. Saves do Adelic são serializados por escopo/caminho, e versão antiga retorna 409 preservando o rascunho.
+- Depois de gravar, a nota é relida pelo MCP. O corpo precisa ser igual ao enviado; o filtro de segredos do serviço pode alterá-lo, e nesse caso é retornado 503. O frontmatter também precisa bater, exceto `generated.at`, que o serviço atualiza. `last_modified_by` também é renovado pelo serviço quando há autenticação de usuário.
+- Criação continua via `memory_write_page`. Caminho já existente no serviço retorna 409, mesmo que o arquivo da nota esteja ausente.
+
+Limites: o serviço não oferece compare-and-swap entre processos. Uma alteração externa entre a última conferência e a gravação ainda pode ser sobrescrita; a janela é pequena, mas existe. Notas com metadados personalizados escritos por outros clientes ficam somente leitura no Adelic até haver um writer que preserve frontmatter completo.

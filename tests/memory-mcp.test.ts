@@ -1,49 +1,216 @@
-import { afterEach,beforeEach,describe,expect,it,vi } from 'vitest';
-import { mkdirSync,mkdtempSync,rmSync,writeFileSync,readFileSync } from 'node:fs';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
 
-const prior=process.env.ADELIC_MEMORY_DATA_DIR;
-const scope={workspace:'w',project:'p'};
-let dir:string, statusData:string, notes:Map<string,any>, calls:any[], behavior:(name:string,args:any)=>any, writeSchema:any, mutateDuringStatus:(()=>void)|undefined;
-const key=(s:any,p:string)=>`${s.workspace}/${s.project}/${p}`;
-function addCatalog(path:string){const db=new DatabaseSync(join(dir,'db/memory.sqlite'));db.prepare('INSERT INTO pages VALUES(?,?,?,?,?,?,?)').run(Buffer.from('00000000000000000000000000000001','hex'),Buffer.from('00000000000000000000000000000011','hex'),path,path,1,null,Date.now()*1000);db.close();}
-const uuid=(n:number)=>`00000000-0000-0000-0000-${n.toString(16).padStart(12,'0')}`;
-function diskPath(path:string){return join(dir,'wiki',uuid(1),uuid(17),path);}
-function addDisk(path:string,body:string,fm:Record<string,unknown>={}){const target=diskPath(path);mkdirSync(join(target,'..'),{recursive:true});const front=Object.keys(fm).length?`---\n${Object.entries(fm).map(([k,v])=>`${k}: ${JSON.stringify(v)}`).join('\n')}\n---\n`:'';writeFileSync(target,front+body);}
-function response(req:any,result:any,error?:any,status=200){return new Response(JSON.stringify({jsonrpc:'2.0',id:req.id,...(error?{error}:{result})}),{status,headers:{'content-type':'application/json'}});}
-beforeEach(async()=>{
- vi.resetModules(); dir=mkdtempSync(join(process.env.TMPDIR||tmpdir(),'adelic-mcp-'));statusData=dir;mkdirSync(join(dir,'db'));process.env.ADELIC_MEMORY_DATA_DIR=dir;
- const db=new DatabaseSync(join(dir,'db/memory.sqlite'));db.exec("CREATE TABLE workspaces(id BLOB PRIMARY KEY,name TEXT);CREATE TABLE projects(id BLOB PRIMARY KEY,workspace_id BLOB,name TEXT);CREATE TABLE pages(workspace_id BLOB,project_id BLOB,path TEXT,title TEXT,is_latest INTEGER,expires_at INTEGER,updated_at INTEGER);INSERT INTO workspaces VALUES(X'00000000000000000000000000000001','w');INSERT INTO projects VALUES(X'00000000000000000000000000000011',X'00000000000000000000000000000001','p');");db.close();
- mkdirSync(join(dir,'wiki',uuid(1),uuid(17)),{recursive:true});writeFileSync(join(dir,'wiki',uuid(1),'_meta.md'),'---\nworkspace: "w"\ntype: Scope Manifest\n---\n');writeFileSync(join(dir,'wiki',uuid(1),uuid(17),'_meta.md'),'---\nproject: "p"\ntype: Scope Manifest\n---\n');
- notes=new Map();calls=[];behavior=()=>undefined;mutateDuringStatus=undefined;writeSchema={workspace:{type:['string','null']},project:{type:['string','null']},path:{type:'string'},body:{type:'string'},pinned:{type:'boolean'},tier:{type:['string','null']},tags:{type:'array',items:{type:'string'}},expires_at:{type:['string','null']}};
- vi.stubGlobal('fetch',vi.fn(async(url:string,init:RequestInit)=>{if(url.endsWith('/admin/status')){mutateDuringStatus?.();return new Response(JSON.stringify({data_dir:statusData}),{status:200});}const req=JSON.parse(String(init.body));if(req.method==='initialize')return response(req,{});if(req.method==='tools/list')return response(req,{tools:[{name:'memory_query',inputSchema:{properties:{scopes:{},query:{},workspace:{},project:{}}}},{name:'memory_read_page',inputSchema:{properties:{workspace:{},project:{},path:{}}}},{name:'memory_write_page',inputSchema:{properties:writeSchema}}]});
-  const {name,arguments:a}=req.params;calls.push({name,args:a});const special=behavior(name,a);if(special)return special(req);
-  if(name==='memory_read_page'){let note=notes.get(key(a,a.path));try{const raw=readFileSync(diskPath(a.path),'utf8');const match=raw.match(/^---\n([\s\S]*?)\n---\n/);let fm:Record<string,unknown>={};if(match)for(const line of match[1].split('\n')){const m=line.match(/^([^:]+):\s*(.*)$/);if(m){try{fm[m[1]]=JSON.parse(m[2]);}catch{fm[m[1]]=m[2];}}}note={body:match?raw.slice(match[0].length):raw,frontmatter:fm};}catch{}if(!note)return response(req,null,{code:-32603,message:`page ${a.path} not found in resolved scope ${a.workspace}/${a.project}`});return response(req,{content:[{type:'text',text:JSON.stringify({...note,path:a.path,title:a.path})}]});}
-  if(name==='memory_write_page'){expect(Object.keys(a).every((k:string)=>['body','expires_at','path','pinned','project','tags','tier','workspace'].includes(k))).toBe(true);expect(a.body).toEqual(expect.any(String));expect(a.body).not.toMatch(/^---/);for(const [field,type] of Object.entries({workspace:'string',project:'string',path:'string',pinned:'boolean',tier:'string'})){if(field in a)expect(typeof a[field]).toBe(type);}if('tags'in a)expect(Array.isArray(a.tags)&&a.tags.every((x:any)=>typeof x==='string')).toBe(true);if('expires_at'in a)expect(a.expires_at===null||typeof a.expires_at==='string'&&!Number.isNaN(Date.parse(a.expires_at))).toBe(true);notes.set(key(a,a.path),{body:a.body,frontmatter:Object.fromEntries(['pinned','tier','tags','expires_at'].filter(k=>k in a).map(k=>[k,a[k]]))});addDisk(a.path,a.body,notes.get(key(a,a.path)).frontmatter);addCatalog(a.path);return response(req,{content:[{type:'text',text:'{}'}]});}
-  return response(req,{content:[{type:'text',text:'[]'}]});
- }));
+// Fake ai-memory service reproducing the observable contract of 2.1.x–2.5.x:
+// MCP tools, read-only /api/v1 catalog and /admin/write-page. Writers rebuild the
+// frontmatter from their arguments and stamp `type`/`generated` like the server does.
+type Note = { body: string; frontmatter: Record<string, unknown> };
+let notes: Map<string, Note>, calls: { route: string; args?: any }[], token: string | undefined, behavior: (route: string, args: any) => Response | undefined;
+let writeSchema: Record<string, unknown>;
+const scope = { workspace: 'w', project: 'p' };
+const key = (w: string, p: string, path: string) => `${w}/${p}/${path}`;
+const json = (data: unknown, status = 200) => new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json' } });
+const rpc = (id: number, result?: unknown, error?: unknown) => json({ jsonrpc: '2.0', id, ...(error ? { error } : { result }) });
+const typeFor = (path: string, fm: Record<string, unknown>) => fm.kind === 'fact' ? 'Fact' : path.startsWith('decisions/') ? 'Decision' : 'Note';
+function store(w: string, p: string, path: string, body: string, fm: Record<string, unknown>) {
+  const frontmatter = { ...fm, type: typeFor(path, fm), generated: { by: 'process:ai-memory/2.1.0', at: `t${calls.length}` } };
+  if (typeof fm.expires_at === 'string') (frontmatter as any).stale_after = fm.expires_at;
+  notes.set(key(w, p, path), { body, frontmatter });
+}
+function seed(path: string, body: string, fm: Record<string, unknown>) { notes.set(key('w', 'p', path), { body, frontmatter: fm }); }
+
+beforeEach(() => {
+  vi.resetModules(); notes = new Map(); calls = []; token = undefined; behavior = () => undefined;
+  delete process.env.ADELIC_MEMORY_URL; delete process.env.ADELIC_MEMORY_TOKEN; delete process.env.ADELIC_MEMORY_TOKEN_FILE; delete process.env.AI_MEMORY_AUTH_TOKEN;
+  writeSchema = { workspace: { type: ['string', 'null'] }, project: { type: ['string', 'null'] }, path: { type: 'string' }, body: { type: 'string' }, title: { type: ['string', 'null'] }, pinned: { type: 'boolean' }, tier: { type: ['string', 'null'] }, tags: { type: 'array' }, expires_at: { type: ['string', 'null'] } };
+  vi.stubGlobal('fetch', vi.fn(async (url: string, init: RequestInit = {}) => {
+    const u = new URL(url); const route = u.pathname;
+    const headers = new Headers(init.headers);
+    if (token && headers.get('authorization') !== `Bearer ${token}`) return json({ error: 'unauthorized' }, 401);
+    const args = init.body ? JSON.parse(String(init.body)) : undefined;
+    const special = behavior(route, args); if (special) return special;
+    if (route === '/mcp') {
+      if (args.method === 'initialize') return rpc(args.id, {});
+      if (args.method === 'tools/list') return rpc(args.id, { tools: [{ name: 'memory_query', inputSchema: { properties: { scopes: {}, query: {}, workspace: {}, project: {} } } }, { name: 'memory_read_page', inputSchema: { properties: { workspace: {}, project: {}, path: {} } } }, { name: 'memory_write_page', inputSchema: { properties: writeSchema } }] });
+      const { name, arguments: a } = args.params; calls.push({ route: name, args: a });
+      if (name === 'memory_read_page') {
+        const note = notes.get(key(a.workspace, a.project, a.path));
+        if (!note) return rpc(args.id, undefined, { code: -32603, message: `page ${a.path} not found in resolved scope ${a.workspace}/${a.project}` });
+        return rpc(args.id, { content: [{ type: 'text', text: JSON.stringify({ path: a.path, title: a.path, ...note }) }] });
+      }
+      if (name === 'memory_write_page') {
+        const fm: Record<string, unknown> = { tier: a.tier ?? 'semantic' };
+        if (a.title) fm.title = a.title; if (a.tags?.length) fm.tags = a.tags; if (a.pinned) fm.pinned = true; if (a.expires_at) fm.expires_at = a.expires_at;
+        store(a.workspace, a.project, a.path, a.body, fm); return rpc(args.id, { content: [{ type: 'text', text: '{}' }] });
+      }
+      return rpc(args.id, { content: [{ type: 'text', text: JSON.stringify({ hits: [{ path: 'a.md', title: 'A', snippet: 'x' }] }) }] });
+    }
+    if (route === '/admin/write-page') {
+      calls.push({ route, args });
+      const fm: Record<string, unknown> = { tier: args.tier };
+      if (args.title) fm.title = args.title; if (args.kind) fm.kind = args.kind; if (args.tags.length) fm.tags = args.tags; if (args.pinned) fm.pinned = true;
+      store(args.workspace, args.project, args.path, args.body, fm); return json({ page_id: 'id', path: args.path });
+    }
+    if (route === '/admin/status') return json({ counts: { pages_latest: notes.size } });
+    if (route === '/api/v1/projects') {
+      const counts = new Map<string, number>(); for (const k of notes.keys()) { const [w, p] = k.split('/'); counts.set(`${w}/${p}`, (counts.get(`${w}/${p}`) ?? 0) + 1); }
+      if (!counts.size) counts.set('w/p', 0);
+      return json([...counts].map(([k, n]) => ({ workspace_name: k.split('/')[0], project_name: k.split('/')[1], page_count: n, last_updated: null })));
+    }
+    const m = route.match(/^\/api\/v1\/workspaces\/([^/]+)\/projects\/([^/]+)\/pages(?:\/(.+))?$/);
+    if (m) {
+      const [w, p] = [decodeURIComponent(m[1]), decodeURIComponent(m[2])];
+      if (w !== 'w' || p !== 'p') return json({ error: `project '${p}' not found` }, 404);
+      if (m[3]) { const path = m[3].split('/').map(decodeURIComponent).join('/'); return notes.has(key(w, p, path)) ? json({ path }) : json({ error: 'page not found' }, 404); }
+      return json([...notes.keys()].filter((k) => k.startsWith('w/p/')).map((k) => ({ path: k.slice(4), title: k.slice(4).toUpperCase() })).reverse());
+    }
+    return new Response('', { status: 404 });
+  }));
 });
-afterEach(()=>{vi.unstubAllGlobals();if(prior===undefined)delete process.env.ADELIC_MEMORY_DATA_DIR;else process.env.ADELIC_MEMORY_DATA_DIR=prior;rmSync(dir,{recursive:true,force:true});});
-const load=()=>import('../server/memory.js');
-describe('ai-memory MCP persistence regressions',()=>{
- it('creates only on exact not-found; returns flattened arguments and readable saved note',async()=>{const m=await load();const saved=await m.sharedMemoryWrite(scope,'new.md','hello',null);expect(saved.body).toBe('hello');expect((await m.sharedMemoryRead(scope,'new.md') as any).frontmatter).toEqual({});expect(calls.filter(c=>c.name==='memory_write_page')).toHaveLength(1);});
- it.each(['workspace','project'])('rejects old write schema missing %s without writing',async(field)=>{delete writeSchema[field];const m=await load();await expect(m.sharedMemoryWrite(scope,'new.md','keep this body',null)).rejects.toThrow(new RegExp(`${field}.*string`));expect(calls.filter(c=>c.name==='memory_write_page')).toHaveLength(0);expect(notes.has(key(scope,'new.md'))).toBe(false);});
- it('rejects catalog-existing path for expected null without writing',async()=>{addCatalog('old.md');const m=await load();await expect(m.sharedMemoryWrite(scope,'old.md','x',null)).rejects.toMatchObject({status:409});expect(calls.some(c=>c.name==='memory_write_page')).toBe(false);});
- it.each([{label:'permission denied',reply:(req:any)=>response(req,null,{code:-32000,message:'permission denied'})},{label:'HTTP 503',reply:(req:any)=>response(req,{},undefined,503)}])('%s does not write even when catalog has no entry',async({reply})=>{behavior=(name)=>name==='memory_read_page'?reply:undefined;const m=await load();await expect(m.sharedMemoryWrite(scope,'absent.md','x',null)).rejects.toBeTruthy();expect(calls.some(c=>c.name==='memory_write_page')).toBe(false);});
- it('propagates unavailable catalog and does not write',async()=>{rmSync(join(dir,'db/memory.sqlite'));const m=await load();await expect(m.sharedMemoryWrite(scope,'missing.md','x',null)).rejects.toThrow(/Catálogo ai-memory indisponível/);expect(calls.some(c=>c.name==='memory_write_page')).toBe(false);});
- it('changes version when only metadata changes',async()=>{notes.set(key(scope,'meta.md'),{body:'same',frontmatter:{pinned:false,tier:'working',tags:['a'],expires_at:null,custom:{nested:true}}});addDisk('meta.md','same',notes.get(key(scope,'meta.md')).frontmatter);const m=await load();const before=await m.sharedMemoryRead(scope,'meta.md');notes.get(key(scope,'meta.md')).frontmatter.tags=['b'];addDisk('meta.md','same',notes.get(key(scope,'meta.md')).frontmatter);const after=await m.sharedMemoryRead(scope,'meta.md');expect(after.body).toBe(before.body);expect(after.version).not.toBe(before.version);expect(after.frontmatter).toHaveProperty('custom.nested',true);});
- it('serializes concurrent saves using same expected version: one success, one conflict, no MCP edit',async()=>{const fm={pinned:false,tier:'working',tags:[],expires_at:null};notes.set(key(scope,'race.md'),{body:'base',frontmatter:fm});addDisk('race.md','base',fm);const m=await load();const version=(await m.sharedMemoryRead(scope,'race.md')).version;const results=await Promise.allSettled([m.sharedMemoryWrite(scope,'race.md','one',version),m.sharedMemoryWrite(scope,'race.md','two',version)]);expect(results.filter(x=>x.status==='fulfilled')).toHaveLength(1);expect(results.filter(x=>x.status==='rejected').map((x:any)=>x.reason.status)).toEqual([409]);expect(calls.filter(c=>c.name==='memory_write_page')).toHaveLength(0);});
- it('blocks an existing-note edit on service/catalog root mismatch without MCP fallback',async()=>{notes.set(key(scope,'blocked.md'),{body:'base',frontmatter:{kind:'Fact'}});addDisk('blocked.md','base',{kind:'Fact'});const other=mkdtempSync(join(process.env.TMPDIR||tmpdir(),'other-memory-'));statusData=other;const m=await load();const version=(await m.sharedMemoryRead(scope,'blocked.md')).version;await expect(m.sharedMemoryWrite(scope,'blocked.md','changed',version)).rejects.toMatchObject({status:503});expect(readFileSync(diskPath('blocked.md'),'utf8')).toContain('base');expect(calls.filter(c=>c.name==='memory_write_page')).toHaveLength(0);rmSync(other,{recursive:true,force:true});});
- it('returns 503 for unavailable or incompatible /admin/status without MCP fallback',async()=>{notes.set(key(scope,'admin.md'),{body:'base',frontmatter:{kind:'Fact'}});addDisk('admin.md','base',{kind:'Fact'});const m=await load();const version=(await m.sharedMemoryRead(scope,'admin.md')).version;
-   (fetch as any).mockImplementation(async(url:string,init:RequestInit)=>{if(url.endsWith('/admin/status'))return new Response('{}',{status:200});const req=JSON.parse(String(init.body));if(req.method==='tools/list')return response(req,{tools:[{name:'memory_read_page',inputSchema:{properties:{workspace:{},project:{},path:{}}}}]});return response(req,{content:[{type:'text',text:JSON.stringify({body:'base',frontmatter:{kind:'Fact'}})}]});});
-   await expect(m.sharedMemoryWrite(scope,'admin.md','changed',version)).rejects.toMatchObject({status:503});expect(readFileSync(diskPath('admin.md'),'utf8')).toContain('base');expect(calls.filter(c=>c.name==='memory_write_page')).toHaveLength(0);
- });
- it('detects metadata-only changes after status fetch and preserves disk without fallback',async()=>{const fm={pinned:false,tier:'working',tags:['a'],custom:'original'};notes.set(key(scope,'metadata-race.md'),{body:'base',frontmatter:fm});addDisk('metadata-race.md','base',fm);const m=await load();const version=(await m.sharedMemoryRead(scope,'metadata-race.md')).version;
-   mutateDuringStatus=()=>{const changed={...fm,custom:'changed'};notes.set(key(scope,'metadata-race.md'),{body:'base',frontmatter:changed});addDisk('metadata-race.md','base',changed);};
-   await expect(m.sharedMemoryWrite(scope,'metadata-race.md','new body',version)).rejects.toMatchObject({status:409});expect(readFileSync(diskPath('metadata-race.md'),'utf8')).toContain('custom: "changed"');expect(readFileSync(diskPath('metadata-race.md'),'utf8')).toContain('base');expect(calls.filter(c=>c.name==='memory_write_page')).toHaveLength(0);
- });
- it('_global rejects before fetch for shared and legacy wrappers',async()=>{const m=await load();await expect(m.sharedMemoryWrite({workspace:'w',project:'_global'},'x.md','x',null)).rejects.toMatchObject({status:403});await expect(m.memoryWrite({memoryWorkspace:'w',memoryProject:'_global'} as any,'x.md','x')).rejects.toMatchObject({status:403});expect(fetch).not.toHaveBeenCalled();});
- it('legacy memoryWrite creates by MCP then edits local body preserving metadata',async()=>{notes.set(key(scope,'legacy.md'),{body:'existing',frontmatter:{pinned:true,tier:'working',tags:['safe'],expires_at:'2026-11-01T00:00:00Z',kind:'Fact',source:'test'}});addDisk('legacy.md','existing',notes.get(key(scope,'legacy.md')).frontmatter);const m=await load();const p:any={memoryWorkspace:'w',memoryProject:'p'};const created=await m.memoryWrite(p,'new-legacy.md','first');expect(created.body).toBe('first');const edit=await m.memoryWrite(p,'legacy.md','second');expect(edit.body).toBe('second');expect((edit as any).frontmatter).toEqual(notes.get(key(scope,'legacy.md')).frontmatter);expect(readFileSync(diskPath('legacy.md'),'utf8')).toContain('kind: "Fact"');expect(calls.filter(c=>c.name==='memory_write_page')).toHaveLength(1);});
+afterEach(() => { vi.unstubAllGlobals(); delete process.env.ADELIC_MEMORY_URL; delete process.env.ADELIC_MEMORY_TOKEN; });
+const load = () => import('../server/memory.js');
+const service = () => import('../server/memory-service.js');
+const writes = () => calls.filter((c) => c.route === 'memory_write_page' || c.route === '/admin/write-page');
+
+describe('ai-memory service catalog', () => {
+  it('lists scopes, counts and paginated notes from the service, without local files', async () => {
+    seed('b.md', 'B', { tier: 'semantic' }); seed('a.md', 'A', { tier: 'semantic' }); notes.set(key('x', 'y', 'c.md'), { body: 'C', frontmatter: {} });
+    const s = await service();
+    expect(await s.memoryCatalog()).toEqual({ scopes: [{ workspace: 'w', project: 'p', pageCount: 2 }, { workspace: 'x', project: 'y', pageCount: 1 }], totalPages: 3 });
+    expect(await s.memoryList(scope, 0, 1)).toEqual({ pages: [{ path: 'a.md', title: 'A.MD', snippet: '' }], total: 2, offset: 0, limit: 1 });
+    expect((await s.memoryList(scope, 1, 1)).pages[0].path).toBe('b.md');
+  });
+  it('fails clearly instead of returning an empty catalog', async () => {
+    const s = await service();
+    behavior = (route) => route === '/api/v1/projects' ? new Response('', { status: 404 }) : undefined;
+    await expect(s.memoryCatalog()).rejects.toThrow(/--enable-web/);
+    behavior = (route) => route === '/api/v1/projects' ? json([]) : route === '/admin/status' ? json({ counts: { pages_latest: 11 } }) : undefined;
+    await expect(s.memoryCatalog()).rejects.toThrow(/11 notas atuais/);
+    behavior = () => { throw new TypeError('fetch failed'); };
+    await expect(s.memoryCatalog()).rejects.toMatchObject({ status: 503, message: expect.stringMatching(/indisponível/) });
+    behavior = () => undefined; token = 'secret';
+    await expect(s.memoryCatalog()).rejects.toThrow(/ADELIC_MEMORY_TOKEN/);
+    await expect(s.memoryList({ workspace: 'w', project: 'nope' })).rejects.toThrow(/ADELIC_MEMORY_TOKEN/);
+  });
+  it('reports a missing scope and invalid paging', async () => {
+    const s = await service();
+    await expect(s.memoryList({ workspace: 'w', project: 'nope' })).rejects.toMatchObject({ status: 404 });
+    await expect(s.memoryList(scope, 0, 101)).rejects.toMatchObject({ status: 400 });
+  });
+  it('sends the configured bearer on every route and accepts only loopback URLs', async () => {
+    token = 'secret'; process.env.ADELIC_MEMORY_TOKEN = 'secret'; process.env.ADELIC_MEMORY_URL = 'http://localhost:49999/';
+    seed('a.md', 'A', { tier: 'semantic' });
+    const m = await load(); const s = await service();
+    expect((await s.memoryCatalog()).totalPages).toBe(1);
+    expect((await m.sharedMemoryRead(scope, 'a.md')).body).toBe('A');
+    expect((fetch as any).mock.calls.every(([url]: [string]) => url.startsWith('http://localhost:49999/'))).toBe(true);
+    expect(process.env.ADELIC_MEMORY_TOKEN).toBeUndefined();
+    process.env.ADELIC_MEMORY_URL = 'http://192.168.0.5:49374';
+    await expect(s.memoryCatalog()).rejects.toThrow(/loopback/);
+    process.env.ADELIC_MEMORY_URL = 'http://user:pw@127.0.0.1:49374';
+    await expect(s.memoryCatalog()).rejects.toThrow(/credenciais/);
+  });
+
+  it('reads the bearer from ADELIC_MEMORY_TOKEN_FILE and reports an unreadable file', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'adelic-token-')); const file = join(dir, 'token');
+    try {
+      writeFileSync(file, 'from-file\n', { mode: 0o600 }); token = 'from-file'; process.env.ADELIC_MEMORY_TOKEN_FILE = file;
+      expect((await (await service()).memoryCatalog()).scopes).toHaveLength(1);
+      vi.resetModules(); process.env.ADELIC_MEMORY_TOKEN_FILE = join(dir, 'missing');
+      await expect((await service()).memoryCatalog()).rejects.toThrow(/ADELIC_MEMORY_TOKEN_FILE/);
+    } finally { delete process.env.ADELIC_MEMORY_TOKEN_FILE; rmSync(dir, { recursive: true, force: true }); }
+  });
+});
+
+describe('ai-memory writes through the service', () => {
+  it('creates new notes through MCP and confirms the saved body', async () => {
+    const m = await load();
+    const saved = await m.sharedMemoryWrite(scope, 'new.md', 'hello', null);
+    expect(saved.body).toBe('hello');
+    expect(writes()).toEqual([{ route: 'memory_write_page', args: { workspace: 'w', project: 'p', path: 'new.md', body: 'hello' } }]);
+  });
+  it('edits an existing note preserving kind, tags, pinned, tier and title', async () => {
+    seed('decisions/x.md', 'old', { kind: 'fact', tags: ['a', 'b'], pinned: true, tier: 'procedural', title: 'Custom', type: 'Fact', generated: { by: 'process:ai-memory/2.1.0', at: 'before' } });
+    const m = await load(); const before = await m.sharedMemoryRead(scope, 'decisions/x.md');
+    const saved = await m.sharedMemoryWrite(scope, 'decisions/x.md', 'new', before.version);
+    expect(saved.body).toBe('new');
+    expect(saved.frontmatter).toEqual({ kind: 'fact', tags: ['a', 'b'], pinned: true, tier: 'procedural', title: 'Custom', type: 'Fact', generated: expect.objectContaining({ by: 'process:ai-memory/2.1.0' }) });
+    expect(writes().map((c) => c.route)).toEqual(['/admin/write-page']);
+  });
+  it('uses the MCP writer for a note with expires_at and keeps the TTL', async () => {
+    seed('ttl.md', 'old', { tier: 'episodic', expires_at: '2026-12-01T00:00:00Z', stale_after: '2026-12-01T00:00:00Z', type: 'Note' });
+    const m = await load(); const before = await m.sharedMemoryRead(scope, 'ttl.md');
+    const saved = await m.sharedMemoryWrite(scope, 'ttl.md', 'new', before.version);
+    expect(saved.frontmatter).toMatchObject({ tier: 'episodic', expires_at: '2026-12-01T00:00:00Z', stale_after: '2026-12-01T00:00:00Z' });
+    expect(writes()).toEqual([{ route: 'memory_write_page', args: { workspace: 'w', project: 'p', path: 'ttl.md', body: 'new', tier: 'episodic', tags: [], pinned: false, expires_at: '2026-12-01T00:00:00Z' } }]);
+  });
+  it.each([
+    ['custom field', { tier: 'semantic', source: 'imported' }, /source/],
+    ['custom type', { tier: 'semantic', type: 'Runbook' }, /type personalizado/],
+    ['kind with TTL', { tier: 'semantic', kind: 'fact', expires_at: '2026-12-01' }, /kind e expires_at/],
+    ['empty tags', { tier: 'semantic', tags: [] }, /tags/],
+  ])('blocks %s before writing and keeps the note', async (_label, fm, reason) => {
+    seed('keep.md', 'base', fm as Record<string, unknown>);
+    const m = await load(); const before = await m.sharedMemoryRead(scope, 'keep.md');
+    await expect(m.sharedMemoryWrite(scope, 'keep.md', 'changed', before.version)).rejects.toMatchObject({ status: 422, message: expect.stringMatching(reason) });
+    expect(writes()).toHaveLength(0); expect(notes.get(key('w', 'p', 'keep.md'))!.body).toBe('base');
+  });
+  it('rejects stale versions, metadata-only changes and creation over an existing path', async () => {
+    seed('race.md', 'base', { tier: 'semantic', tags: ['a'] });
+    const m = await load(); const version = (await m.sharedMemoryRead(scope, 'race.md')).version;
+    notes.get(key('w', 'p', 'race.md'))!.frontmatter.tags = ['b'];
+    await expect(m.sharedMemoryWrite(scope, 'race.md', 'mine', version)).rejects.toMatchObject({ status: 409 });
+    await expect(m.sharedMemoryWrite(scope, 'race.md', 'mine', null)).rejects.toMatchObject({ status: 409 });
+    expect(writes()).toHaveLength(0); expect(notes.get(key('w', 'p', 'race.md'))!.body).toBe('base');
+  });
+  it('detects a change that lands while the edit is being prepared', async () => {
+    seed('late.md', 'base', { tier: 'semantic' });
+    const m = await load(); const version = (await m.sharedMemoryRead(scope, 'late.md')).version;
+    let reads = 0;
+    behavior = (route, args) => { if (route === '/mcp' && args?.params?.name === 'memory_read_page' && ++reads === 2) notes.set(key('w', 'p', 'late.md'), { body: 'external', frontmatter: { tier: 'semantic' } }); return undefined; };
+    await expect(m.sharedMemoryWrite(scope, 'late.md', 'mine', version)).rejects.toMatchObject({ status: 409 });
+    expect(writes()).toHaveLength(0); expect(notes.get(key('w', 'p', 'late.md'))!.body).toBe('external');
+  });
+  it('serializes concurrent saves with the same version: one success, one conflict', async () => {
+    seed('two.md', 'base', { tier: 'semantic' });
+    const m = await load(); const version = (await m.sharedMemoryRead(scope, 'two.md')).version;
+    const results = await Promise.allSettled([m.sharedMemoryWrite(scope, 'two.md', 'one', version), m.sharedMemoryWrite(scope, 'two.md', 'two', version)]);
+    expect(results.map((r) => r.status).sort()).toEqual(['fulfilled', 'rejected']);
+    expect((results.find((r) => r.status === 'rejected') as PromiseRejectedResult).reason.status).toBe(409);
+    expect(writes()).toHaveLength(1);
+  });
+  it('does not create when the read fails for reasons other than not-found', async () => {
+    behavior = (route, args) => route === '/mcp' && args?.params?.name === 'memory_read_page' ? rpc(args.id, undefined, { code: -32000, message: 'permission denied' }) : undefined;
+    const m = await load();
+    await expect(m.sharedMemoryWrite(scope, 'absent.md', 'x', null)).rejects.toThrow(/permission denied/);
+    expect(writes()).toHaveLength(0);
+  });
+  it('reports when the service changes the saved body or metadata', async () => {
+    seed('scrub.md', 'base', { tier: 'semantic' });
+    const m = await load(); const version = (await m.sharedMemoryRead(scope, 'scrub.md')).version;
+    behavior = (route, args) => { if (route === '/admin/write-page') { store('w', 'p', 'scrub.md', '[REDACTED]', { tier: 'semantic' }); return json({ path: args.path }); } return undefined; };
+    await expect(m.sharedMemoryWrite(scope, 'scrub.md', 'token=abc', version)).rejects.toMatchObject({ status: 503, message: expect.stringMatching(/não confirmou/) });
+    seed('meta.md', 'base', { tier: 'semantic', pinned: true });
+    const v2 = (await m.sharedMemoryRead(scope, 'meta.md')).version;
+    behavior = (route, args) => { if (route === '/admin/write-page') { store('w', 'p', 'meta.md', args.body, { tier: 'semantic' }); return json({ path: args.path }); } return undefined; };
+    await expect(m.sharedMemoryWrite(scope, 'meta.md', 'new', v2)).rejects.toThrow(/metadados lidos depois diferem/);
+  });
+  it('rejects old write schemas and _global before any write', async () => {
+    delete writeSchema.workspace;
+    const m = await load();
+    await expect(m.sharedMemoryWrite(scope, 'new.md', 'x', null)).rejects.toThrow(/workspace.*string/);
+    await expect(m.sharedMemoryWrite({ workspace: 'w', project: '_global' }, 'x.md', 'x', null)).rejects.toMatchObject({ status: 403 });
+    await expect(m.memoryWrite({ memoryWorkspace: 'w', memoryProject: '_global' } as any, 'x.md', 'x')).rejects.toMatchObject({ status: 403 });
+    expect(writes()).toHaveLength(0);
+  });
+  it('legacy project wrapper creates by MCP and edits through the service writer', async () => {
+    seed('legacy.md', 'existing', { tier: 'working', kind: 'fact', pinned: true, type: 'Fact' });
+    const m = await load(); const p: any = { memoryWorkspace: 'w', memoryProject: 'p' };
+    expect((await m.memoryWrite(p, 'fresh.md', 'first')).body).toBe('first');
+    const edit = await m.memoryWrite(p, 'legacy.md', 'second');
+    expect(edit.frontmatter).toMatchObject({ tier: 'working', kind: 'fact', pinned: true, type: 'Fact' });
+    expect(writes().map((c) => c.route)).toEqual(['memory_write_page', '/admin/write-page']);
+  });
 });

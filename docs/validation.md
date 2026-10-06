@@ -1,3 +1,19 @@
+# Memória com ai-memory em Docker — 2026-10-06
+
+Pedido do usuário: a biblioteca de memórias deve usar a mesma fonte do servidor ai-memory também quando ele roda em Docker, com dados no volume `ai-memory-data`, sem conceder acesso a `/var/lib/docker`. Contrato em [memória compartilhada](specs/shared-memory.md).
+
+- Capacidades verificadas no binário 2.1.0 instalado e no código das tags v2.1.0 e v2.5.2: o MCP não lista escopos. A API somente leitura `/api/v1` (`--enable-web`, padrão na imagem Docker) lista projetos, contagens e notas, e `/admin/write-page` reescreve notas com `kind`. A comparação do frontmatter de todas as notas reais com a regra OKF de `type` não encontrou divergências.
+- `server/memory-catalog.ts` (SQLite) e `server/memory-local-writer.ts` (Markdown local) foram removidos. Catálogo, listagem e verificação de caminho usam `/api/v1`. Leitura, busca e criação usam MCP. A edição usa `/admin/write-page`, ou `memory_write_page` quando a nota tem TTL, só quando o writer reproduz todo o frontmatter. A versão é conferida antes e depois de gravar.
+- Instância ai-memory 2.1.0 isolada, em pasta temporária na porta 49399, com `AI_MEMORY_AUTH_TOKEN`, como num contêiner com token. O Adelic recebeu o token por `ADELIC_MEMORY_TOKEN_FILE`. Resultados:
+  - Catálogo e paginação iguais ao serviço; busca restrita ao escopo.
+  - Edição de nota Fact com tags, pin, tier procedural e título, de nota simples e de nota com TTL: metadados idênticos depois de salvar e corpo confirmado.
+  - Alteração externa retornou 409 e foi mantida. Criação funcionou; criação sobre caminho existente retornou 409.
+  - Nota com campo personalizado retornou 422, com o hash do arquivo inalterado.
+  - Escopo inexistente retornou 404. Sem token: 503 com a explicação. Serviço parado: 503 com o endereço.
+  - O token não apareceu no log nem no ambiente do processo.
+- Instalação nativa deste computador (porta 49374), apenas leitura: catálogo com 195 notas em 11 escopos, igual a `pages_latest` de `/admin/status`. A listagem de cada escopo bate com a contagem. Das 195 notas, 194 são editáveis pela regra; a outra é do escopo `_global`, que é somente leitura. A busca funcionou.
+- Não testado: um contêiner Docker de verdade. O usuário não tem acesso ao `docker.sock`, e o ai-memory deste computador roda pelo systemd. A instância isolada usa o mesmo binário e a mesma configuração de token da imagem.
+
 # Interface baseada no T3 Code e tema Dracula escuro — 2026-10-06
 
 Pedido do usuário: validar a UI/UX, usar o T3 Code como base e aplicar um tema inspirado no Dracula, mais escuro. Contrato em [tema e interface](specs/visual-theme.md). Desenvolvimento local após a v0.2.0, sem novo pacote, commit ou publicação.

@@ -1,10 +1,10 @@
 import type { Integration, MemoryHit, MemoryPage, Project } from '../shared/contracts.js';
 import type { MemoryScope } from '../shared/contracts.js';
 import { createHash } from 'node:crypto';
-import { memoryPathExists } from './memory-catalog.js';
-import { writeExistingMemoryBody } from './memory-local-writer.js';
+import { adminWritePage, memoryAuthHeaders, memoryPageExists, memoryServiceUrl } from './memory-service.js';
+import { planExistingEdit, preservedFrontmatter } from './memory-edit.js';
 
-const endpoint='http://127.0.0.1:49374/mcp';
+const endpoint=()=>`${memoryServiceUrl()}/mcp`;
 type Tool={name:string;description?:string;inputSchema?:unknown};
 let toolsCache:Tool[]|undefined;
 let nextId=1;
@@ -13,9 +13,11 @@ let integrationRefresh:Promise<Integration>|undefined;
 let integrationCheckedAt=0;
 
 async function rpc(method:string,params:unknown,timeoutMs=2500):Promise<any> {
+  const url=endpoint(), auth=memoryAuthHeaders();
   const controller=new AbortController(); const timer=setTimeout(()=>controller.abort(),timeoutMs);
   try {
-    const response=await fetch(endpoint,{method:'POST',headers:{'content-type':'application/json','accept':'application/json, text/event-stream'},body:JSON.stringify({jsonrpc:'2.0',id:nextId++,method,params}),signal:controller.signal});
+    const response=await fetch(url,{method:'POST',headers:{'content-type':'application/json','accept':'application/json, text/event-stream',...auth},body:JSON.stringify({jsonrpc:'2.0',id:nextId++,method,params}),signal:controller.signal});
+    if (response.status===401||response.status===403) throw new Error(`O MCP do ai-memory recusou o acesso (HTTP ${response.status}). Se o serviço usa AI_MEMORY_AUTH_TOKEN, informe o mesmo token ao Adelic em ADELIC_MEMORY_TOKEN ou ADELIC_MEMORY_TOKEN_FILE.`);
     if (!response.ok) throw new Error(`ai-memory respondeu HTTP ${response.status}`);
     const raw=await response.text();
     const line=raw.split('\n').find(l=>l.startsWith('data:'))?.slice(5).trim();
@@ -101,39 +103,49 @@ function normalizeFrontmatter(value:unknown):Record<string,unknown> {
   return stable(value as Record<string,unknown>);
 }
 const saves=new Map<string,Promise<MemoryPage>>();
+const conflict=(message:string)=>Object.assign(new Error(message),{status:409});
+const missingPage=(e:unknown,scope:MemoryScope,path:string)=>(e as any)?.code===-32603&&(e as Error).message===`page ${path} not found in resolved scope ${scope.workspace}/${scope.project}`;
+const sameJson=(a:unknown,b:unknown)=>JSON.stringify(stable(a))===JSON.stringify(stable(b));
+async function writeTool() {
+  const ts=await getTools(); const tool=ts.find(t=>toolNames.write.includes(t.name as never)); if(!tool)throw new Error('ai-memory não oferece ferramenta de escrita');
+  const props=(tool.inputSchema as any)?.properties??{};
+  for(const field of ['workspace','project','path','body']) if(!acceptsType(props[field],'string')) throw new Error(`Schema memory_write_page inválido: ${field} deve aceitar string`);
+  return {tool,props};
+}
+async function mcpWrite(args:Record<string,unknown>) {
+  const {tool,props}=await writeTool();
+  for(const field of Object.keys(args)) if(!Object.hasOwn(props,field)) throw new Error(`memory_write_page não aceita ${field}; edição bloqueada para preservar os metadados`);
+  const result=await rpc('tools/call',{name:tool.name,arguments:args},10000);if(result?.isError)throw new Error(result.content?.map((x:any)=>x.text).join('\n')||'Falha da ferramenta ai-memory');
+}
 export function sharedMemoryWrite(scope:MemoryScope,path:string,body:string,expectedVersion:string|null|undefined):Promise<MemoryPage> {
   if(scope.project==='_global') return Promise.reject(Object.assign(new Error('Escrita no escopo _global não permitida'),{status:403}));
   const key=`${scope.workspace}\0${scope.project}\0${path}`; const prev=saves.get(key)??Promise.resolve({path,title:path,body:'',version:''});
   const next=prev.catch(()=>({path,title:path,body:'',version:''})).then(async()=>{
     let current:MemoryPage|undefined;
     try { current=await sharedMemoryRead(scope,path); } catch(e) {
-      // Only an absent catalog entry permits creation; MCP/network/schema failures must not
+      // Only an absent page permits creation; MCP/network/schema failures must not
       // be mistaken for a missing note and turned into an overwrite attempt.
-      const missing=`page ${path} not found in resolved scope ${scope.workspace}/${scope.project}`;
-      if((e as any)?.code===-32603 && (e as Error).message===missing) current=undefined;
-      else throw e;
+      if(missingPage(e,scope,path)) current=undefined; else throw e;
     }
     const expected=expectedVersion===undefined?(current?.version??null):expectedVersion;
-    if(expected===null&&memoryPathExists(scope,path)) throw Object.assign(new Error('Já existe uma nota nesse caminho; recarregue antes de editar'),{status:409});
-    if(expected===null ? current!==undefined : !current||current.version!==expected) throw Object.assign(new Error('A nota foi alterada desde a leitura; recarregue antes de salvar'),{status:409});
+    if(expected===null&&current===undefined&&await memoryPageExists(scope,path)) throw conflict('Já existe uma nota nesse caminho; recarregue antes de editar');
+    if(expected===null ? current!==undefined : !current||current.version!==expected) throw conflict('A nota foi alterada desde a leitura; recarregue antes de salvar');
     if(current) {
-      // Existing pages are edited in place to preserve frontmatter; incompatible
-      // local service/catalog state fails closed rather than falling back to MCP.
-      await writeExistingMemoryBody(scope,path,body,current.body,async()=>{
-        const latest=await sharedMemoryRead(scope,path);
-        if(latest.version!==current!.version) throw Object.assign(new Error('A nota ou seus metadados foram alterados durante a edição; recarregue antes de salvar'),{status:409});
-      });
+      // Existing notes are rewritten by the service itself (no access to its files),
+      // only when a writer reproduces every metadata key; otherwise fail before writing.
+      const plan=planExistingEdit(scope,path,current.frontmatter??{});
+      const latest=await sharedMemoryRead(scope,path);
+      if(latest.version!==current.version) throw conflict('A nota ou seus metadados foram alterados durante a edição; recarregue antes de salvar');
+      if(plan.writer==='admin') await adminWritePage({workspace:scope.workspace,project:scope.project,path,body,...plan.args});
+      else await mcpWrite({workspace:scope.workspace,project:scope.project,path,body,...plan.args});
       const confirmed=await sharedMemoryRead(scope,path);
-      if(confirmed.body!==body) throw Object.assign(new Error('O MCP ainda não confirmou o corpo salvo; a reindexação pode estar pendente'),{status:503});
+      if(confirmed.body!==body) throw Object.assign(new Error('O ai-memory não confirmou o corpo salvo (o serviço pode ter alterado o texto, por exemplo ao remover dados sensíveis); recarregue a nota'),{status:503});
+      if(!sameJson(preservedFrontmatter(path,confirmed.frontmatter??{}),preservedFrontmatter(path,current.frontmatter??{}))) throw Object.assign(new Error('O ai-memory salvou a nota, mas os metadados lidos depois diferem dos anteriores; confira a nota antes de editar de novo'),{status:503});
       return confirmed;
     }
     // Validate the write contract before attempting any write. In particular, never
     // let argument filtering silently remove the explicit scope or note body.
-    const ts=await getTools(); const tool=ts.find(t=>toolNames.write.includes(t.name as never)); if(!tool)throw new Error('ai-memory não oferece ferramenta de escrita');
-    const props=(tool.inputSchema as any)?.properties??{};
-    for(const field of ['workspace','project','path','body']) if(!acceptsType(props[field],'string')) throw new Error(`Schema memory_write_page inválido: ${field} deve aceitar string`);
-    const args={workspace:scope.workspace,project:scope.project,path,body};
-    const result=await rpc('tools/call',{name:tool.name,arguments:args},8000);if(result?.isError)throw new Error(result.content?.map((x:any)=>x.text).join('\n')||'Falha da ferramenta ai-memory');
+    await mcpWrite({workspace:scope.workspace,project:scope.project,path,body});
     const confirmed=await sharedMemoryRead(scope,path);
     if(confirmed.body!==body) throw Object.assign(new Error('O MCP não confirmou o corpo recém-criado'),{status:503});
     return confirmed;
@@ -165,9 +177,9 @@ export async function memoryIntegration(timeoutMs=700):Promise<Integration> {
   if (integrationRefresh) return integrationRefresh;
   integrationRefresh=(async()=>{
   const controller=new AbortController(); const timer=setTimeout(()=>controller.abort(),timeoutMs);
-  try { const r=await fetch(endpoint,{method:'POST',headers:{'content-type':'application/json','accept':'application/json, text/event-stream'},body:JSON.stringify({jsonrpc:'2.0',id:0,method:'tools/list',params:{}}),signal:controller.signal});
-    integrationCache=r.ok?{id:'ai-memory',name:'ai-memory',kind:'memory',status:'ready',detail:'Servidor MCP local disponível'}:{id:'ai-memory',name:'ai-memory',kind:'memory',status:'error',detail:`Servidor MCP retornou HTTP ${r.status}`};
-  } catch { integrationCache={id:'ai-memory',name:'ai-memory',kind:'memory',status:'missing',detail:'Servidor MCP local indisponível'}; }
+  try { const r=await fetch(endpoint(),{method:'POST',headers:{'content-type':'application/json','accept':'application/json, text/event-stream',...memoryAuthHeaders()},body:JSON.stringify({jsonrpc:'2.0',id:0,method:'tools/list',params:{}}),signal:controller.signal});
+    integrationCache=r.ok?{id:'ai-memory',name:'ai-memory',kind:'memory',status:'ready',detail:'Servidor MCP local disponível'}:{id:'ai-memory',name:'ai-memory',kind:'memory',status:'error',detail:r.status===401||r.status===403?`Servidor MCP recusou o acesso (HTTP ${r.status}); configure ADELIC_MEMORY_TOKEN ou ADELIC_MEMORY_TOKEN_FILE`:`Servidor MCP retornou HTTP ${r.status}`};
+  } catch(e) { integrationCache={id:'ai-memory',name:'ai-memory',kind:'memory',status:'missing',detail:/ADELIC_MEMORY_/.test(String((e as Error)?.message))?(e as Error).message:'Servidor MCP local indisponível'}; }
   finally {clearTimeout(timer);integrationCheckedAt=Date.now();integrationRefresh=undefined;}
   return integrationCache!;
   })();

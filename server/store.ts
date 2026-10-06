@@ -327,7 +327,7 @@ export class Store {
     const terms = query
       .normalize('NFC')
       .split(/\s+/)
-      .map((t) => t.replace(/["*^:(){}\[\]]/g, '').trim())
+      .map((t) => t.replace(/["*^:(){}[\]]/g, '').trim())
       .filter(Boolean)
       .slice(0, 8);
     if (!terms.length) return [];

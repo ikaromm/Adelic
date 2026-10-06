@@ -218,4 +218,15 @@ jobs:
           chmod +x release/Adelic-*-linux-x86_64.AppImage
           useradd -m tester
           chown -R tester release scripts package.json
-          su tester -c "PATH=/opt/node/bin:\$PATH xvfb-run --auto-servernum --server-args='-screen 0 1280x800x24' node scripts/smoke-desktop.mjs \$(ls release/Adelic-*-linux-x86_64.AppImage)"
+          # The smoke script prints the app's stderr on failure; keep a copy as an artifact too.
+          su tester -c "PATH=/opt/node/bin:\$PATH xvfb-run --auto-servernum --server-args='-screen 0 1280x800x24' node scripts/smoke-desktop.mjs \$(ls release/Adelic-*-linux-x86_64.AppImage)" 2>&1 | tee smoke.log
+          exit "${PIPESTATUS[0]}"
+        shell: bash
+
+      - name: Smoke log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-${{ strategy.job-index }}
+          path: smoke.log
+          retention-days: 3

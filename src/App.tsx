@@ -8,6 +8,7 @@ import {
 import type { Bootstrap, DelegatedTask, GraphifyQueryResult, GraphifyStatus, Message, OrchestrationConfig, Project, ProjectCoordination, Run, Session, SessionDetail, StreamEvent } from '../shared/contracts';
 import { api } from './api';
 import SharedMemoryPage from './MemoryPage';
+import { BrandMark } from './BrandMark';
 import { bootstrapSelection, sidebarSessions } from './selection';
 import { activityForRun, activityIsVisible, actionNeedsDisclosure, commandPreview, commandTitle, runStatusLabel, statusLabel } from './run-activity';
 import { compatibleThinking, supportedThinking, thinkingLabel } from './reasoning';
@@ -563,7 +564,7 @@ export default function App() {
   return <div className={`app-shell ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
     <aside className={`sidebar ${sidebarOpen ? 'sidebar-mobile-open' : ''}`} aria-label="Barra lateral">
       <div className="sidebar-header">
-        <div className="brand"><span className="brand-mark" aria-hidden="true">A</span><span className="brand-name">adelic</span></div>
+        <div className="brand"><BrandMark /><span className="brand-name">adelic</span></div>
         <button className="icon-button sidebar-collapse" aria-label={sidebarCollapsed ? 'Expandir navegação' : 'Recolher navegação'} title={sidebarCollapsed ? 'Expandir navegação' : 'Recolher navegação'} aria-expanded={!sidebarCollapsed} onClick={() => setSidebarCollapsed(!sidebarCollapsed)}>{sidebarCollapsed ? <PanelLeftOpen size={16} /> : <PanelLeftClose size={16} />}</button>
         <button className="icon-button sidebar-close" aria-label="Fechar navegação" title="Fechar navegação" onClick={() => setSidebarOpen(false)}><X size={16} /></button>
       </div>

@@ -1,5 +1,22 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
-  <rect width="512" height="512" rx="112" fill="#171725"/>
-  <path d="M120 352 228 128h56l108 224h-72l-21-49h-87l-22 49Zm116-105h41l-20-51Z" fill="#9290f4"/>
-  <circle cx="375" cy="135" r="23" fill="#c7c6ff"/>
+<!--
+  Adelic mark. The adele ring joins the real place (R, a continuous line) with every
+  p-adic place (Z_p, a branching tree). The "A" is a 2-adic tree, a root splitting into
+  branches that split again; the crossbar is the real line passing through the branch
+  points. It also reads as one coordinator delegating to parallel agents.
+-->
+<svg role="img" aria-label="Adelic" xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <title>Adelic</title>
+  <rect width="512" height="512" rx="112" fill="#0f1015"/>
+  <line x1="256" y1="104" x2="170" y2="284" stroke="#bd93f9" stroke-width="40" stroke-linecap="round"/>
+  <line x1="256" y1="104" x2="342" y2="284" stroke="#bd93f9" stroke-width="40" stroke-linecap="round"/>
+  <line x1="170" y1="284" x2="116" y2="404" stroke="#bd93f9" stroke-width="26" stroke-linecap="round"/>
+  <line x1="170" y1="284" x2="212" y2="404" stroke="#bd93f9" stroke-width="26" stroke-linecap="round"/>
+  <line x1="342" y1="284" x2="300" y2="404" stroke="#bd93f9" stroke-width="26" stroke-linecap="round"/>
+  <line x1="342" y1="284" x2="396" y2="404" stroke="#bd93f9" stroke-width="26" stroke-linecap="round"/>
+  <line x1="100" y1="284" x2="412" y2="284" stroke="#8be9fd" stroke-width="22" stroke-linecap="round"/>
+  <circle cx="116" cy="404" r="19" fill="#ff79c6"/>
+  <circle cx="212" cy="404" r="19" fill="#ff79c6"/>
+  <circle cx="300" cy="404" r="19" fill="#ff79c6"/>
+  <circle cx="396" cy="404" r="19" fill="#ff79c6"/>
+  <circle cx="256" cy="104" r="28" fill="#f8f8f2"/>
 </svg>

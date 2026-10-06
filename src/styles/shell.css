@@ -55,17 +55,10 @@
 }
 
 .brand-mark {
-  display: grid;
+  display: block;
   flex: none;
   width: 24px;
   height: 24px;
-  place-items: center;
-  border-radius: 7px;
-  background: var(--accent);
-  color: var(--on-accent);
-  font-size: var(--text-sm);
-  font-weight: 700;
-  line-height: 1;
 }
 
 .brand-name {

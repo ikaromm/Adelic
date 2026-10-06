@@ -16,6 +16,7 @@ import {
   type Settings,
   type Skill,
 } from '../shared/contracts.js';
+import { migrate, type MigrationResult } from './migrations.js';
 
 const defaults: Settings = {
   defaultProviderId: 'codex',
@@ -59,23 +60,19 @@ const seedSkills: Skill[] = [
 export class Store {
   readonly db: DatabaseSync;
   readonly dataDir: string;
+  /** Result of the schema migration run at open time (applied versions, backup path). */
+  readonly migration: MigrationResult;
   constructor(dataDir = process.env.ADELIC_DATA_DIR || join(homedir(), '.local/share/adelic')) {
     this.dataDir = resolve(dataDir);
     mkdirSync(this.dataDir, { recursive: true });
     this.db = new DatabaseSync(join(this.dataDir, 'adelic.sqlite'));
-    this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;
-      CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY, data TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, project_id TEXT, data TEXT NOT NULL, FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE);
-      CREATE TABLE IF NOT EXISTS messages(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, run_id TEXT, client_id TEXT, data TEXT NOT NULL, FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE);
-      CREATE UNIQUE INDEX IF NOT EXISTS messages_client_unique ON messages(session_id,client_id) WHERE client_id IS NOT NULL;
-      CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, data TEXT NOT NULL, FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE);
-      CREATE TABLE IF NOT EXISTS events(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, data TEXT NOT NULL, FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE);
-      CREATE TABLE IF NOT EXISTS approvals(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, data TEXT NOT NULL, FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE);
-      CREATE TABLE IF NOT EXISTS settings(id INTEGER PRIMARY KEY CHECK(id=1), data TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS skills(id TEXT PRIMARY KEY, data TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS delegated_tasks(id TEXT PRIMARY KEY, project_id TEXT, session_id TEXT NOT NULL, run_id TEXT NOT NULL, data TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS project_briefs(project_id TEXT PRIMARY KEY, data TEXT NOT NULL);`);
-    this.migrateNullableProjectIds();
+    this.db.exec('PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;');
+    try {
+      this.migration = migrate(this.db, this.dataDir);
+    } catch (error) {
+      this.db.close();
+      throw error;
+    }
     if (!this.getSettings()) this.setSettings(defaults);
     if (!this.listSkills().length) for (const skill of seedSkills) this.put('skills', skill.id, skill);
     this.db.exec(
@@ -93,34 +90,6 @@ export class Store {
     this.db.exec(
       "UPDATE delegated_tasks SET data=json_set(data,'$.status','interrupted','$.completedAt',datetime('now'),'$.error','Servidor reiniciado durante a tarefa') WHERE json_extract(data,'$.status') IN ('running','queued')",
     );
-  }
-  private migrateNullableProjectIds() {
-    const needsRebuild = (table: string) =>
-      (this.db.prepare(`PRAGMA table_info(${table})`).all() as { name: string; notnull: number }[]).find(
-        (c) => c.name === 'project_id',
-      )?.notnull === 1;
-    if (!needsRebuild('sessions') && !needsRebuild('delegated_tasks')) return;
-    this.db.exec('PRAGMA foreign_keys=OFF; BEGIN IMMEDIATE;');
-    try {
-      if (needsRebuild('sessions')) {
-        this.db
-          .exec(`CREATE TABLE sessions_new(id TEXT PRIMARY KEY, project_id TEXT, data TEXT NOT NULL, FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE);
-          INSERT INTO sessions_new(id,project_id,data) SELECT id,project_id,data FROM sessions;
-          DROP TABLE sessions;
-          ALTER TABLE sessions_new RENAME TO sessions;`);
-      }
-      if (needsRebuild('delegated_tasks')) {
-        this.db
-          .exec(`CREATE TABLE delegated_tasks_new(id TEXT PRIMARY KEY, project_id TEXT, session_id TEXT NOT NULL, run_id TEXT NOT NULL, data TEXT NOT NULL);
-          INSERT INTO delegated_tasks_new(id,project_id,session_id,run_id,data) SELECT id,project_id,session_id,run_id,data FROM delegated_tasks;
-          DROP TABLE delegated_tasks;
-          ALTER TABLE delegated_tasks_new RENAME TO delegated_tasks;`);
-      }
-      this.db.exec('COMMIT; PRAGMA foreign_keys=ON;');
-    } catch (error) {
-      this.db.exec('ROLLBACK; PRAGMA foreign_keys=ON;');
-      throw error;
-    }
   }
   close() {
     this.db.close();

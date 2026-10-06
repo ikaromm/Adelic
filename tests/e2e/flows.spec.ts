@@ -124,3 +124,35 @@ test('generates a diagnostics report in Settings without conversation content', 
   expect(report).not.toContain(secret);
   await expect(card.getByRole('button', { name: 'Baixar JSON' })).toBeVisible();
 });
+
+test('Ctrl+K starts a conversation and Escape closes the mobile drawer', async ({ page }) => {
+  await page.goto('/');
+  // The shortcut is ignored until the app has loaded its data.
+  await expect(page.getByRole('heading', { name: 'O que vamos construir hoje?' })).toBeVisible();
+  await page.keyboard.press('Control+k');
+  await expect(page.getByRole('textbox', { name: 'Mensagem para o agente' })).toBeVisible();
+  await page.setViewportSize({ width: 360, height: 640 });
+  await page.getByRole('button', { name: 'Abrir navegação' }).click();
+  await expect(page.locator('.sidebar-mobile-open')).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(page.locator('.sidebar-mobile-open')).toHaveCount(0);
+});
+
+test('keeps reading position when scrolled up and offers a jump to the latest message', async ({ page }) => {
+  const input = await newConversation(page);
+  for (let i = 0; i < 6; i++) {
+    await input.fill(`[normal] mensagem ${i} ${'texto '.repeat(40)}`);
+    await input.press('Enter');
+    await expect(page.getByRole('button', { name: 'Enviar mensagem' })).toBeVisible();
+  }
+  const conversation = page.getByRole('region', { name: 'Conversa', exact: true });
+  await conversation.evaluate((el) => el.scrollTo({ top: 0 }));
+  const jump = page.getByRole('button', { name: 'Ir para a mensagem mais recente' });
+  await expect(jump).toBeVisible();
+  await jump.click();
+  await expect(jump).toBeHidden();
+  // The jump scrolls smoothly; wait for it to arrive.
+  await expect
+    .poll(() => conversation.evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight))
+    .toBeLessThan(96);
+});

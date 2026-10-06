@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import {
   ArrowDown,
   ArrowUp,
@@ -41,6 +41,9 @@ import { ChoiceMenu, ConversationMenu, ModelMenu } from './ComposerMenus';
 import { Markdown } from './Markdown';
 import { newConversationShortcut } from './format';
 import { useNow } from './useNow';
+import { useAutosize } from './hooks/useAutosize';
+import { useGlobalShortcuts } from './hooks/useGlobalShortcuts';
+import { useStickToBottom } from './hooks/useStickToBottom';
 import { projectOrchestration } from '../shared/contracts';
 import { ActivityPage } from './components/ActivityPage';
 import { MessageCard, RunActivityPanel, RunEventRow } from './components/Chat';
@@ -76,13 +79,9 @@ export default function App() {
   const [projectBusy, setProjectBusy] = useState(false);
   const [taskOutputs, setTaskOutputs] = useState<Record<string, string | null>>({});
   const [loadingTaskOutputs, setLoadingTaskOutputs] = useState<Set<string>>(() => new Set());
-  const conversationRef = useRef<HTMLElement>(null);
-  const stickToBottomRef = useRef(true);
   const focusComposerRef = useRef(false);
-  const [showJump, setShowJump] = useState(false);
   const [expandedLists, setExpandedLists] = useState<Record<string, boolean>>({});
   const now = useNow(60_000);
-  const composerRef = useRef<HTMLTextAreaElement>(null);
   const activeRunIdRef = useRef<string | undefined>(undefined);
   const bootstrapRequestRef = useRef(0);
   const detailRequestRef = useRef(new Map<string, number>());
@@ -212,7 +211,7 @@ export default function App() {
 
   useEffect(() => {
     void refreshBootstrap(false).catch((error: Error) => setNotice(error.message));
-  }, []);
+  }, [refreshBootstrap]);
 
   useEffect(() => {
     setDetail(null);
@@ -356,30 +355,17 @@ export default function App() {
   // Follow new content only while the reader is at the end; reading history is never interrupted.
   // Approvals, tasks and error rows count as new content too, not only messages and streamed text.
   const pendingApprovalCount = detail?.approvals.filter((item) => item.status === 'pending').length ?? 0;
-  useLayoutEffect(() => {
-    stickToBottomRef.current = true;
-    setShowJump(false);
-  }, [selectedSession, page]);
-  useLayoutEffect(() => {
-    const element = conversationRef.current;
-    if (element && stickToBottomRef.current) element.scrollTop = element.scrollHeight;
-  }, [
-    detail?.messages.length,
-    detail?.session.id,
-    detail?.tasks?.length,
-    detail?.events.length,
-    pendingApprovalCount,
-    stream?.content,
-    selectedSession,
-    page,
-  ]);
-  const onConversationScroll = () => {
-    const element = conversationRef.current;
-    if (!element) return;
-    const atBottom = element.scrollHeight - element.scrollTop - element.clientHeight < 96;
-    stickToBottomRef.current = atBottom;
-    setShowJump(!atBottom);
-  };
+  const conversationScroll = useStickToBottom<HTMLElement>(
+    [selectedSession, page],
+    [
+      detail?.messages.length,
+      detail?.session.id,
+      detail?.tasks?.length,
+      detail?.events.length,
+      pendingApprovalCount,
+      stream?.content,
+    ],
+  );
 
   const project = data?.projects.find((p) => p.id === selectedProject);
   const currentDetail = detail?.session.id === selectedSession ? detail : null;
@@ -401,36 +387,23 @@ export default function App() {
   const activityEvents = currentDetail?.events || [];
   const activityTasks = currentDetail?.tasks || [];
 
-  // Grow the message field with its content; CSS caps the height and scrolls beyond it.
-  useLayoutEffect(() => {
-    const element = composerRef.current;
-    if (!element) return;
-    element.style.height = 'auto';
-    element.style.height = `${element.scrollHeight}px`;
-  }, [composer, selectedSession, page, session?.activeRunId]);
+  const composerRef = useAutosize([composer, selectedSession, page, session?.activeRunId]);
   useEffect(() => {
     if (!focusComposerRef.current || page !== 'chat') return;
     const element = composerRef.current;
     if (!element || element.disabled) return;
     focusComposerRef.current = false;
     element.focus();
-  }, [selectedSession, page, currentDetail?.session.id]);
+  }, [selectedSession, page, currentDetail?.session.id, composerRef]);
 
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
-        event.preventDefault();
-        void newConversation();
-      }
-      if (event.key === 'Escape') {
-        setProjectForm(false);
-        setHelpOpen(false);
-        setSidebarOpen(false);
-      }
-    };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [data, busy]);
+  useGlobalShortcuts({
+    newConversation: () => void newConversation(),
+    dismiss: () => {
+      setProjectForm(false);
+      setHelpOpen(false);
+      setSidebarOpen(false);
+    },
+  });
 
   async function createProject(event: FormEvent) {
     event.preventDefault();
@@ -532,8 +505,7 @@ export default function App() {
     setDrafts((current) => ({ ...current, [sessionId]: '' }));
     setBusy(true);
     setNotice('');
-    stickToBottomRef.current = true;
-    setShowJump(false);
+    conversationScroll.stick();
     const optimistic: Message = {
       id: `local-${crypto.randomUUID()}`,
       sessionId,
@@ -943,14 +915,6 @@ export default function App() {
         : page === 'memory'
           ? 'Memória'
           : 'Configurações';
-  const scrollToLatest = () => {
-    const element = conversationRef.current;
-    if (!element) return;
-    stickToBottomRef.current = true;
-    setShowJump(false);
-    const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
-    element.scrollTo({ top: element.scrollHeight, behavior: reduceMotion ? 'auto' : 'smooth' });
-  };
 
   return (
     <div className={`app-shell ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
@@ -1179,8 +1143,8 @@ export default function App() {
                 <section
                   className="conversation"
                   aria-label="Conversa"
-                  ref={conversationRef}
-                  onScroll={onConversationScroll}
+                  ref={conversationScroll.ref}
+                  onScroll={conversationScroll.onScroll}
                 >
                   <div className="message-column">
                     {messages.length === 0 && !stream && (
@@ -1328,13 +1292,13 @@ export default function App() {
                   </div>
                 </section>
                 <div className="composer-wrap">
-                  {showJump && (
+                  {conversationScroll.showJump && (
                     <button
                       type="button"
                       className="jump-to-latest"
                       aria-label="Ir para a mensagem mais recente"
                       title="Ir para a mensagem mais recente"
-                      onClick={scrollToLatest}
+                      onClick={conversationScroll.scrollToLatest}
                     >
                       <ArrowDown size={16} />
                     </button>

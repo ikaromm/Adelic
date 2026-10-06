@@ -158,3 +158,64 @@ jobs:
 
       - name: Smoke test the AppImage (headless X11)
         run: xvfb-run --auto-servernum --server-args='-screen 0 1280x800x24' npm run desktop:smoke
+
+      - name: Keep the AppImage for the distribution matrix
+        uses: actions/upload-artifact@v4
+        with:
+          name: appimage
+          path: release/Adelic-*-linux-x86_64.AppImage
+          retention-days: 2
+
+  # Opens the same AppImage on other distributions (headless X11). Only the smoke script and
+  # Node (official tarball, pinned checksum) are added to each image; no Adelic dependencies.
+  distros:
+    needs: package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Ubuntu 22.04
+            image: ubuntu:22.04
+            setup: apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq xvfb xauth xz-utils curl ca-certificates libgtk-3-0 libnss3 libasound2 libgbm1 libxss1 libxtst6 libatk-bridge2.0-0 libdrm2 libsecret-1-0 >/dev/null
+          - name: Debian 12
+            image: debian:12
+            setup: apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq xvfb xauth xz-utils curl ca-certificates libgtk-3-0 libnss3 libasound2 libgbm1 libxss1 libxtst6 libatk-bridge2.0-0 libdrm2 libsecret-1-0 >/dev/null
+          - name: Fedora 42
+            image: fedora:42
+            setup: dnf install -y -q xorg-x11-server-Xvfb xorg-x11-xauth xz curl gtk3 nss alsa-lib mesa-libgbm libXScrnSaver libXtst at-spi2-atk libdrm libsecret which procps-ng >/dev/null
+    name: AppImage on ${{ matrix.name }}
+    container:
+      image: ${{ matrix.image }}
+      # Electron's sandbox needs user namespaces inside the container.
+      options: --security-opt seccomp=unconfined --security-opt apparmor=unconfined
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          sparse-checkout: |
+            scripts/smoke-desktop.mjs
+            package.json
+          sparse-checkout-cone-mode: false
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: appimage
+          path: release
+
+      - name: System libraries
+        run: ${{ matrix.setup }}
+
+      - name: Node.js 24 (official tarball)
+        run: |
+          curl -fsSL -o /tmp/node.tar.xz https://nodejs.org/dist/v24.21.0/node-v24.21.0-linux-x64.tar.xz
+          echo "fd8e59d5a511510f6a298afb548f18c7d2b1be404d8b4a27d94fbe49f56cb2d6  /tmp/node.tar.xz" | sha256sum -c -
+          mkdir -p /opt/node && tar xJf /tmp/node.tar.xz -C /opt/node --strip-components=1
+          echo /opt/node/bin >> "$GITHUB_PATH"
+
+      - name: Smoke test
+        run: |
+          chmod +x release/Adelic-*-linux-x86_64.AppImage
+          useradd -m tester
+          chown -R tester release scripts package.json
+          su tester -c "PATH=/opt/node/bin:\$PATH xvfb-run --auto-servernum --server-args='-screen 0 1280x800x24' node scripts/smoke-desktop.mjs \$(ls release/Adelic-*-linux-x86_64.AppImage)"

@@ -220,7 +220,10 @@ jobs:
           chown -R tester release scripts package.json
           # The smoke script prints the app's stderr on failure; keep a copy as an artifact too.
           su tester -c "PATH=/opt/node/bin:\$PATH xvfb-run --auto-servernum --server-args='-screen 0 1280x800x24' node scripts/smoke-desktop.mjs \$(ls release/Adelic-*-linux-x86_64.AppImage)" 2>&1 | tee smoke.log
-          exit "${PIPESTATUS[0]}"
+          status="${PIPESTATUS[0]}"
+          # Surface the failure in the run's annotations (readable without signing in).
+          if [ "$status" != 0 ]; then echo "::error title=AppImage smoke ($(. /etc/os-release; echo "$PRETTY_NAME"))::$(tail -c 900 smoke.log | tr '\n' ' ')"; fi
+          exit "$status"
         shell: bash
 
       - name: Smoke log

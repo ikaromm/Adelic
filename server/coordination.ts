@@ -38,9 +38,8 @@ export function parseTaskPlan(text: string): PlannedTask[] {
   } catch {
     throw new Error('O planejador não retornou JSON válido');
   }
-  if (!value || typeof value !== 'object' || !Array.isArray((value as any).tasks))
-    throw new Error('Plano deve conter uma lista tasks');
-  const raw = (value as any).tasks;
+  const raw = (value as { tasks?: unknown } | null)?.tasks;
+  if (!Array.isArray(raw)) throw new Error('Plano deve conter uma lista tasks');
   if (raw.length < 1 || raw.length > 6) throw new Error('Plano deve conter de 1 a 6 tarefas');
   const ids = new Set<string>();
   const tasks: PlannedTask[] = raw.map((item: unknown, index: number) => {

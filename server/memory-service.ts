@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { z } from 'zod';
 import type { MemoryCatalog, MemoryListing, MemoryScope, MemoryScopeInfo } from '../shared/contracts.js';
 
 // HTTP client for the ai-memory service. The Memory library uses the same source
@@ -13,6 +14,13 @@ import type { MemoryCatalog, MemoryListing, MemoryScope, MemoryScopeInfo } from 
 
 const DEFAULT_URL = 'http://127.0.0.1:49374';
 const LOOPBACK = new Set(['127.0.0.1', 'localhost', '[::1]', '::1']);
+const ProjectRowSchema = z.object({
+  workspace_name: z.string(),
+  project_name: z.string(),
+  page_count: z.number().int(),
+});
+const PageRowSchema = z.object({ path: z.string(), title: z.string().nullable().optional() });
+
 const PAGE_DEFAULT = 50,
   PAGE_MAX = 100;
 
@@ -151,23 +159,24 @@ export async function memoryCatalog(): Promise<MemoryCatalog> {
   if (r.status === 404) missingApi('/api/v1/projects');
   if (!Array.isArray(r.data)) return fail('Resposta incompatível de ai-memory /api/v1/projects: lista esperada');
   const scopes: MemoryScopeInfo[] = r.data
-    .map((row: any) => {
-      if (
-        typeof row?.workspace_name !== 'string' ||
-        typeof row?.project_name !== 'string' ||
-        !Number.isInteger(row?.page_count)
-      )
-        fail(
+    .map((row) => {
+      const parsed = ProjectRowSchema.safeParse(row);
+      if (!parsed.success)
+        return fail(
           'Resposta incompatível de ai-memory /api/v1/projects: workspace_name, project_name e page_count esperados',
         );
-      return { workspace: row.workspace_name, project: row.project_name, pageCount: row.page_count };
+      return {
+        workspace: parsed.data.workspace_name,
+        project: parsed.data.project_name,
+        pageCount: parsed.data.page_count,
+      };
     })
     .sort((a, b) => a.workspace.localeCompare(b.workspace) || a.project.localeCompare(b.project));
   const totalPages = scopes.reduce((n, s) => n + s.pageCount, 0);
   if (totalPages === 0) {
     // An empty catalog must be real, not a mismatch between the catalog and the store.
     const status = await serviceRequest('/admin/status').catch(() => undefined);
-    const latest = Number((status?.data as any)?.counts?.pages_latest);
+    const latest = Number((status?.data as { counts?: { pages_latest?: unknown } } | undefined)?.counts?.pages_latest);
     if (status?.status === 200 && latest > 0)
       fail(`Catálogo do ai-memory vazio, mas o serviço informa ${latest} notas atuais; configuração incompatível`);
   }
@@ -189,9 +198,10 @@ export async function memoryList(scope: MemoryScope, offset = 0, limit = PAGE_DE
   }
   if (!Array.isArray(r.data)) return fail('Resposta incompatível de ai-memory ao listar notas: lista esperada');
   const pages = r.data
-    .map((row: any) => {
-      if (typeof row?.path !== 'string') fail('Resposta incompatível de ai-memory ao listar notas: path esperado');
-      return { path: row.path, title: typeof row.title === 'string' && row.title ? row.title : row.path, snippet: '' };
+    .map((row) => {
+      const parsed = PageRowSchema.safeParse(row);
+      if (!parsed.success) return fail('Resposta incompatível de ai-memory ao listar notas: path esperado');
+      return { path: parsed.data.path, title: parsed.data.title || parsed.data.path, snippet: '' };
     })
     .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
   return { pages: pages.slice(offset, offset + limit), total: pages.length, offset, limit };

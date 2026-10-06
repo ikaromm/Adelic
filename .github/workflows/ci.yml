@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [develop, master, main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # Same major as the development machine; package.json requires >=22.13.
+          node-version: 26
+          cache: npm
+
+      # Several tests exercise the real bubblewrap sandbox. Ubuntu 24.04 restricts
+      # unprivileged user namespaces through AppArmor, which bwrap needs; relax it on
+      # this ephemeral runner only.
+      - name: Install bubblewrap
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          bwrap --ro-bind / / true && echo "bubblewrap ok"
+
+      - name: Install dependencies
+        run: npm ci
+        env:
+          # Packaging is not part of CI; skip the Electron binary download.
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Whitespace
+        run: git diff --check HEAD^ HEAD || git diff --check

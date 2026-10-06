@@ -16,8 +16,10 @@ async function fixture(hang = false, mutateDuringExtraction = false) {
   await mkdir(join(path, '.adelic'));
   const binary = join(path, 'fake-graphify'), log = join(path, '.adelic/calls.jsonl'), envLog = join(path, '.adelic/cli-environment.json');
   await writeFile(join(path, 'app.ts'), 'export const a = 1;');
+  // ESM on purpose: an extensionless script inherits the nearest package.json "type", and an
+  // explicit import keeps it valid both under the repo ("module") and in a plain TMPDIR.
   await writeFile(binary, `#!/usr/bin/env node
-const fs=require('node:fs'),path=require('node:path'),args=process.argv.slice(2);
+import fs from 'node:fs'; import path from 'node:path'; const args=process.argv.slice(2);
 fs.appendFileSync(${JSON.stringify(log)},JSON.stringify(args)+'\\n');
 const envValues=fs.existsSync(${JSON.stringify(envLog)})?JSON.parse(fs.readFileSync(${JSON.stringify(envLog)},'utf8')):[];envValues.push(process.env.GRAPHIFY_OUT);fs.writeFileSync(${JSON.stringify(envLog)},JSON.stringify(envValues));
 if(args[0]==='extract') {

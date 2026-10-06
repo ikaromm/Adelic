@@ -1,0 +1,73 @@
+name: Release
+
+# Builds the Linux AppImage for a pushed vX.Y.Z tag and publishes a GitHub Release with
+# the AppImage, its SHA-256 and install-linux.sh. The tag is created by `npm run release`.
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag existente (ex.: v0.4.0)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.TAG }}
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 26
+          cache: npm
+
+      - name: Check tag matches package.json
+        run: |
+          version=$(node -p "require('./package.json').version")
+          test "v$version" = "$TAG" || { echo "package.json tem $version, tag é $TAG"; exit 1; }
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck and test
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bubblewrap ripgrep pulseaudio-utils libfuse2t64
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          curl -fsSL -o /tmp/ai-memory.tgz https://github.com/akitaonrails/ai-memory/releases/download/v2.1.0/ai-memory-linux-x86_64.tar.gz
+          echo "b4d911f392fea7f151c9c1ff83521922417570e5104ffb02a5e82253afc877ac  /tmp/ai-memory.tgz" | sha256sum -c -
+          mkdir -p /tmp/ai-memory && tar xzf /tmp/ai-memory.tgz -C /tmp/ai-memory ./ai-memory
+          export AI_MEMORY_BIN=/tmp/ai-memory/ai-memory
+          npm run typecheck
+          npm test
+
+      - name: Build AppImage
+        run: npm run package:linux
+
+      - name: Release notes
+        run: |
+          notes="docs/releases/$TAG.md"
+          test -f "$notes" || { echo "faltam as notas $notes"; exit 1; }
+          cp "$notes" release-notes.md
+          printf '\n\nSHA-256 do AppImage: `%s`\n' "$(cut -d' ' -f1 release/Adelic-*-linux-x86_64.AppImage.sha256)" >> release-notes.md
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp scripts/install-linux.sh release/install-linux.sh
+          gh release create "$TAG" \
+            --title "Adelic $TAG" \
+            --notes-file release-notes.md \
+            release/Adelic-*-linux-x86_64.AppImage \
+            release/Adelic-*-linux-x86_64.AppImage.sha256 \
+            release/install-linux.sh

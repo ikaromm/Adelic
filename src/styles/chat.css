@@ -1606,3 +1606,40 @@
     opacity: 1;
   }
 }
+
+/* Automatic retries and the retry button under a failed answer. */
+.activity-event.retry {
+  color: var(--warning);
+}
+.retry-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  /* Sits right under the failed answer (the timeline gap is 10px). */
+  margin-top: -6px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--warning) 35%, var(--border));
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--warning) 8%, var(--surface));
+  color: var(--text);
+  font-size: var(--text-sm);
+}
+.retry-notice.permanent {
+  border-color: var(--danger-border);
+  background: color-mix(in srgb, var(--red) 8%, var(--surface));
+}
+.retry-notice > span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.retry-notice small {
+  color: var(--text-secondary);
+}
+@media (max-width: 520px) {
+  .retry-notice {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}

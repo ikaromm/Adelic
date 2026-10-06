@@ -261,3 +261,33 @@ test('delegates in a project and loads a task output on demand', async ({ page }
   await expect(activity.locator('.activity-output pre').first()).not.toBeEmpty();
   await expect(activity).toContainText('Executor');
 });
+
+test('retries a timeout automatically and shows that it did', async ({ page }) => {
+  const input = await newConversation(page);
+  await input.fill('[instavel] responda');
+  await input.press('Enter');
+  await expect(
+    page.locator('.markdown-content', { hasText: 'Recuperado depois de uma nova tentativa.' }),
+  ).toBeVisible();
+  const activity = page.getByRole('region', { name: 'Atividade desta execução' }).last();
+  await expect(activity).toContainText('1 nova tentativa');
+  await activity.locator('summary').first().click();
+  await expect(activity.locator('.activity-event.retry')).toContainText('tempo esgotado; tentando de novo (2/3)');
+  await expect(page.locator('.retry-notice')).toHaveCount(0);
+});
+
+test('does not repeat a run that already answered partially; offers Tentar de novo', async ({ page }) => {
+  const input = await newConversation(page);
+  await input.fill('[quebra] responda');
+  await input.press('Enter');
+  const notice = page.locator('.retry-notice');
+  await expect(notice).toContainText('Falha temporária');
+  await expect(notice).toContainText('texto já exibido');
+  await expect(page.locator('.activity-event.retry')).toHaveCount(0);
+  await notice.getByRole('button', { name: 'Tentar de novo' }).click();
+  // The same request is sent again as a new run (it fails again in this fixture).
+  await expect(page.getByRole('region', { name: 'Conversa', exact: true }).getByText('[quebra] responda')).toHaveCount(
+    2,
+  );
+  await expect(page.locator('.retry-notice')).toHaveCount(1);
+});

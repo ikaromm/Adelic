@@ -7,6 +7,7 @@ import { Store } from './store.js';
 import { GraphifyService, graphify, mountGraphifyRoutes } from './graphify.js';
 import { error, message, originGuard } from './http/common.js';
 import type { BackendContext } from './http/context.js';
+import type { RetryPolicy } from './retry.js';
 import { accessGuard, authRoutes, type RemoteAccess } from './http/auth.js';
 import { diagnosticsRoutes } from './http/diagnostics.js';
 import { memoryRoutes } from './http/memory.js';
@@ -20,11 +21,13 @@ export function createBackend(
   graphifyService: GraphifyService = graphify,
   // Optional remote access (token-protected); see server/http/auth.ts. Off by default.
   remote?: RemoteAccess,
+  // Test hook for the retry delays (production uses DEFAULT_RETRY).
+  retryOverrides?: Partial<RetryPolicy>,
 ) {
   const app = express();
   app.disable('x-powered-by');
   app.use(express.json({ limit: '128kb', strict: true }));
-  const orchestrator = new Orchestrator(store, providers, undefined, graphifyService, providerList);
+  const orchestrator = new Orchestrator(store, providers, undefined, graphifyService, providerList, retryOverrides);
   let providersCache: { at: number; value: Awaited<ReturnType<typeof providers.list>> } | undefined;
   let providersPending: Promise<Awaited<ReturnType<typeof providers.list>>> | undefined;
   async function providerList() {

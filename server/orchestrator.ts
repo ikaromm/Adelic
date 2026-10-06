@@ -31,6 +31,14 @@ import {
 } from './coordination.js';
 import { graphify, graphifyContext, type GraphifyService } from './graphify.js';
 import { adaptEffort, supportsEffort } from '../shared/reasoning.js';
+import {
+  DEFAULT_RETRY,
+  classifyFailure,
+  withRetry,
+  type EffectTracker,
+  type RetryPolicy,
+  type RetryProgress,
+} from './retry.js';
 
 interface StartingRun {
   clientMessageId?: string;
@@ -56,6 +64,8 @@ export class Orchestrator {
     private readonly loadMemoryContext: typeof memoryContextFor = memoryContextFor,
     private readonly graphifyService: GraphifyService = graphify,
     private readonly providerList: () => Promise<ProviderInfo[]> = () => providers.list(),
+    /** Test hook: shorter delays or a fixed retry count. */
+    private readonly retryOverrides?: Partial<RetryPolicy>,
   ) {}
   subscribe(listener: (event: StreamEvent) => void) {
     this.listeners.add(listener);
@@ -349,10 +359,12 @@ export class Orchestrator {
       this.store.updateMessage(assistant);
       this.emit({ type: 'run', run });
       this.emit({ type: 'message', message: assistant });
-      const perform = () =>
+      const performOnce = (effects: EffectTracker) =>
         this.providers.run(
           directInput,
           (event: ProviderEvent) => {
+            if (event.type === 'delta' || event.type === 'tool' || event.type === 'approval')
+              effects.note(event.type === 'delta' ? 'text' : event.type);
             if (event.type === 'delta') {
               if (!firstTokenAt) {
                 firstTokenAt = Date.now();
@@ -393,6 +405,13 @@ export class Orchestrator {
           },
           controller.signal,
         );
+      // Retries only while nothing was shown or executed; see server/retry.ts.
+      const perform = () =>
+        withRetry(performOnce, {
+          policy: this.retryPolicy(settings),
+          signal: controller.signal,
+          onRetry: (progress) => this.noteRetry(session.id, run, progress),
+        });
       const result =
         plan.tools && settings.sandbox === 'workspace-write'
           ? await this.withProjectWrite(project.id, perform)
@@ -407,6 +426,7 @@ export class Orchestrator {
       else {
         run.status = 'failed';
         run.error = errorText(e);
+        run.failure = failureOf(e);
         if (!response) response = `Erro: ${run.error}`;
         this.publishEvent(session.id, run.id, 'error', run.error);
       }
@@ -573,46 +593,62 @@ export class Orchestrator {
         this.emit({ type: 'run', run });
         this.emit({ type: 'message', message: assistant });
       }
-      const result = await this.providers.run(
-        effectiveInput,
-        (event: ProviderEvent) => {
-          if (event.type === 'approval') {
-            const owned: Approval = { ...event.approval, runId: run.id, sessionId: session.id };
-            this.store.putApproval(owned);
-            this.emit({ type: 'approval', approval: owned });
-            this.publishEvent(session.id, run.id, 'approval', owned.title, { status: owned.status });
-          } else if (event.type === 'delta') {
-            task.output = (task.output || '') + event.text;
-            this.store.putTask(task);
-            if (streamDirect) {
-              if (!assistant.firstTokenMs) {
-                run.firstTokenMs = Date.now() - Date.parse(run.startedAt);
-                assistant.firstTokenMs = run.firstTokenMs;
+      const startOutput = task.output || '',
+        startContent = assistant.content;
+      const result = await withRetry(
+        (effects) => {
+          // A retried attempt starts from the state before the failed one.
+          task.output = startOutput;
+          if (streamDirect) assistant.content = startContent;
+          return this.providers.run(
+            effectiveInput,
+            (event: ProviderEvent) => {
+              if (event.type === 'delta' || event.type === 'tool' || event.type === 'approval')
+                effects.note(event.type === 'delta' ? 'text' : event.type);
+              if (event.type === 'approval') {
+                const owned: Approval = { ...event.approval, runId: run.id, sessionId: session.id };
+                this.store.putApproval(owned);
+                this.emit({ type: 'approval', approval: owned });
+                this.publishEvent(session.id, run.id, 'approval', owned.title, { status: owned.status });
+              } else if (event.type === 'delta') {
+                task.output = (task.output || '') + event.text;
+                this.store.putTask(task);
+                if (streamDirect) {
+                  if (!assistant.firstTokenMs) {
+                    run.firstTokenMs = Date.now() - Date.parse(run.startedAt);
+                    assistant.firstTokenMs = run.firstTokenMs;
+                  }
+                  assistant.content += event.text;
+                  this.store.updateMessage(assistant);
+                  this.emit({
+                    type: 'delta',
+                    sessionId: session.id,
+                    runId: run.id,
+                    messageId: assistant.id,
+                    text: event.text,
+                  });
+                }
+              } else if (event.type === 'status') this.publishEvent(session.id, run.id, 'status', event.text);
+              else if (event.type === 'tool')
+                this.publishEvent(session.id, run.id, 'tool', event.description, {
+                  toolName: event.name,
+                  status: event.status,
+                  ...(event.toolCallId ? { toolCallId: `${input.runId}:${event.toolCallId}` } : {}),
+                });
+              else if (event.type === 'usage') {
+                eventInput = event.inputTokens ?? eventInput;
+                eventOutput = event.outputTokens ?? eventOutput;
+                eventCost = event.costUsd ?? eventCost;
               }
-              assistant.content += event.text;
-              this.store.updateMessage(assistant);
-              this.emit({
-                type: 'delta',
-                sessionId: session.id,
-                runId: run.id,
-                messageId: assistant.id,
-                text: event.text,
-              });
-            }
-          } else if (event.type === 'status') this.publishEvent(session.id, run.id, 'status', event.text);
-          else if (event.type === 'tool')
-            this.publishEvent(session.id, run.id, 'tool', event.description, {
-              toolName: event.name,
-              status: event.status,
-              ...(event.toolCallId ? { toolCallId: `${input.runId}:${event.toolCallId}` } : {}),
-            });
-          else if (event.type === 'usage') {
-            eventInput = event.inputTokens ?? eventInput;
-            eventOutput = event.outputTokens ?? eventOutput;
-            eventCost = event.costUsd ?? eventCost;
-          }
+            },
+            controller.signal,
+          );
         },
-        controller.signal,
+        {
+          policy: this.retryPolicy(settings),
+          signal: controller.signal,
+          onRetry: (progress) => this.noteRetry(session.id, run, progress, task.title),
+        },
       );
       const inputTokens = eventInput ?? result.inputTokens,
         outputTokens = eventOutput ?? result.outputTokens,
@@ -1077,6 +1113,24 @@ export class Orchestrator {
       this.deciding.delete(approvalId);
     }
   }
+  private retryPolicy(settings: Settings): RetryPolicy {
+    const retries = settings.autoRetry === false ? 0 : DEFAULT_RETRY.retries;
+    return { ...DEFAULT_RETRY, ...this.retryOverrides, retries: this.retryOverrides?.retries ?? retries };
+  }
+  /** Records an automatic retry on the run and in the activity panel. */
+  private noteRetry(sessionId: string, run: Run, progress: RetryProgress, taskTitle?: string) {
+    run.retries = (run.retries ?? 0) + 1;
+    this.store.putRun(run);
+    this.emit({ type: 'run', run });
+    const seconds = Math.max(1, Math.round(progress.delayMs / 1000));
+    this.publishEvent(
+      sessionId,
+      run.id,
+      'retry',
+      `${taskTitle ? `${taskTitle}: ` : ''}${progress.reason}; tentando de novo (${progress.attempt}/${progress.of}) em ${seconds} s`,
+      { attempt: progress.attempt, of: progress.of, delayMs: progress.delayMs, error: progress.error.slice(0, 300) },
+    );
+  }
   async shutdown() {
     this.shuttingDown = true;
     const starting = [...this.starting.values()],
@@ -1088,6 +1142,19 @@ export class Orchestrator {
       ...active.map((item) => item.done).filter((p): p is Promise<void> => Boolean(p)),
     ]);
   }
+}
+/** Failure details for the UI: from withRetry when it ran, else classified here. */
+function failureOf(e: unknown): Run['failure'] {
+  const retry = (e as { retry?: Run['failure'] } | null)?.retry;
+  if (retry)
+    return {
+      kind: retry.kind,
+      reason: retry.reason,
+      retryable: retry.retryable,
+      ...(retry.why ? { why: retry.why } : {}),
+    };
+  const { kind, reason } = classifyFailure(e);
+  return { kind, reason, retryable: kind !== 'permanent' };
 }
 function errorText(e: unknown) {
   return e instanceof Error ? e.message : String(e);

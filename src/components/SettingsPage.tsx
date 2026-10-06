@@ -55,7 +55,8 @@ export function SettingsPage({
       | 'sandbox'
       | 'responseStyle'
       | 'approvalMode'
-      | 'updateCheck',
+      | 'updateCheck'
+      | 'autoRetry',
     value: string | boolean,
   ) => void;
   onSkill: (id: string, enabled: boolean) => void;
@@ -175,6 +176,21 @@ export function SettingsPage({
                 <option value="concise">Conciso</option>
                 <option value="balanced">Equilibrado</option>
               </select>
+            </div>
+            <div className="setting-row">
+              <div>
+                <strong>Repetir falhas temporárias</strong>
+                <span>Tempo esgotado ou conexão interrompida antes de qualquer resposta: até 2 novas tentativas.</span>
+              </div>
+              <button
+                className={`toggle ${data.settings.autoRetry !== false ? 'on' : ''}`}
+                role="switch"
+                aria-checked={data.settings.autoRetry !== false}
+                aria-label="Repetir falhas temporárias"
+                onClick={() => onSetting('autoRetry', data.settings.autoRetry === false)}
+              >
+                <span />
+              </button>
             </div>
           </section>
           <section className="settings-card">

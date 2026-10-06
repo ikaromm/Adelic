@@ -5,6 +5,8 @@ export interface RunActivity {
   events: RunEvent[];
   errors: RunEvent[];
   actions: RunEvent[];
+  /** Automatic retries, newest last. */
+  retries: RunEvent[];
 }
 
 /** Keep one visible record for tool lifecycle updates such as started/completed. */
@@ -43,14 +45,20 @@ export function activityForRun(runId: string, tasks: DelegatedTask[], events: Ru
   }
   return {
     tasks: runTasks,
-    events: runEvents.filter((event) => event.type !== 'error' && event.type !== 'tool'),
+    events: runEvents.filter((event) => event.type !== 'error' && event.type !== 'tool' && event.type !== 'retry'),
     errors: runEvents.filter((event) => event.type === 'error'),
     actions,
+    retries: runEvents.filter((event) => event.type === 'retry'),
   };
 }
 
 export function activityIsVisible(activity: RunActivity): boolean {
-  return activity.tasks.length > 0 || activity.actions.length > 0 || activity.errors.length > 0;
+  return (
+    activity.tasks.length > 0 ||
+    activity.actions.length > 0 ||
+    activity.errors.length > 0 ||
+    activity.retries.length > 0
+  );
 }
 
 export function commandTitle(toolName?: string): string {

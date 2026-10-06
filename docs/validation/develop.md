@@ -19,6 +19,8 @@
   - fluxo de login no navegador conferido por um relay.
 - **ai-memory nativo deste computador**, somente leitura: catálogo, busca e leitura iguais pelo novo parser.
 
+- **Repetição automática:** classificador, política, orquestrador (execução direta e tarefa delegada) e E2E cobertos; Kiro e Codex reais sem falha não fazem nenhuma repetição. Um timeout real não pôde ser provocado sob demanda. Detalhes em [repetição automática](../specs/retries.md).
+
 ## Não verificado
 
 - Claude Code e OpenCode: não estão instalados.

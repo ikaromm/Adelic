@@ -34,6 +34,7 @@ const codex: ProviderInfo = {
   capabilities: { fast: true, tools: true, approvals: true, cancel: true, reasoning: true },
 };
 const pending = new Map<string, (decision: 'approve' | 'deny') => void>();
+const flaky = new Map<string, number>();
 const sleep = (ms: number, signal: AbortSignal) =>
   new Promise<void>((done, fail) => {
     const timer = setTimeout(done, ms);
@@ -56,8 +57,23 @@ const providers: ProviderRegistry = {
       return { text: plan, stopReason: 'completed' };
     }
     const current = (input.prompt.split('Pedido atual:').at(-1) ?? input.prompt).split('\n\nMensagens recentes')[0];
-    const marker = ['[aprovar]', '[lento]', '[normal]'].find((m) => current.toLowerCase().includes(m)) ?? '';
+    const marker =
+      ['[aprovar]', '[lento]', '[normal]', '[instavel]', '[quebra]'].find((m) => current.toLowerCase().includes(m)) ??
+      '';
     try {
+      // Fails once with a timeout before any output, then answers: retried automatically.
+      if (marker === '[instavel]') {
+        const n = (flaky.get(input.sessionId) ?? 0) + 1;
+        flaky.set(input.sessionId, n);
+        if (n === 1) throw new Error('Kiro stream failed: The operation timed out.');
+        emit({ type: 'delta', text: 'Recuperado depois de uma nova tentativa.' });
+        return { text: 'Recuperado depois de uma nova tentativa.', stopReason: 'completed' };
+      }
+      // Fails after showing text: not repeated automatically, the UI offers "Tentar de novo".
+      if (marker === '[quebra]') {
+        emit({ type: 'delta', text: 'Começando a resposta…' });
+        throw new Error('stream failed');
+      }
       if (marker === '[aprovar]') {
         const id = `e2e-approval-${input.runId}`;
         const decision = new Promise<'approve' | 'deny'>((done) => pending.set(id, done));
@@ -98,7 +114,8 @@ const providers: ProviderRegistry = {
   async shutdown() {},
 };
 
-const { app } = createBackend(store, providers);
+// Short retry delays so the retry flows finish quickly.
+const { app } = createBackend(store, providers, undefined, undefined, { baseDelayMs: 150, maxDelayMs: 400 });
 const web = resolve(import.meta.dirname, '../../dist');
 // Fake GitHub "latest release" for the opt-in update check (ADELIC_RELEASES_URL points here).
 app.get('/e2e/releases/latest', (_req, res) =>

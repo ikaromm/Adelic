@@ -49,7 +49,7 @@ import { projectOrchestration } from '../shared/contracts';
 import { ActivityPage } from './components/ActivityPage';
 import { ConversationSearch } from './components/ConversationSearch';
 import { ProjectForm, type NewProject } from './components/ProjectForm';
-import { MessageCard, RunActivityPanel, RunEventRow } from './components/Chat';
+import { MessageCard, RetryNotice, RunActivityPanel, RunEventRow } from './components/Chat';
 import { SettingsPage } from './components/SettingsPage';
 import { SIDEBAR_LIMIT, SessionItem, SidebarNav, UpdateNotice, type Page } from './components/Sidebar';
 
@@ -383,6 +383,9 @@ export default function App() {
   const messages = currentDetail?.messages || [];
   const activityEvents = currentDetail?.events || [];
   const activityTasks = currentDetail?.tasks || [];
+  // "Tentar de novo" is offered only on the latest answer, and only if it failed.
+  const lastAssistant = [...messages].reverse().find((m) => m.role === 'assistant');
+  const lastFailedMessageId = lastAssistant?.status === 'failed' ? lastAssistant.id : undefined;
 
   const composerRef = useAutosize([composer, selectedSession, page, session?.activeRunId]);
   useEffect(() => {
@@ -759,7 +762,8 @@ export default function App() {
       | 'sandbox'
       | 'responseStyle'
       | 'approvalMode'
-      | 'updateCheck',
+      | 'updateCheck'
+      | 'autoRetry',
     value: string | boolean,
   ) {
     if (!data) return;
@@ -1160,6 +1164,18 @@ export default function App() {
                               'Adelic'
                             }
                           />
+                          {message.role === 'assistant' &&
+                            message.status === 'failed' &&
+                            message.id === lastFailedMessageId && (
+                              <RetryNotice
+                                run={currentDetail?.runs.find((run) => run.id === message.runId)}
+                                disabled={busy || Boolean(session.activeRunId)}
+                                onRetry={() => {
+                                  const prompt = messages.find((m) => m.role === 'user' && m.runId === message.runId);
+                                  if (prompt) void sendMessage(prompt.content);
+                                }}
+                              />
+                            )}
                           {message.role === 'user' && message.runId && (
                             <RunActivityPanel
                               runId={message.runId}

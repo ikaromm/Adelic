@@ -155,6 +155,10 @@ export interface Run {
   outputTokens?: number;
   costUsd?: number;
   error?: string;
+  /** Automatic retries that happened before the final outcome (0 or absent: none). */
+  retries?: number;
+  /** Set on failures: whether repeating may help, and why it was not repeated automatically. */
+  failure?: { kind: 'transient' | 'capacity' | 'permanent'; reason: string; retryable: boolean; why?: string };
 }
 export interface Approval {
   id: string;
@@ -169,12 +173,17 @@ export interface RunEvent {
   id: string;
   runId: string;
   sessionId: string;
-  type: 'status' | 'tool' | 'approval' | 'error';
+  type: 'status' | 'tool' | 'approval' | 'error' | 'retry';
   text: string;
   createdAt: string;
   toolName?: string;
   toolCallId?: string;
   status?: string;
+  /** Retry events: attempt number about to start, total attempts, wait and the error that caused it. */
+  attempt?: number;
+  of?: number;
+  delayMs?: number;
+  error?: string;
 }
 export interface Settings {
   defaultProviderId: ProviderId;
@@ -183,6 +192,8 @@ export interface Settings {
   sandbox: Sandbox;
   responseStyle: 'concise' | 'balanced';
   approvalMode?: 'auto-safe' | 'manual';
+  /** Automatic retry of transient failures that had no visible effect (default on). */
+  autoRetry?: boolean;
   /** Opt-in: check GitHub for a newer release (one anonymous request, never installs). */
   updateCheck?: boolean;
 }

@@ -1,4 +1,4 @@
-import { Activity, ChevronDown, Code2, FileText, LoaderCircle, Sparkles, X } from 'lucide-react';
+import { Activity, ChevronDown, Code2, FileText, LoaderCircle, RotateCcw, Sparkles, X } from 'lucide-react';
 import type { Bootstrap, DelegatedTask, Message, Run, SessionDetail } from '../../shared/contracts';
 import { CopyButton, Markdown } from '../Markdown';
 import { formatCost, formatDuration, formatTokens } from '../format';
@@ -102,7 +102,12 @@ export function RunActivityPanel({
     run && (run.inputTokens != null || run.outputTokens != null)
       ? formatTokens((run.inputTokens ?? 0) + (run.outputTokens ?? 0))
       : undefined;
+  const lastRetry = activity.retries.at(-1);
   const counts = [
+    running && lastRetry ? `tentativa ${lastRetry.attempt}/${lastRetry.of}` : '',
+    !running && activity.retries.length
+      ? `${activity.retries.length} ${activity.retries.length === 1 ? 'nova tentativa' : 'novas tentativas'}`
+      : '',
     activity.tasks.length ? `${activity.tasks.length} ${activity.tasks.length === 1 ? 'tarefa' : 'tarefas'}` : '',
     activity.actions.length ? `${activity.actions.length} ${activity.actions.length === 1 ? 'ação' : 'ações'}` : '',
     !running && totalTokens ? `${totalTokens} tokens` : '',
@@ -199,6 +204,13 @@ export function RunActivityPanel({
                 </div>
               ),
             )}
+            {activity.retries.map((event) => (
+              <div className="activity-event retry" key={event.id} title={event.error}>
+                <RotateCcw size={13} aria-hidden="true" />
+                <span>{event.text}</span>
+                <time>{timeLabel(event.createdAt)}</time>
+              </div>
+            ))}
             {activity.events.map((event) => (
               <div className="activity-event" key={event.id}>
                 <Activity size={13} aria-hidden="true" />
@@ -214,10 +226,40 @@ export function RunActivityPanel({
             {icon}
           </span>
           <span className="activity-headline">{headline}</span>
-          {running && <span className="activity-counts">Preparando resposta</span>}
+          {running && (
+            <span className="activity-counts">
+              {lastRetry ? `tentativa ${lastRetry.attempt}/${lastRetry.of}` : 'Preparando resposta'}
+            </span>
+          )}
         </div>
       )}
     </section>
+  );
+}
+
+/** Shown under a failed answer: why it failed, whether retrying may help, and a button. */
+export function RetryNotice({ run, disabled, onRetry }: { run?: Run; disabled: boolean; onRetry: () => void }) {
+  const failure = run?.failure;
+  const retries = run?.retries ?? 0;
+  const detail = [
+    failure?.reason && `Motivo: ${failure.reason}`,
+    retries > 0 && `${retries} ${retries === 1 ? 'nova tentativa automática' : 'novas tentativas automáticas'}`,
+    failure?.why,
+  ]
+    .filter(Boolean)
+    .join(' · ');
+  return (
+    <div className={`retry-notice ${failure?.retryable === false ? 'permanent' : ''}`} role="status">
+      <span>
+        {failure?.retryable === false
+          ? 'Repetir provavelmente não resolve; confira a configuração ou o pedido.'
+          : 'Falha temporária. Você pode tentar de novo.'}
+        {detail && <small>{detail}</small>}
+      </span>
+      <button type="button" className="secondary-button" onClick={onRetry} disabled={disabled}>
+        <RotateCcw size={14} /> Tentar de novo
+      </button>
+    </div>
   );
 }
 

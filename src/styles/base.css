@@ -479,3 +479,42 @@ kbd {
     scroll-behavior: auto !important;
   }
 }
+
+/* Render-error fallback (ErrorBoundary). */
+.error-boundary {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-width: 640px;
+  margin: 48px auto;
+  padding: 20px;
+  border: 1px solid var(--danger-border);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--red) 8%, var(--surface));
+  color: var(--text);
+}
+.error-boundary-full {
+  margin: 12vh auto;
+}
+.error-boundary h2 {
+  font-size: var(--text-lg);
+}
+.error-boundary p {
+  color: var(--text-secondary);
+}
+.error-boundary pre {
+  overflow: auto;
+  max-height: 160px;
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--code-bg);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  white-space: pre-wrap;
+}
+.error-boundary-actions {
+  display: flex;
+  gap: 8px;
+}

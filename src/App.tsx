@@ -34,6 +34,7 @@ import type {
 import { api } from './api';
 import SharedMemoryPage from './MemoryPage';
 import { BrandMark } from './BrandMark';
+import { ErrorBoundary } from './ErrorBoundary';
 import { bootstrapSelection, sidebarSessions } from './selection';
 import { compatibleThinking, supportedThinking, thinkingLabel } from './reasoning';
 import { ChoiceMenu, ConversationMenu, ModelMenu } from './ComposerMenus';
@@ -1148,400 +1149,414 @@ export default function App() {
             {notice && <p className="error-text">{notice}</p>}
           </div>
         )}
-        {data &&
-          page === 'chat' &&
-          (!session ? (
-            <div className="welcome-view">
-              <div className="welcome-orb" aria-hidden="true">
-                <Sparkles size={22} />
+        {data && page === 'chat' && (
+          <ErrorBoundary scope="a conversa" resetKey={session?.id ?? 'welcome'}>
+            {!session ? (
+              <div className="welcome-view">
+                <div className="welcome-orb" aria-hidden="true">
+                  <Sparkles size={22} />
+                </div>
+                <h1>O que vamos construir hoje?</h1>
+                <p>Comece sem uma pasta ou escolha um projeto depois.</p>
+                <button className="primary-button" onClick={() => void newConversation()} disabled={busy}>
+                  <Plus size={16} /> Começar uma conversa
+                </button>
+                <div className="welcome-suggestions">
+                  {[
+                    'Resuma uma ideia para mim',
+                    'Encontre um caminho para começar',
+                    'Revise uma ideia que estou explorando',
+                  ].map((suggestion) => (
+                    <button key={suggestion} onClick={() => void startSuggestedPrompt(suggestion)} disabled={busy}>
+                      <span>{suggestion}</span>
+                      <ArrowUp size={14} aria-hidden="true" />
+                    </button>
+                  ))}
+                </div>
               </div>
-              <h1>O que vamos construir hoje?</h1>
-              <p>Comece sem uma pasta ou escolha um projeto depois.</p>
-              <button className="primary-button" onClick={() => void newConversation()} disabled={busy}>
-                <Plus size={16} /> Começar uma conversa
-              </button>
-              <div className="welcome-suggestions">
-                {[
-                  'Resuma uma ideia para mim',
-                  'Encontre um caminho para começar',
-                  'Revise uma ideia que estou explorando',
-                ].map((suggestion) => (
-                  <button key={suggestion} onClick={() => void startSuggestedPrompt(suggestion)} disabled={busy}>
-                    <span>{suggestion}</span>
-                    <ArrowUp size={14} aria-hidden="true" />
-                  </button>
-                ))}
-              </div>
-            </div>
-          ) : (
-            <div className="chat-view">
-              <section
-                className="conversation"
-                aria-label="Conversa"
-                ref={conversationRef}
-                onScroll={onConversationScroll}
-              >
-                <div className="message-column">
-                  {messages.length === 0 && !stream && (
-                    <div className="conversation-empty">
-                      <div className="empty-icon" aria-hidden="true">
-                        <MessageSquare size={18} />
+            ) : (
+              <div className="chat-view">
+                <section
+                  className="conversation"
+                  aria-label="Conversa"
+                  ref={conversationRef}
+                  onScroll={onConversationScroll}
+                >
+                  <div className="message-column">
+                    {messages.length === 0 && !stream && (
+                      <div className="conversation-empty">
+                        <div className="empty-icon" aria-hidden="true">
+                          <MessageSquare size={18} />
+                        </div>
+                        <h2>Uma boa conversa começa com uma pergunta.</h2>
+                        <p>
+                          {conversationProject ? (
+                            <>
+                              O agente usa o contexto de <strong>{conversationProject.name}</strong> quando necessário.
+                            </>
+                          ) : (
+                            'Converse livremente ou vincule um projeto no menu de projeto e modo, junto ao campo de mensagem.'
+                          )}
+                        </p>
+                        <div className="prompt-chips">
+                          {(conversationProject
+                            ? [
+                                'Explique a estrutura deste projeto',
+                                'Quais são os próximos passos?',
+                                'Me ajude a resolver um problema',
+                              ]
+                            : [
+                                'Explique o que é recursão',
+                                'Me ajude a organizar uma ideia',
+                                'Me ajude a resolver um problema',
+                              ]
+                          ).map((text) => (
+                            <button key={text} onClick={() => void sendMessage(text)}>
+                              <span>{text}</span>
+                              <ArrowUp size={13} aria-hidden="true" />
+                            </button>
+                          ))}
+                        </div>
                       </div>
-                      <h2>Uma boa conversa começa com uma pergunta.</h2>
-                      <p>
-                        {conversationProject ? (
-                          <>
-                            O agente usa o contexto de <strong>{conversationProject.name}</strong> quando necessário.
-                          </>
-                        ) : (
-                          'Converse livremente ou vincule um projeto no menu de projeto e modo, junto ao campo de mensagem.'
-                        )}
-                      </p>
-                      <div className="prompt-chips">
-                        {(conversationProject
-                          ? [
-                              'Explique a estrutura deste projeto',
-                              'Quais são os próximos passos?',
-                              'Me ajude a resolver um problema',
-                            ]
-                          : [
-                              'Explique o que é recursão',
-                              'Me ajude a organizar uma ideia',
-                              'Me ajude a resolver um problema',
-                            ]
-                        ).map((text) => (
-                          <button key={text} onClick={() => void sendMessage(text)}>
-                            <span>{text}</span>
-                            <ArrowUp size={13} aria-hidden="true" />
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                  {messages
-                    .filter((message) => message.id !== stream?.messageId)
-                    .map((message) => (
-                      <div className="timeline-message" key={message.id}>
-                        <MessageCard
-                          message={message}
-                          providerName={
-                            data.providers.find((p) => p.id === (message.providerId || session.providerId))?.name ||
-                            'Adelic'
-                          }
-                        />
-                        {message.role === 'user' && message.runId && (
-                          <RunActivityPanel
-                            runId={message.runId}
-                            run={currentDetail?.runs.find((run) => run.id === message.runId)}
-                            tasks={activityTasks}
-                            events={activityEvents}
-                            providers={data.providers}
-                            active={session.activeRunId === message.runId}
-                            taskOutputs={taskOutputs}
-                            loadingTaskOutputs={loadingTaskOutputs}
-                            onLoadTaskOutput={loadTaskOutput}
+                    )}
+                    {messages
+                      .filter((message) => message.id !== stream?.messageId)
+                      .map((message) => (
+                        <div className="timeline-message" key={message.id}>
+                          <MessageCard
+                            message={message}
+                            providerName={
+                              data.providers.find((p) => p.id === (message.providerId || session.providerId))?.name ||
+                              'Adelic'
+                            }
                           />
-                        )}
-                      </div>
-                    ))}
-                  {stream && (
-                    <div className="message-row assistant-row streaming">
-                      <div className="message-author">
-                        <span className="assistant-glyph" aria-hidden="true">
-                          <Sparkles size={12} />
-                        </span>
-                        <strong>{provider?.name || 'Agente'}</strong>
-                        <span className="streaming-label">
-                          <i aria-hidden="true" />
-                          escrevendo
-                        </span>
-                      </div>
-                      {stream.content ? (
-                        <Markdown>{stream.content}</Markdown>
-                      ) : (
-                        <div className="markdown-content">
-                          <span className="typing-caret" aria-hidden="true" />
+                          {message.role === 'user' && message.runId && (
+                            <RunActivityPanel
+                              runId={message.runId}
+                              run={currentDetail?.runs.find((run) => run.id === message.runId)}
+                              tasks={activityTasks}
+                              events={activityEvents}
+                              providers={data.providers}
+                              active={session.activeRunId === message.runId}
+                              taskOutputs={taskOutputs}
+                              loadingTaskOutputs={loadingTaskOutputs}
+                              onLoadTaskOutput={loadTaskOutput}
+                            />
+                          )}
                         </div>
-                      )}
-                    </div>
-                  )}
-                  {activityEvents
-                    .filter(
-                      (item) =>
-                        item.type === 'error' &&
-                        !messages.some((message) => message.role === 'user' && message.runId === item.runId),
-                    )
-                    .map((item) => (
-                      <RunEventRow key={item.id} event={item} />
-                    ))}
-                  {currentDetail?.approvals
-                    .filter((item) => item.status === 'pending')
-                    .map((approval) => (
-                      <div
-                        className={`approval-card ${approval.kind}`}
-                        key={approval.id}
-                        role="region"
-                        aria-label={approval.title || 'Aprovação necessária'}
-                      >
-                        <div className="approval-icon" aria-hidden="true">
-                          <Shield size={16} />
-                        </div>
-                        <div className="approval-copy">
-                          <strong>{approval.title || 'Aprovação necessária'}</strong>
-                          <p>{approval.detail}</p>
-                          <span>
-                            {approval.kind === 'command'
-                              ? 'Comando'
-                              : approval.kind === 'file'
-                                ? 'Arquivo'
-                                : 'Ferramenta'}{' '}
-                            · confirme esta ação para continuar
+                      ))}
+                    {stream && (
+                      <div className="message-row assistant-row streaming">
+                        <div className="message-author">
+                          <span className="assistant-glyph" aria-hidden="true">
+                            <Sparkles size={12} />
+                          </span>
+                          <strong>{provider?.name || 'Agente'}</strong>
+                          <span className="streaming-label">
+                            <i aria-hidden="true" />
+                            escrevendo
                           </span>
                         </div>
-                        <div className="approval-actions">
-                          <button
-                            className="secondary-button"
-                            onClick={() =>
-                              void api
-                                .approve(approval.id, 'deny')
-                                .then(() => refreshDetail(session.id))
-                                .catch((e: Error) => setNotice(e.message))
-                            }
-                          >
-                            Negar
-                          </button>
-                          <button
-                            className="primary-button"
-                            onClick={() =>
-                              void api
-                                .approve(approval.id, 'approve')
-                                .then(() => refreshDetail(session.id))
-                                .catch((e: Error) => setNotice(e.message))
-                            }
-                          >
-                            <Check size={14} /> Aprovar
-                          </button>
-                        </div>
+                        {stream.content ? (
+                          <Markdown>{stream.content}</Markdown>
+                        ) : (
+                          <div className="markdown-content">
+                            <span className="typing-caret" aria-hidden="true" />
+                          </div>
+                        )}
                       </div>
-                    ))}
-                </div>
-              </section>
-              <div className="composer-wrap">
-                {showJump && (
-                  <button
-                    type="button"
-                    className="jump-to-latest"
-                    aria-label="Ir para a mensagem mais recente"
-                    title="Ir para a mensagem mais recente"
-                    onClick={scrollToLatest}
-                  >
-                    <ArrowDown size={16} />
-                  </button>
-                )}
-                {notice && (
-                  <div className="inline-notice error-notice" role="alert">
-                    <span>{notice}</span>
-                    <button className="icon-button" onClick={() => setNotice('')} aria-label="Dispensar aviso">
-                      <X size={15} />
-                    </button>
-                  </div>
-                )}
-                <div className={`composer-box ${session.activeRunId ? 'is-running' : ''}`}>
-                  <textarea
-                    ref={composerRef}
-                    className="composer-input"
-                    value={composer}
-                    onChange={(event) => setDrafts((current) => ({ ...current, [session.id]: event.target.value }))}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
-                        event.preventDefault();
-                        void sendMessage();
-                      }
-                    }}
-                    placeholder={
-                      session.activeRunId ? 'Executando… cancele para enviar outra mensagem.' : 'Escreva uma mensagem…'
-                    }
-                    aria-label="Mensagem para o agente"
-                    rows={1}
-                    disabled={Boolean(session.activeRunId)}
-                  />
-                  <div className="composer-toolbar">
-                    <div className="composer-controls">
-                      <ModelMenu
-                        providers={data.providers}
-                        providerId={session.providerId}
-                        sessionId={session.id}
-                        modelId={session.model}
-                        disabled={busy || Boolean(session.activeRunId)}
-                        onChange={(providerId, model) =>
-                          void changeSession(
-                            providerId === session.providerId
-                              ? { model: model || null }
-                              : { providerId, model: model || null },
-                          )
-                        }
-                      />
-                      <ChoiceMenu
-                        label="Thinking para próximas mensagens"
-                        icon={<Brain size={14} />}
-                        value={session.thinking || 'auto'}
-                        options={thinkingOptions.map((value) => ({
-                          value,
-                          label: thinkingLabel(value),
-                          detail:
-                            value === 'auto'
-                              ? thinkingOptions.length === 1
-                                ? reasoningUnavailable
-                                  ? 'Este agente não oferece ajuste. O esforço Automático fica a cargo do runtime.'
-                                  : 'O catálogo deste modelo não anuncia níveis adicionais; Automático usa o padrão do runtime.'
-                                : 'Escolhido pela rota de cada pedido.'
-                              : undefined,
-                        }))}
-                        hint={
-                          thinkingOptions.length > 1
-                            ? 'Define o esforço de raciocínio das próximas mensagens. Os níveis seguem o catálogo do modelo escolhido.'
-                            : undefined
-                        }
-                        disabled={busy || Boolean(session.activeRunId)}
-                        onChange={(value) => void changeSession({ thinking: value })}
-                      />
-                      <ChoiceMenu
-                        label="Permissões"
-                        icon={<Shield size={14} />}
-                        width={340}
-                        value={`${data.settings.sandbox}|${data.settings.approvalMode || 'auto-safe'}`}
-                        disabled={settingsPending}
-                        options={[
-                          {
-                            value: 'read-only|auto-safe',
-                            label: 'Leitura · Auto',
-                            detail: 'Confirmação automática quando disponível.',
-                          },
-                          {
-                            value: 'read-only|manual',
-                            label: 'Leitura · Manual',
-                            detail: 'Pede confirmação quando o agente oferece essa opção.',
-                          },
-                          {
-                            value: 'workspace-write|auto-safe',
-                            label: 'Escrita · Auto',
-                            detail: 'Alterações permitidas no projeto.',
-                          },
-                          {
-                            value: 'workspace-write|manual',
-                            label: 'Escrita · Manual',
-                            detail: 'Pede confirmação quando o agente oferece essa opção.',
-                          },
-                        ]}
-                        hint={
-                          <>
-                            O Codex aprova leituras reconhecidas. No Kiro, os pedidos ainda exigem confirmação; Claude
-                            não oferece confirmação pelo Adelic. Leituras e alterações feitas sem solicitação e scripts
-                            podem alterar ou excluir arquivos.
-                          </>
-                        }
-                        onChange={(value) => {
-                          const [sandbox, approvalMode] = value.split('|') as [
-                            'read-only' | 'workspace-write',
-                            'auto-safe' | 'manual',
-                          ];
-                          void updatePermissions(sandbox, approvalMode);
-                        }}
-                      />
-                      <ConversationMenu
-                        projects={data.projects}
-                        projectId={session.projectId}
-                        mode={session.mode}
-                        disabled={busy || Boolean(session.activeRunId)}
-                        context={conversationContext}
-                        onProject={(projectId) => void changeSession({ projectId })}
-                        onMode={(mode) => void changeSession({ mode })}
-                        onConfigure={
-                          conversationProject
-                            ? () => {
-                                selectProject(conversationProject.id);
-                                setPage('settings');
-                                setSidebarOpen(false);
+                    )}
+                    {activityEvents
+                      .filter(
+                        (item) =>
+                          item.type === 'error' &&
+                          !messages.some((message) => message.role === 'user' && message.runId === item.runId),
+                      )
+                      .map((item) => (
+                        <RunEventRow key={item.id} event={item} />
+                      ))}
+                    {currentDetail?.approvals
+                      .filter((item) => item.status === 'pending')
+                      .map((approval) => (
+                        <div
+                          className={`approval-card ${approval.kind}`}
+                          key={approval.id}
+                          role="region"
+                          aria-label={approval.title || 'Aprovação necessária'}
+                        >
+                          <div className="approval-icon" aria-hidden="true">
+                            <Shield size={16} />
+                          </div>
+                          <div className="approval-copy">
+                            <strong>{approval.title || 'Aprovação necessária'}</strong>
+                            <p>{approval.detail}</p>
+                            <span>
+                              {approval.kind === 'command'
+                                ? 'Comando'
+                                : approval.kind === 'file'
+                                  ? 'Arquivo'
+                                  : 'Ferramenta'}{' '}
+                              · confirme esta ação para continuar
+                            </span>
+                          </div>
+                          <div className="approval-actions">
+                            <button
+                              className="secondary-button"
+                              onClick={() =>
+                                void api
+                                  .approve(approval.id, 'deny')
+                                  .then(() => refreshDetail(session.id))
+                                  .catch((e: Error) => setNotice(e.message))
                               }
-                            : undefined
-                        }
-                      />
-                    </div>
-                    <button
-                      className={`send-button ${canCancelCurrentSend ? 'stop' : ''}`}
-                      aria-label={canCancelCurrentSend ? 'Cancelar execução' : 'Enviar mensagem'}
-                      title={canCancelCurrentSend ? 'Cancelar execução' : 'Enviar (Enter)'}
-                      onClick={() =>
-                        session.activeRunId
-                          ? void api
-                              .cancel(session.id)
-                              .then(() => refreshDetail(session.id))
-                              .catch((e: Error) => setNotice(e.message))
-                          : pendingSendForSession
-                            ? void cancelPendingSend(session.id)
-                            : void sendMessage()
-                      }
-                      disabled={canCancelCurrentSend ? false : !composer.trim() || busy || settingsPending}
-                    >
-                      {canCancelCurrentSend ? (
-                        <Square size={12} fill="currentColor" />
-                      ) : busy ? (
-                        <LoaderCircle className="spin" size={16} />
-                      ) : (
-                        <ArrowUp size={17} />
-                      )}
-                    </button>
+                            >
+                              Negar
+                            </button>
+                            <button
+                              className="primary-button"
+                              onClick={() =>
+                                void api
+                                  .approve(approval.id, 'approve')
+                                  .then(() => refreshDetail(session.id))
+                                  .catch((e: Error) => setNotice(e.message))
+                              }
+                            >
+                              <Check size={14} /> Aprovar
+                            </button>
+                          </div>
+                        </div>
+                      ))}
                   </div>
-                  {reasoningUnavailable && (
-                    <span className="visually-hidden">
-                      Este agente não oferece ajustes de Thinking; somente Automático está disponível.
-                    </span>
+                </section>
+                <div className="composer-wrap">
+                  {showJump && (
+                    <button
+                      type="button"
+                      className="jump-to-latest"
+                      aria-label="Ir para a mensagem mais recente"
+                      title="Ir para a mensagem mais recente"
+                      onClick={scrollToLatest}
+                    >
+                      <ArrowDown size={16} />
+                    </button>
                   )}
+                  {notice && (
+                    <div className="inline-notice error-notice" role="alert">
+                      <span>{notice}</span>
+                      <button className="icon-button" onClick={() => setNotice('')} aria-label="Dispensar aviso">
+                        <X size={15} />
+                      </button>
+                    </div>
+                  )}
+                  <div className={`composer-box ${session.activeRunId ? 'is-running' : ''}`}>
+                    <textarea
+                      ref={composerRef}
+                      className="composer-input"
+                      value={composer}
+                      onChange={(event) => setDrafts((current) => ({ ...current, [session.id]: event.target.value }))}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+                          event.preventDefault();
+                          void sendMessage();
+                        }
+                      }}
+                      placeholder={
+                        session.activeRunId
+                          ? 'Executando… cancele para enviar outra mensagem.'
+                          : 'Escreva uma mensagem…'
+                      }
+                      aria-label="Mensagem para o agente"
+                      rows={1}
+                      disabled={Boolean(session.activeRunId)}
+                    />
+                    <div className="composer-toolbar">
+                      <div className="composer-controls">
+                        <ModelMenu
+                          providers={data.providers}
+                          providerId={session.providerId}
+                          sessionId={session.id}
+                          modelId={session.model}
+                          disabled={busy || Boolean(session.activeRunId)}
+                          onChange={(providerId, model) =>
+                            void changeSession(
+                              providerId === session.providerId
+                                ? { model: model || null }
+                                : { providerId, model: model || null },
+                            )
+                          }
+                        />
+                        <ChoiceMenu
+                          label="Thinking para próximas mensagens"
+                          icon={<Brain size={14} />}
+                          value={session.thinking || 'auto'}
+                          options={thinkingOptions.map((value) => ({
+                            value,
+                            label: thinkingLabel(value),
+                            detail:
+                              value === 'auto'
+                                ? thinkingOptions.length === 1
+                                  ? reasoningUnavailable
+                                    ? 'Este agente não oferece ajuste. O esforço Automático fica a cargo do runtime.'
+                                    : 'O catálogo deste modelo não anuncia níveis adicionais; Automático usa o padrão do runtime.'
+                                  : 'Escolhido pela rota de cada pedido.'
+                                : undefined,
+                          }))}
+                          hint={
+                            thinkingOptions.length > 1
+                              ? 'Define o esforço de raciocínio das próximas mensagens. Os níveis seguem o catálogo do modelo escolhido.'
+                              : undefined
+                          }
+                          disabled={busy || Boolean(session.activeRunId)}
+                          onChange={(value) => void changeSession({ thinking: value })}
+                        />
+                        <ChoiceMenu
+                          label="Permissões"
+                          icon={<Shield size={14} />}
+                          width={340}
+                          value={`${data.settings.sandbox}|${data.settings.approvalMode || 'auto-safe'}`}
+                          disabled={settingsPending}
+                          options={[
+                            {
+                              value: 'read-only|auto-safe',
+                              label: 'Leitura · Auto',
+                              detail: 'Confirmação automática quando disponível.',
+                            },
+                            {
+                              value: 'read-only|manual',
+                              label: 'Leitura · Manual',
+                              detail: 'Pede confirmação quando o agente oferece essa opção.',
+                            },
+                            {
+                              value: 'workspace-write|auto-safe',
+                              label: 'Escrita · Auto',
+                              detail: 'Alterações permitidas no projeto.',
+                            },
+                            {
+                              value: 'workspace-write|manual',
+                              label: 'Escrita · Manual',
+                              detail: 'Pede confirmação quando o agente oferece essa opção.',
+                            },
+                          ]}
+                          hint={
+                            <>
+                              O Codex aprova leituras reconhecidas. No Kiro, os pedidos ainda exigem confirmação; Claude
+                              não oferece confirmação pelo Adelic. Leituras e alterações feitas sem solicitação e
+                              scripts podem alterar ou excluir arquivos.
+                            </>
+                          }
+                          onChange={(value) => {
+                            const [sandbox, approvalMode] = value.split('|') as [
+                              'read-only' | 'workspace-write',
+                              'auto-safe' | 'manual',
+                            ];
+                            void updatePermissions(sandbox, approvalMode);
+                          }}
+                        />
+                        <ConversationMenu
+                          projects={data.projects}
+                          projectId={session.projectId}
+                          mode={session.mode}
+                          disabled={busy || Boolean(session.activeRunId)}
+                          context={conversationContext}
+                          onProject={(projectId) => void changeSession({ projectId })}
+                          onMode={(mode) => void changeSession({ mode })}
+                          onConfigure={
+                            conversationProject
+                              ? () => {
+                                  selectProject(conversationProject.id);
+                                  setPage('settings');
+                                  setSidebarOpen(false);
+                                }
+                              : undefined
+                          }
+                        />
+                      </div>
+                      <button
+                        className={`send-button ${canCancelCurrentSend ? 'stop' : ''}`}
+                        aria-label={canCancelCurrentSend ? 'Cancelar execução' : 'Enviar mensagem'}
+                        title={canCancelCurrentSend ? 'Cancelar execução' : 'Enviar (Enter)'}
+                        onClick={() =>
+                          session.activeRunId
+                            ? void api
+                                .cancel(session.id)
+                                .then(() => refreshDetail(session.id))
+                                .catch((e: Error) => setNotice(e.message))
+                            : pendingSendForSession
+                              ? void cancelPendingSend(session.id)
+                              : void sendMessage()
+                        }
+                        disabled={canCancelCurrentSend ? false : !composer.trim() || busy || settingsPending}
+                      >
+                        {canCancelCurrentSend ? (
+                          <Square size={12} fill="currentColor" />
+                        ) : busy ? (
+                          <LoaderCircle className="spin" size={16} />
+                        ) : (
+                          <ArrowUp size={17} />
+                        )}
+                      </button>
+                    </div>
+                    {reasoningUnavailable && (
+                      <span className="visually-hidden">
+                        Este agente não oferece ajustes de Thinking; somente Automático está disponível.
+                      </span>
+                    )}
+                  </div>
                 </div>
               </div>
-            </div>
-          ))}
+            )}
+          </ErrorBoundary>
+        )}
 
-        {data && page === 'activity' && <ActivityPage runs={data.runs} providers={data.providers} />}
-        {data && memoryVisited && <SharedMemoryPage activated={memoryVisited} visible={page === 'memory'} />}
+        {data && page === 'activity' && (
+          <ErrorBoundary scope="a atividade" resetKey={page}>
+            <ActivityPage runs={data.runs} providers={data.providers} />
+          </ErrorBoundary>
+        )}
+        {data && memoryVisited && (
+          <ErrorBoundary scope="a memória" resetKey={page}>
+            <SharedMemoryPage activated={memoryVisited} visible={page === 'memory'} />
+          </ErrorBoundary>
+        )}
 
         {data && page === 'settings' && (
-          <SettingsPage
-            key={project?.id || 'global'}
-            data={data}
-            project={project}
-            coordination={coordination}
-            graphifyStatus={graphifyStatus}
-            graphQueryResult={graphQueryResult}
-            projectQuery={projectQuery}
-            projectBusy={projectBusy}
-            coordinatorProviderId={
-              session && session.projectId === project?.id ? session.providerId : data.settings.defaultProviderId
-            }
-            onProjectQueryChange={setProjectQuery}
-            onProjectQuery={queryProjectGraph}
-            onOrchestration={(patch) => project && void changeProjectOrchestration(project.id, patch)}
-            onGraphifyEnabled={(enabled) => project && void changeGraphifyEnabled(project.id, enabled)}
-            onIndexGraphify={() => project && void indexProject(project.id)}
-            onRefreshProject={() => project && void refreshProjectViews(project.id)}
-            onProjectMemoryScope={(workspace, memoryProject) =>
-              project && void changeProjectMemoryScope(project.id, workspace, memoryProject)
-            }
-            onSetting={updateSetting}
-            onSkill={async (id, enabled) => {
-              try {
-                const result = await api.skill(id, enabled);
-                setData((current) =>
-                  current
-                    ? { ...current, skills: current.skills.map((skill) => (skill.id === id ? result : skill)) }
-                    : current,
-                );
-              } catch (error) {
-                setNotice((error as Error).message);
+          <ErrorBoundary scope="as configurações" resetKey={project?.id || 'global'}>
+            <SettingsPage
+              key={project?.id || 'global'}
+              data={data}
+              project={project}
+              coordination={coordination}
+              graphifyStatus={graphifyStatus}
+              graphQueryResult={graphQueryResult}
+              projectQuery={projectQuery}
+              projectBusy={projectBusy}
+              coordinatorProviderId={
+                session && session.projectId === project?.id ? session.providerId : data.settings.defaultProviderId
               }
-            }}
-            notice={notice}
-          />
+              onProjectQueryChange={setProjectQuery}
+              onProjectQuery={queryProjectGraph}
+              onOrchestration={(patch) => project && void changeProjectOrchestration(project.id, patch)}
+              onGraphifyEnabled={(enabled) => project && void changeGraphifyEnabled(project.id, enabled)}
+              onIndexGraphify={() => project && void indexProject(project.id)}
+              onRefreshProject={() => project && void refreshProjectViews(project.id)}
+              onProjectMemoryScope={(workspace, memoryProject) =>
+                project && void changeProjectMemoryScope(project.id, workspace, memoryProject)
+              }
+              onSetting={updateSetting}
+              onSkill={async (id, enabled) => {
+                try {
+                  const result = await api.skill(id, enabled);
+                  setData((current) =>
+                    current
+                      ? { ...current, skills: current.skills.map((skill) => (skill.id === id ? result : skill)) }
+                      : current,
+                  );
+                } catch (error) {
+                  setNotice((error as Error).message);
+                }
+              }}
+              notice={notice}
+            />
+          </ErrorBoundary>
         )}
       </main>
 

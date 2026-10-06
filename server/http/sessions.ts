@@ -1,9 +1,18 @@
 import { Router } from 'express';
 import { randomUUID } from 'node:crypto';
 import type { ProviderInfo, Session } from '../../shared/contracts.js';
-import { validReasoningEffort, supportsEffort } from '../../shared/reasoning.js';
-import { error, errorStatus, message, str } from './common.js';
-import { modes, validProviders } from './validation.js';
+import { supportsEffort } from '../../shared/reasoning.js';
+import {
+  ApprovalDecisionSchema,
+  CreateSessionSchema,
+  PatchSessionSchema,
+  SendMessageSchema,
+  parseBody,
+  text,
+} from '../../shared/schemas.js';
+import { error, errorStatus, message } from './common.js';
+
+const titleSchema = text(160);
 import type { BackendContext } from './context.js';
 
 function knownModel(catalog: ProviderInfo[], providerId: string, model: string) {
@@ -14,23 +23,13 @@ function knownModel(catalog: ProviderInfo[], providerId: string, model: string) 
 export function sessionsRoutes({ store, orchestrator, providerList }: BackendContext) {
   const app = Router();
   app.post('/api/sessions', async (req, res) => {
-    const rawProjectId = req.body?.projectId;
-    if (rawProjectId !== undefined && rawProjectId !== null && typeof rawProjectId !== 'string')
-      return error(res, 400, 'projectId inválido');
-    const projectId = rawProjectId === null ? undefined : str(rawProjectId);
-    if (rawProjectId !== undefined && rawProjectId !== null && !projectId) return error(res, 400, 'projectId inválido');
+    const parsed = parseBody(CreateSessionSchema, req.body, 'Conversa inválida');
+    if (!parsed.ok) return error(res, 400, parsed.message);
+    const { projectId, model, thinking } = parsed.data;
     const project = projectId ? store.getProject(projectId) : undefined;
     if (projectId && !project) return error(res, 404, 'Projeto não encontrado');
-    const providerId =
-      req.body?.providerId === undefined ? store.getSettings()!.defaultProviderId : req.body.providerId;
-    if (!validProviders.has(providerId)) return error(res, 400, 'providerId inválido');
-    const mode = req.body?.mode === undefined ? store.getSettings()!.defaultMode : req.body.mode;
-    if (!modes.has(mode)) return error(res, 400, 'mode inválido');
-    const model = req.body?.model === undefined ? undefined : str(req.body.model, 120);
-    if (req.body?.model !== undefined && !model) return error(res, 400, 'model inválido');
-    const thinking = req.body?.thinking === undefined ? undefined : req.body.thinking;
-    if (thinking !== undefined && thinking !== 'auto' && !validReasoningEffort(thinking))
-      return error(res, 400, 'thinking inválido');
+    const providerId = parsed.data.providerId ?? store.getSettings()!.defaultProviderId;
+    const mode = parsed.data.mode ?? store.getSettings()!.defaultMode;
     const needsCatalog = Boolean(model) || (thinking !== undefined && thinking !== 'auto');
     const catalog = needsCatalog ? await providerList() : undefined;
     if (model && catalog && !knownModel(catalog, providerId, model))
@@ -49,7 +48,7 @@ export function sessionsRoutes({ store, orchestrator, providerList }: BackendCon
     const s: Session = {
       id: randomUUID(),
       projectId: project?.id ?? null,
-      title: str(req.body?.title, 160) || 'Nova conversa',
+      title: titleSchema.safeParse(req.body?.title).data || 'Nova conversa',
       providerId,
       model,
       mode,
@@ -70,33 +69,25 @@ export function sessionsRoutes({ store, orchestrator, providerList }: BackendCon
     if (!original) return error(res, 404, 'Conversa não encontrada');
     if (original.activeRunId || orchestrator.isActive(original.id))
       return error(res, 409, 'Não é possível alterar uma conversa em execução');
-    const snapshot = structuredClone(original),
-      body = req.body || {};
+    const snapshot = structuredClone(original);
+    // Field order in PatchSessionSchema matches the previous checks, so the first error is unchanged.
+    const parsed = parseBody(PatchSessionSchema, req.body, 'Conversa inválida');
+    if (!parsed.ok) return error(res, 400, parsed.message);
+    const body = parsed.data;
     let projectId = snapshot.projectId;
     if (body.projectId !== undefined) {
-      if (body.projectId !== null && typeof body.projectId !== 'string') return error(res, 400, 'projectId inválido');
-      const value = body.projectId === null ? undefined : str(body.projectId);
-      if (body.projectId !== null && !value) return error(res, 400, 'projectId inválido');
-      if (value && !store.getProject(value)) return error(res, 404, 'Projeto não encontrado');
-      projectId = value ?? null;
+      if (body.projectId && !store.getProject(body.projectId)) return error(res, 404, 'Projeto não encontrado');
+      projectId = body.projectId;
     }
-    const title = body.title === undefined ? snapshot.title : str(body.title, 160);
-    if (!title) return error(res, 400, 'title inválido');
-    const providerId = body.providerId === undefined ? snapshot.providerId : body.providerId;
-    if (!validProviders.has(providerId)) return error(res, 400, 'providerId inválido');
+    const title = body.title ?? snapshot.title;
+    const providerId = body.providerId ?? snapshot.providerId;
     const providerChanged = providerId !== snapshot.providerId;
     let model = snapshot.model;
     if (providerChanged && body.model === undefined) model = undefined;
-    if (body.model !== undefined) {
-      if (body.model !== null && !str(body.model, 120)) return error(res, 400, 'model inválido');
-      model = body.model === null ? undefined : str(body.model, 120);
-    }
-    const mode = body.mode === undefined ? snapshot.mode : body.mode;
-    if (!modes.has(mode)) return error(res, 400, 'mode inválido');
+    if (body.model !== undefined) model = body.model ?? undefined;
+    const mode = body.mode ?? snapshot.mode;
     const modelChanged = model !== snapshot.model;
     let thinking = body.thinking === undefined ? snapshot.thinking : body.thinking;
-    if (thinking !== undefined && thinking !== 'auto' && !validReasoningEffort(thinking))
-      return error(res, 400, 'thinking inválido');
     let catalog: ProviderInfo[] | undefined;
     if (body.model !== undefined && model) {
       catalog = await providerList();
@@ -146,10 +137,9 @@ export function sessionsRoutes({ store, orchestrator, providerList }: BackendCon
   app.post('/api/sessions/:id/messages', async (req, res) => {
     const s = store.getSession(req.params.id);
     if (!s) return error(res, 404, 'Conversa não encontrada');
-    const content = str(req.body?.content, 32000);
-    if (!content) return error(res, 400, 'content obrigatório (máximo 32000 caracteres)');
-    const clientMessageId = req.body?.clientMessageId === undefined ? undefined : str(req.body.clientMessageId, 128);
-    if (req.body?.clientMessageId !== undefined && !clientMessageId) return error(res, 400, 'clientMessageId inválido');
+    const parsed = parseBody(SendMessageSchema, req.body, 'content obrigatório (máximo 32000 caracteres)');
+    if (!parsed.ok) return error(res, 400, parsed.message);
+    const { content, clientMessageId } = parsed.data;
     try {
       const result = await orchestrator.start(s, content, clientMessageId);
       res.status(202).json(result);
@@ -168,8 +158,9 @@ export function sessionsRoutes({ store, orchestrator, providerList }: BackendCon
     }
   });
   app.post('/api/approvals/:id', async (req, res) => {
-    const decision = req.body?.decision;
-    if (!['approve', 'deny'].includes(decision)) return error(res, 400, 'decision deve ser approve ou deny');
+    const parsed = parseBody(ApprovalDecisionSchema, req.body, 'decision deve ser approve ou deny');
+    if (!parsed.ok) return error(res, 400, parsed.message);
+    const { decision } = parsed.data;
     const a = store.getApproval(req.params.id);
     if (!a) return error(res, 404, 'Aprovação não encontrada');
     try {

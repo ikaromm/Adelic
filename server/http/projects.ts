@@ -1,19 +1,21 @@
 import { Router } from 'express';
 import { randomUUID } from 'node:crypto';
 import type { Project } from '../../shared/contracts.js';
-import { error, message, str } from './common.js';
+import { CreateProjectSchema, PatchProjectSchema, parseBody } from '../../shared/schemas.js';
+import { error, message } from './common.js';
 import { graphifyConfig, orchestrationConfig, projectPath } from './validation.js';
 import type { BackendContext } from './context.js';
 
 export function projectsRoutes({ store, orchestrator }: BackendContext) {
   const app = Router();
   app.post('/api/projects', (req, res) => {
-    const name = str(req.body?.name),
-      path = str(req.body?.path, 4096),
-      memoryWorkspace = str(req.body?.memoryWorkspace, 100),
-      memoryProject = str(req.body?.memoryProject, 100);
-    if (!name || !path || !memoryWorkspace || !memoryProject)
-      return error(res, 400, 'name, path, memoryWorkspace e memoryProject são obrigatórios');
+    const parsed = parseBody(
+      CreateProjectSchema,
+      req.body,
+      'name, path, memoryWorkspace e memoryProject são obrigatórios',
+    );
+    if (!parsed.ok) return error(res, 400, parsed.message);
+    const { name, path, memoryWorkspace, memoryProject } = parsed.data;
     try {
       const resolved = projectPath(path);
       const config = req.body?.orchestration === undefined ? undefined : orchestrationConfig(req.body.orchestration);
@@ -49,9 +51,8 @@ export function projectsRoutes({ store, orchestrator }: BackendContext) {
   app.patch('/api/projects/:id', (req, res) => {
     const p = store.getProject(req.params.id);
     if (!p) return error(res, 404, 'Projeto não encontrado');
-    const name = req.body?.name === undefined ? p.name : str(req.body.name);
-    const workspace = req.body?.memoryWorkspace === undefined ? p.memoryWorkspace : str(req.body.memoryWorkspace, 100);
-    const project = req.body?.memoryProject === undefined ? p.memoryProject : str(req.body.memoryProject, 100);
+    // Orchestration/graphify are checked before name and scope, as before.
+    const fields = parseBody(PatchProjectSchema, req.body, 'Campos de projeto inválidos');
     if (req.body?.orchestration !== undefined) {
       const c = orchestrationConfig(req.body.orchestration, p.orchestration);
       if (!c) return error(res, 400, 'orchestration inválida');
@@ -62,10 +63,10 @@ export function projectsRoutes({ store, orchestrator }: BackendContext) {
       if (!g) return error(res, 400, 'graphify inválido');
       p.graphify = g;
     }
-    if (!name || !workspace || !project) return error(res, 400, 'Campos de projeto inválidos');
-    p.name = name;
-    p.memoryWorkspace = workspace;
-    p.memoryProject = project;
+    if (!fields.ok) return error(res, 400, fields.message);
+    p.name = fields.data.name ?? p.name;
+    p.memoryWorkspace = fields.data.memoryWorkspace ?? p.memoryWorkspace;
+    p.memoryProject = fields.data.memoryProject ?? p.memoryProject;
     res.json(store.updateProject(p));
   });
   return app;

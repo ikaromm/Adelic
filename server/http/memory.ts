@@ -9,12 +9,11 @@ import {
   sharedMemoryWrite,
 } from '../memory.js';
 import { memoryCatalog, memoryList } from '../memory-service.js';
+import { ProjectMemoryWriteSchema, SharedMemoryWriteSchema, memoryPath } from '../../shared/schemas.js';
 import { error, errorStatus, message, str } from './common.js';
 import type { BackendContext } from './context.js';
 
-function safeMemoryPath(p: string) {
-  return !p.startsWith('/') && !p.split('/').includes('..') && !p.includes('\\') && p.endsWith('.md');
-}
+const safeMemoryPath = (p: string) => memoryPath.safeParse(p).success;
 // Only client-meaningful statuses reach the UI; any other service failure is 503.
 function serviceStatus(e: unknown) {
   const s = errorStatus(e);
@@ -101,13 +100,13 @@ export function memoryRoutes({ store }: BackendContext) {
     }
   });
   app.post('/api/memory/page', async (req, res) => {
-    const body = req.body?.body,
-      expected = req.body?.expectedVersion;
-    const path = str(req.body?.path, 500);
-    if (req.body?.workspace === undefined && req.body?.project === undefined && expected === undefined) {
-      const p = store.getProject(str(req.body?.projectId) || '');
-      if (!p || !path || typeof body !== 'string' || body.length > 50000)
+    const raw = req.body ?? {};
+    if (raw.workspace === undefined && raw.project === undefined && raw.expectedVersion === undefined) {
+      const legacy = ProjectMemoryWriteSchema.safeParse(raw);
+      const p = legacy.success ? store.getProject(legacy.data.projectId) : undefined;
+      if (!legacy.success || !p)
         return error(res, 400, 'projectId, path e body (máximo 50000 caracteres) são obrigatórios');
+      const { path, body } = legacy.data;
       if (!safeMemoryPath(path)) return error(res, 400, 'path inválido');
       if (p.memoryProject === '_global') return error(res, 403, 'Escrita no escopo _global não permitida');
       try {
@@ -117,22 +116,14 @@ export function memoryRoutes({ store }: BackendContext) {
       }
       return;
     }
-    const workspace = str(req.body?.workspace, 100),
-      project = str(req.body?.project, 100);
-    if (
-      req.body?.projectId !== undefined ||
-      !workspace ||
-      !project ||
-      !path ||
-      typeof body !== 'string' ||
-      body.length > 50000 ||
-      !(expected === null || typeof expected === 'string')
-    )
+    const shared = SharedMemoryWriteSchema.safeParse(raw);
+    if (raw.projectId !== undefined || !shared.success)
       return error(res, 400, 'workspace, project, path, body e expectedVersion (string ou null) obrigatórios');
+    const { workspace, project, path, body, expectedVersion } = shared.data;
     if (!safeMemoryPath(path)) return error(res, 400, 'path inválido');
     if (project === '_global') return error(res, 403, 'Escrita no escopo _global não permitida');
     try {
-      res.json(await sharedMemoryWrite({ workspace, project }, path, body, expected));
+      res.json(await sharedMemoryWrite({ workspace, project }, path, body, expectedVersion));
     } catch (e) {
       error(res, writeStatus(e), message(e));
     }

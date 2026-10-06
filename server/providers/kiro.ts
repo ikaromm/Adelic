@@ -1,7 +1,7 @@
 import path from 'node:path';
 import os from 'node:os';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import type { Approval, ProviderEvent, ProviderInfo, RunInput, RunResult } from '../../shared/contracts';
+import type { ProviderEvent, ProviderInfo, RunInput, RunResult } from '../../shared/contracts';
 import { abortError, boundedPrompt, emitApproval } from './common';
 import { CommandScope } from './command';
 import { bubblewrap } from './sandbox';
@@ -158,8 +158,7 @@ export class KiroProvider {
     catch (error) { await rm(isolatedHome, { recursive: true, force: true }); throw error; }
     if (signal.aborted) { await rm(isolatedHome, { recursive: true, force: true }); throw abortError(signal); }
     let turn: KiroTurn | undefined;
-    let process!: JsonRpcProcess;
-    process = new JsonRpcProcess(wrapped.command, wrapped.args, input.cwd, (message) => this.onMessage(process, message), { ...globalThis.process.env, KIRO_HOME: isolatedHome, KIRO_LOG_NO_COLOR: '1', NO_COLOR: '1' });
+    const process: JsonRpcProcess = new JsonRpcProcess(wrapped.command, wrapped.args, input.cwd, (message) => this.onMessage(process, message), { ...globalThis.process.env, KIRO_HOME: isolatedHome, KIRO_LOG_NO_COLOR: '1', NO_COLOR: '1' });
     this.processes.add(process);
     const abortStartup = () => process.kill();
     signal.addEventListener('abort', abortStartup, { once: true });

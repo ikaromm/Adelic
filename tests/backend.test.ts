@@ -27,7 +27,7 @@ const headers=(base:string)=>({'content-type':'application/json','origin':base})
 
 describe('backend persistence and API',()=>{
   it('rejects unknown explicit models without persistence and coalesces concurrent catalog discovery with retry after failure',async()=>{
-    let calls=0,release!:()=>void,started!:()=>void,fail=true;let gate=new Promise<void>(r=>{release=r;});let discoveryStarted=new Promise<void>(r=>{started=r;});
+    let calls=0,release!:()=>void,started!:()=>void,fail=true;let gate=new Promise<void>(r=>{release=r;});const discoveryStarted=new Promise<void>(r=>{started=r;});
     const models=[{id:'m1',name:'Model 1',efforts:['high']}];
     const {store,server}=setup(async()=>{calls++;started();await gate;if(fail)throw new Error('temporary discovery failure');return [{id:'codex',name:'Stub',installed:true,available:true,status:'ready',detail:'test',models,capabilities:{fast:true,tools:true,approvals:true,cancel:true,reasoning:true}}];});const base=await ready(server);
     const post=(model:string)=>fetch(`${base}/api/sessions`,{method:'POST',headers:headers(base),body:JSON.stringify({providerId:'codex',model})});
@@ -44,7 +44,7 @@ describe('backend persistence and API',()=>{
   });
 
   it('revalidates PATCH after catalog awaits when the session is deleted or becomes active',async()=>{
-    let release!:()=>void;let gate=new Promise<void>(r=>{release=r;});const {store,server}=setup(async()=>{await gate;return [{id:'codex',name:'Stub',installed:true,available:true,status:'ready',detail:'test',models:[{id:'m1',name:'Model 1'}],capabilities:{fast:true,tools:true,approvals:true,cancel:true,reasoning:true}}];});const base=await ready(server);const now=new Date().toISOString();
+    let release!:()=>void;const gate=new Promise<void>(r=>{release=r;});const {store,server}=setup(async()=>{await gate;return [{id:'codex',name:'Stub',installed:true,available:true,status:'ready',detail:'test',models:[{id:'m1',name:'Model 1'}],capabilities:{fast:true,tools:true,approvals:true,cancel:true,reasoning:true}}];});const base=await ready(server);const now=new Date().toISOString();
     const create=async(id:string)=>{const s:Session={id,projectId:null,title:'T',providerId:'codex',mode:'fast',createdAt:now,updatedAt:now};store.putSession(s);return s;};
     await create('gone');const deletion=fetch(`${base}/api/sessions/gone`,{method:'PATCH',headers:headers(base),body:JSON.stringify({model:'m1'})});await new Promise(r=>setTimeout(r,15));store.deleteSession('gone');release();expect((await deletion).status).toBe(404);store.close();
     let releaseActive!:()=>void;const activeGate=new Promise<void>(r=>{releaseActive=r;});const second=setup(async()=>{await activeGate;return [{id:'codex',name:'Stub',installed:true,available:true,status:'ready',detail:'test',models:[{id:'m1',name:'Model 1'}],capabilities:{fast:true,tools:true,approvals:true,cancel:true,reasoning:true}}];});const activeBase=await ready(second.server);second.store.putSession({id:'active',projectId:null,title:'T',providerId:'codex',mode:'fast',createdAt:now,updatedAt:now});const active=fetch(`${activeBase}/api/sessions/active`,{method:'PATCH',headers:headers(activeBase),body:JSON.stringify({model:'m1'})});await new Promise(r=>setTimeout(r,15));second.store.putSession({...second.store.getSession('active')!,activeRunId:'run-active'});releaseActive();expect((await active).status).toBe(409);expect(second.store.getSession('active')).toMatchObject({activeRunId:'run-active'});expect(second.store.getSession('active')).not.toHaveProperty('model');second.store.close();

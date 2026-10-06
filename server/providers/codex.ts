@@ -2,7 +2,7 @@ import path from 'node:path';
 import { lstat, realpath, stat, mkdir, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import { mkdtemp, chmod, rm } from 'node:fs/promises';
-import type { Approval, ProviderEvent, ProviderInfo, RunInput, RunResult, Sandbox } from '../../shared/contracts';
+import type { ProviderEvent, ProviderInfo, RunInput, RunResult, Sandbox } from '../../shared/contracts';
 import { abortError, boundedPrompt, emitApproval } from './common';
 import { CommandScope, runCommand, type CommandExecutor, type CommandResult } from './command';
 import { errorMessage, isRecord, JsonRpcProcess, type JsonRpcMessage } from './process';
@@ -164,8 +164,7 @@ export class CodexProvider {
     if (signal.aborted) throw abortError(signal);
     // App-server state (including unified-exec children) belongs to one run only.
     const key = `${resolvedCwd}\0${sandbox}\0${profile}\0${runId}\0${++this.serverNonce}`;
-    let server: CodexServer;
-    server = { key, cwd: resolvedCwd, profile, scratch: '', ready: Promise.resolve(undefined as unknown as JsonRpcProcess) };
+    const server: CodexServer = { key, cwd: resolvedCwd, profile, scratch: '', ready: Promise.resolve(undefined as unknown as JsonRpcProcess) };
     this.servers.set(key, server);
     server.ready = (async () => {
       if (signal.aborted) throw abortError(signal);
@@ -222,7 +221,7 @@ export class CodexProvider {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
       if (error instanceof Error && error.message.includes('workspace-write incompatível')) throw error;
-      throw new Error('Não foi possível validar a autenticação Codex para o sandbox.');
+      throw new Error('Não foi possível validar a autenticação Codex para o sandbox.', { cause: error });
     }
   }
   private async startServer(server: CodexServer, signal: AbortSignal): Promise<JsonRpcProcess> {

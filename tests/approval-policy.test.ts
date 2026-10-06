@@ -1,6 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, mkdir, writeFile, symlink, rm, chmod } from 'node:fs/promises';
-import os from 'node:os';
+import { mkdir, writeFile, symlink, rm, chmod } from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { canonWritePathWithin, classifyApproval, scanCodexRules } from '../server/approval-policy';

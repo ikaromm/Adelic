@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { Brain, FileText, Plus, RefreshCw, Search } from 'lucide-react';
 import type { MemoryCatalog, MemoryHit, MemoryPage as MemoryNote, MemoryScope } from '../shared/contracts';
 import { api } from './api';

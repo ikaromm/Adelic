@@ -474,7 +474,7 @@ rl.on('line', (line) => {
     const descendants = async (rootPid: number): Promise<number[]> => {
       const seen = new Set<number>();
       const visit = async (pid: number) => {
-        let children: number[] = [];
+        let children: number[];
         try { children = (await readFile(`/proc/${pid}/task/${pid}/children`, 'utf8')).trim().split(/\s+/).filter(Boolean).map(Number); } catch { return; }
         for (const child of children) if (!seen.has(child)) { seen.add(child); await visit(child); }
       };

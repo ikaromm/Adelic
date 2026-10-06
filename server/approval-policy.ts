@@ -11,11 +11,11 @@ export async function canonWritePathWithin(workspace: string, raw: string): Prom
 export async function scanCodexRules(options: { cwd: string; codexHome?: string; systemRoot?: string }): Promise<void> {
   const roots = [path.join(path.join(options.codexHome ?? (process.env.CODEX_HOME || path.join(os.homedir(), '.codex')), 'rules')), path.join(options.systemRoot ?? '/etc/codex', 'rules')];
   let current: string;
-  try { current = await realpath(options.cwd); } catch (error) { throw new Error(`Não foi possível verificar regras Codex: cwd real indisponível (${(error as NodeJS.ErrnoException).code ?? 'erro'}).`); }
+  try { current = await realpath(options.cwd); } catch (error) { throw new Error(`Não foi possível verificar regras Codex: cwd real indisponível (${(error as NodeJS.ErrnoException).code ?? 'erro'}).`, { cause: error }); }
   for (;;) { roots.push(path.join(current, '.codex', 'rules')); const parent = path.dirname(current); if (parent === current) break; current = parent; }
   for (const root of roots) {
     let names: string[];
-    try { names = await readdir(root); } catch (error) { const code = (error as NodeJS.ErrnoException).code; if (code === 'ENOENT') continue; throw new Error(`Não foi possível verificar regras Codex em ${root}: ${code ?? 'erro de leitura'}`); }
+    try { names = await readdir(root); } catch (error) { const code = (error as NodeJS.ErrnoException).code; if (code === 'ENOENT') continue; throw new Error(`Não foi possível verificar regras Codex em ${root}: ${code ?? 'erro de leitura'}`, { cause: error }); }
     if (names.some(name => name.endsWith('.rules'))) throw new Error(`Execução de ferramentas bloqueada: arquivo .rules não inspecionado em ${root}.`);
   }
 }
@@ -24,7 +24,7 @@ const deny = (reason: string): ApprovalResult => ({ decision: 'deny', reason });
 
 function parse(line: string): string[] | null {
   // Conservative rejection before tokenization: no line splitting or glob/tilde expansion, even quoted.
-  if (/[\r\n*?\[\]{}~]/.test(line)) return null;
+  if (/[\r\n*?[\]{}~]/.test(line)) return null;
   const out: string[] = []; let word = ''; let started = false; let quote = '';
   for (let i = 0; i < line.length; i++) {
     const c = line[i]!;
@@ -102,7 +102,9 @@ export async function classifyApproval(input: ApprovalInput): Promise<ApprovalRe
   if (cwd !== root && !cwd.startsWith(root + path.sep)) return pending('Diretório fora do workspace.');
   const argv = parse(input.command);
   if (!argv) return pending('Sintaxe de shell ambígua ou não suportada.');
-  let [name, ...args] = argv;
+  // `name` is narrowed below when a trusted bash wrapper is unwrapped; `args` never changes.
+  const [first, ...args] = argv;
+  let name = first;
   if (name === 'bash' || name === '/bin/bash' || name === '/usr/bin/bash') {
     if (!input.trustedNonLoginShell) return pending('Wrapper de shell exige confirmação.');
     const script = args.length === 2 && args[0] === '-c' ? args[1] : args.length === 4 && args[0] === '--noprofile' && args[1] === '--norc' && args[2] === '-c' ? args[3] : undefined;

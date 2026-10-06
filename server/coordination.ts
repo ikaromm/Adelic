@@ -1,4 +1,4 @@
-import type { DelegatedTask, OrchestrationConfig, Project, ProjectBrief, ProviderInfo, ProviderId } from '../shared/contracts.js';
+import type { DelegatedTask, Project, ProjectBrief, ProviderInfo, ProviderId } from '../shared/contracts.js';
 import { hasFileReference } from './router.js';
 
 export interface PlannedTask { id:string; title:string; instructions:string; scope:string[]; dependsOn:string[] }

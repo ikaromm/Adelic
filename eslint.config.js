@@ -1,0 +1,34 @@
+import js from '@eslint/js';
+import tseslint from 'typescript-eslint';
+import reactHooks from 'eslint-plugin-react-hooks';
+import globals from 'globals';
+import prettier from 'eslint-config-prettier';
+
+export default tseslint.config(
+  { ignores: ['dist/', 'release/', '.desktop/', '.adelic/', 'coverage/', 'node_modules/'] },
+  js.configs.recommended,
+  ...tseslint.configs.recommended,
+  {
+    files: ['**/*.{ts,tsx,js,mjs}'],
+    languageOptions: { globals: { ...globals.node, ...globals.browser } },
+    rules: {
+      // The codebase validates untrusted protocol/JSON data at runtime; `any` marks those
+      // boundaries today. Kept visible as warnings until they move to zod schemas.
+      '@typescript-eslint/no-explicit-any': 'warn',
+      '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_', varsIgnorePattern: '^_', caughtErrors: 'none' }],
+      // Best-effort cleanup (shutdown, process kill, listeners) deliberately ignores errors.
+      'no-empty': ['error', { allowEmptyCatch: true }],
+      // ANSI escape sequences are stripped from CLI output on purpose.
+      'no-control-regex': 'off',
+    },
+  },
+  {
+    files: ['src/**/*.{ts,tsx}'],
+    plugins: { 'react-hooks': reactHooks },
+    rules: {
+      'react-hooks/rules-of-hooks': 'error',
+      'react-hooks/exhaustive-deps': 'warn',
+    },
+  },
+  prettier,
+);

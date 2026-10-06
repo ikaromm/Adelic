@@ -257,7 +257,6 @@ export default function App() {
   const provider = data?.providers.find((p) => p.id === (session?.providerId || data?.settings.defaultProviderId));
   const thinkingOptions = supportedThinking(provider, session?.model);
   const reasoningUnavailable = provider?.capabilities.reasoning === false;
-  const activeRun = currentDetail?.runs.find((run) => run.id === session?.activeRunId && run.status === 'running');
   activeRunIdRef.current = session?.activeRunId;
   const projectSessions = useMemo(() => data?.sessions.filter((s) => s.projectId === selectedProject) || [], [data?.sessions, selectedProject]);
   const detachedSessions = useMemo(() => data?.sessions.filter((s) => s.projectId === null) || [], [data?.sessions]);
@@ -538,8 +537,6 @@ export default function App() {
       }
     }
   }
-
-  const createTitle = (text: string) => text.trim().split(/\s+/).slice(0, 6).join(' ') || 'Nova conversa';
 
   const shortcut = newConversationShortcut();
   const memoryIntegration = data?.integrations.find((item) => item.kind === 'memory');

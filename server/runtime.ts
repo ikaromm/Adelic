@@ -60,7 +60,7 @@ async function acquireDataLock(realDataDir: string): Promise<Cleanup> {
     await listen(lock, address);
   } catch (error) {
     if (errorCode(error) === 'EADDRINUSE') {
-      throw new Error('Esta pasta de dados já está sendo usada por outra instância do Adelic (modo web ou desktop). Feche a outra instância antes de continuar.');
+      throw new Error('Esta pasta de dados já está sendo usada por outra instância do Adelic (modo web ou desktop). Feche a outra instância antes de continuar.', { cause: error });
     }
     throw error;
   }

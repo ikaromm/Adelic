@@ -1,4 +1,4 @@
-import type { Approval, Message, ProviderEvent, RunInput, Sandbox } from '../../shared/contracts';
+import type { Approval, ProviderEvent, RunInput, Sandbox } from '../../shared/contracts';
 
 export function boundedPrompt(input: RunInput): string {
   const budget = Math.max(0, input.plan.contextBudget);

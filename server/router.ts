@@ -1,4 +1,4 @@
-import type { Message, Mode, RoutePlan, Session } from '../shared/contracts.js';
+import type { Message, Mode, RoutePlan } from '../shared/contracts.js';
 
 const actionPattern=/\b(leia|read|abra|open|inspecione|inspect|analise|analyze|revise|review|corrija|fix|implemente|implement|crie|create|edite|edit|rode|run|execute|teste|test|compile|build|deploy|fa[cç]a|make|write|escreva|investigue|investigate|diagnostique|diagnose|explique|explain|resuma|resumir|summari[sz]e)\b/i;
 const filePattern=/\b(readme|arquivo|file|projeto|project|c[oó]digo|code|repo|reposit[oó]rio|app|aplicativo|pasta|directory|p[aá]gina|page|branch|logs?|bug|erro|error|falha|build|deploy|pr)\b/i;

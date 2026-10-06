@@ -1,4 +1,4 @@
-import type { Bootstrap, DelegatedTask, GraphifyQueryResult, GraphifyStatus, MemoryCatalog, MemoryHit, MemoryListing, MemoryPage, MemoryScope, Project, ProjectCoordination, Session, SessionDetail, Settings, Skill, Thinking } from '../shared/contracts';
+import type { Bootstrap, DelegatedTask, GraphifyQueryResult, GraphifyStatus, MemoryCatalog, MemoryHit, MemoryListing, MemoryPage, MemoryScope, Project, ProjectCoordination, Session, SessionDetail, Settings, Skill } from '../shared/contracts';
 export interface Health { status: string; providers: { id: string; status: string; available: boolean }[]; memory: string; jail: string }
 
 type ProjectPatch = { name?: string; memoryWorkspace?: string; memoryProject?: string; orchestration?: Project['orchestration']; graphify?: Project['graphify'] };

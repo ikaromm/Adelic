@@ -45,6 +45,7 @@ import { useAutosize } from './hooks/useAutosize';
 import { useGlobalShortcuts } from './hooks/useGlobalShortcuts';
 import { useStickToBottom } from './hooks/useStickToBottom';
 import { useTaskOutputs } from './hooks/useTaskOutputs';
+import { notificationsEnabled, useRunNotifications } from './hooks/useRunNotifications';
 import { projectOrchestration } from '../shared/contracts';
 import { ActivityPage } from './components/ActivityPage';
 import { ConversationSearch } from './components/ConversationSearch';
@@ -132,6 +133,15 @@ export default function App() {
     }
     setSelectedProject(id);
   };
+  const notifyRun = useRunNotifications({
+    enabled: data ? notificationsEnabled(data.settings) : false,
+    titleOf: (id) => projectSnapshotRef.current?.sessions.find((item) => item.id === id)?.title,
+    onOpen: (id) => {
+      selectConversation(id);
+      setPage('chat');
+      setSidebarOpen(false);
+    },
+  });
 
   const refreshBootstrap = useCallback(async (preserveSelection = true) => {
     const requestId = ++bootstrapRequestRef.current;
@@ -258,6 +268,7 @@ export default function App() {
       } catch {
         return;
       }
+      notifyRun(event);
       if (event.type === 'refresh') {
         reconcile();
         if (selectedProjectRef.current) void refreshProjectViews(selectedProjectRef.current);
@@ -347,7 +358,7 @@ export default function App() {
       /* EventSource reconnects; the server sends a fresh snapshot signal. */
     };
     return () => events.close();
-  }, [refreshBootstrap, refreshDetail, refreshProjectViews, selectedSession]);
+  }, [refreshBootstrap, refreshDetail, refreshProjectViews, selectedSession, notifyRun]);
 
   // Follow new content only while the reader is at the end; reading history is never interrupted.
   // Approvals, tasks and error rows count as new content too, not only messages and streamed text.
@@ -763,7 +774,8 @@ export default function App() {
       | 'responseStyle'
       | 'approvalMode'
       | 'updateCheck'
-      | 'autoRetry',
+      | 'autoRetry'
+      | 'notifications',
     value: string | boolean,
   ) {
     if (!data) return;

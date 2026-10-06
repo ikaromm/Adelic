@@ -31,3 +31,12 @@ export function navigationPolicy(target: string, appUrl: string): NavigationPoli
   if (targetUrl.protocol === 'http:' || targetUrl.protocol === 'https:') return 'external';
   return 'blocked';
 }
+
+/**
+ * Web permissions granted to the window: only system notifications, and only to the app's own
+ * origin. Everything else (camera, clipboard, geolocation…) stays denied.
+ */
+export function permissionPolicy(permission: string, requestingUrl: string, appUrl: string): boolean {
+  if (permission !== 'notifications' || !appUrl) return false;
+  return navigationPolicy(requestingUrl, appUrl) === 'internal';
+}

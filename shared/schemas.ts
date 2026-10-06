@@ -104,6 +104,7 @@ export const SettingsPatchSchema = z.object({
   approvalMode: optional(z.enum(['auto-safe', 'manual']), 'approvalMode inválido'),
   updateCheck: optional(z.boolean(), 'updateCheck deve ser booleano'),
   autoRetry: optional(z.boolean(), 'autoRetry deve ser booleano'),
+  notifications: optional(z.boolean(), 'notifications deve ser booleano'),
 });
 export const SkillPatchSchema = z.object({ enabled: required(z.boolean(), 'enabled deve ser booleano') });
 

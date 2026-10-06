@@ -196,6 +196,8 @@ export interface Settings {
   autoRetry?: boolean;
   /** Opt-in: check GitHub for a newer release (one anonymous request, never installs). */
   updateCheck?: boolean;
+  /** System notification when a run finishes, fails or needs approval while the window is in the background. Absent: on in the desktop app, off in a browser. */
+  notifications?: boolean;
 }
 export interface Integration {
   id: string;

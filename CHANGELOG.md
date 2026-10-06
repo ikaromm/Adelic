@@ -2,6 +2,7 @@
 
 ## Não publicado
 
+- Notificações do sistema quando uma resposta fica pronta, uma execução falha ou uma aprovação é necessária, só com a janela em segundo plano, e contador no título da aba. Ligado por padrão no desktop; no navegador, pede permissão. Veja [notificações](docs/specs/notifications.md).
 - Repetição automática de falhas temporárias (tempo esgotado, conexão interrompida, modelo sobrecarregado), com espera crescente e até 2 novas tentativas, só quando a tentativa não exibiu texto, não executou ferramenta nem pediu aprovação. Falhas mostram o motivo e um botão **Tentar de novo**; configurável em Configurações. Veja [repetição automática](docs/specs/retries.md).
 - Busca em todas as conversas (títulos e mensagens, sem diferenciar acentos) com Ctrl+Shift+F, e exportação da conversa aberta em Markdown ou JSON.
 - Tokens por execução, quando o provedor informa (Codex informa; custo continua "não informado", nunca zero).

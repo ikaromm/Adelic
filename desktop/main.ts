@@ -4,7 +4,7 @@ import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { app, BrowserWindow, dialog, shell, session, utilityProcess, type UtilityProcess } from 'electron';
 import { desktopPath } from '../server/providers/discovery.js';
-import { desktopResources, navigationPolicy, resolveDesktopDataDir } from './policy.js';
+import { desktopResources, navigationPolicy, permissionPolicy, resolveDesktopDataDir } from './policy.js';
 import { stopUtilityProcess, type UtilityState } from './utility-lifecycle.js';
 
 type BackendMessage =
@@ -299,8 +299,14 @@ async function startDesktop() {
   backendNodeVersion = ready.nodeVersion || process.versions.node;
   writeReport();
 
-  session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
-  session.defaultSession.setPermissionCheckHandler(() => false);
+  // Only notifications from the app origin are allowed (permissionPolicy); the rest is denied.
+  const appUrl = backendUrl;
+  session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback, details) =>
+    callback(permissionPolicy(permission, details.requestingUrl, appUrl)),
+  );
+  session.defaultSession.setPermissionCheckHandler((_webContents, permission, requestingOrigin) =>
+    permissionPolicy(permission, requestingOrigin, appUrl),
+  );
 
   const window = createWindow(resources.icon);
   await window.loadURL(backendUrl);

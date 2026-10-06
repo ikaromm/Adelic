@@ -48,13 +48,19 @@ Codex, Kiro e Claude usam bubblewrap no Linux para limitar escrita, além dos co
 
 Este incremento é local. Acesso remoto/Tailscale, integração ai-jail, catálogo geral de MCPs e automações ficam para etapas seguintes.
 
-Verificação local:
+Verificação local (a mesma do CI no GitHub Actions, em todo push para `develop` e em PRs):
 
 ```bash
 npm run typecheck
+npm run lint          # ESLint; `any` e dependências de hooks aparecem como avisos
+npm run format:check  # Prettier; `npm run format` corrige
 npm test
 npm run build
 ```
+
+Alguns testes usam o bubblewrap real e esperam `rg` e `pactl` em `/usr/bin`. O commit que formatou o código inteiro está em `.git-blame-ignore-revs`; para o `git blame` ignorá-lo, use `git config blame.ignoreRevsFile .git-blame-ignore-revs`.
+
+Organização: `server/index.ts` monta o app, e as rotas ficam em `server/http/` (projetos, conversas, configurações e memória). No front, `src/App.tsx` guarda o estado e a composição, e as telas e partes estão em `src/components/`.
 
 Os [requisitos](docs/specs/requirements.md), [design](docs/specs/design.md) e [tarefas](docs/specs/tasks.md) documentam este incremento. A [pesquisa de baseline](docs/baseline.md) compara as referências e os passos futuros. Veja os [testes reais e limites da validação](docs/validation.md).
 

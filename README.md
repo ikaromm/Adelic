@@ -56,11 +56,16 @@ npm run lint          # ESLint; `any` e dependências de hooks aparecem como avi
 npm run format:check  # Prettier; `npm run format` corrige
 npm test
 npm run build
+npm run test:e2e      # Playwright; local: PLAYWRIGHT_CHROMIUM=/usr/bin/chromium, ou npx playwright install chromium
 ```
 
 Alguns testes usam o bubblewrap real e esperam `rg` e `pactl` em `/usr/bin`. O commit que formatou o código inteiro está em `.git-blame-ignore-revs`; para o `git blame` ignorá-lo, use `git config blame.ignoreRevsFile .git-blame-ignore-revs`.
 
-Organização: `server/index.ts` monta o app, e as rotas ficam em `server/http/` (projetos, conversas, configurações e memória). No front, `src/App.tsx` guarda o estado e a composição, e as telas e partes estão em `src/components/`.
+Os testes E2E (`tests/e2e/`) sobem o backend e o build reais com um provedor simulado, em uma pasta de dados temporária e sem acessar o ai-memory nem os CLIs do computador.
+
+Banco de dados: o esquema é versionado em `PRAGMA user_version` (`server/migrations.ts`). Antes de aplicar uma migração numa base com dados, o Adelic grava uma cópia em `<pasta de dados>/backups/` (permissão 0600, as cinco mais recentes). Uma base criada por uma versão mais nova do Adelic é recusada sem alterações. Para restaurar uma cópia, feche o Adelic e substitua `adelic.sqlite` por ela, removendo `adelic.sqlite-wal` e `adelic.sqlite-shm`.
+
+Organização: `server/index.ts` monta o app, e as rotas ficam em `server/http/` (projetos, conversas, configurações e memória). No front, `src/App.tsx` guarda o estado e a composição, e as telas e partes estão em `src/components/`. Os corpos das requisições são validados com zod em `shared/schemas.ts`. Cada tela fica dentro de um error boundary: um erro de renderização mostra a mensagem e permite tentar de novo, sem derrubar o restante da janela.
 
 Os [requisitos](docs/specs/requirements.md), [design](docs/specs/design.md) e [tarefas](docs/specs/tasks.md) documentam este incremento. A [pesquisa de baseline](docs/baseline.md) compara as referências e os passos futuros. Veja os [testes reais e limites da validação](docs/validation.md).
 

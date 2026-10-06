@@ -4,6 +4,10 @@
 
 - Desenvolvimento: ESLint e Prettier com verificação no CI, código formatado (commit ignorado no `git blame`), rotas do servidor divididas em `server/http/` e telas do front em `src/components/`. Sem mudança de comportamento.
 - Testes que falhavam de forma intermitente no CI corrigidos (handler de SIGTERM instalado antes de anunciar o pid).
+- Erros de renderização mostram uma mensagem com "Tentar de novo" e "Recarregar" em vez de uma janela em branco; a navegação continua funcionando.
+- Esquema do SQLite versionado, com cópia automática da base antes de cada migração e recusa de bases criadas por versões mais novas.
+- Validação das requisições com zod, mantendo as mesmas mensagens de erro.
+- Testes E2E com Playwright para os fluxos principais (enviar, aprovar, negar, cancelar, navegação, erro de memória e tela pequena), também no CI.
 
 ## 0.3.0 — 2026-10-06
 

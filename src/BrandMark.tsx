@@ -9,7 +9,12 @@ export function BrandMark() {
         <path d="M170 284 116 404M170 284l42 120M342 284l-42 120M342 284l54 120" strokeWidth="38" />
       </g>
       <path d="M100 284h312" stroke="var(--info)" strokeWidth="32" strokeLinecap="round" />
-      <g fill="var(--pink)"><circle cx="116" cy="404" r="28" /><circle cx="212" cy="404" r="28" /><circle cx="300" cy="404" r="28" /><circle cx="396" cy="404" r="28" /></g>
+      <g fill="var(--pink)">
+        <circle cx="116" cy="404" r="28" />
+        <circle cx="212" cy="404" r="28" />
+        <circle cx="300" cy="404" r="28" />
+        <circle cx="396" cy="404" r="28" />
+      </g>
       <circle cx="256" cy="104" r="40" fill="var(--text)" />
     </svg>
   );

@@ -90,7 +90,10 @@
   font-size: var(--text-sm);
   font-weight: 600;
   text-align: left;
-  transition: background-color var(--duration-fast) var(--ease), border-color var(--duration-fast) var(--ease), color var(--duration-fast) var(--ease);
+  transition:
+    background-color var(--duration-fast) var(--ease),
+    border-color var(--duration-fast) var(--ease),
+    color var(--duration-fast) var(--ease);
 }
 
 .new-chat-button > svg {
@@ -117,7 +120,7 @@
 }
 
 .new-chat-button:disabled {
-  opacity: .55;
+  opacity: 0.55;
 }
 
 /* Sidebar lists */
@@ -153,7 +156,7 @@
   color: var(--text-muted);
   font-size: var(--text-2xs);
   font-weight: 600;
-  letter-spacing: .06em;
+  letter-spacing: 0.06em;
   text-overflow: ellipsis;
   text-transform: uppercase;
   white-space: nowrap;
@@ -192,7 +195,9 @@
   color: var(--text-secondary);
   font-size: var(--text-sm);
   text-align: left;
-  transition: background-color var(--duration-fast) var(--ease), color var(--duration-fast) var(--ease);
+  transition:
+    background-color var(--duration-fast) var(--ease),
+    color var(--duration-fast) var(--ease);
 }
 
 .session-item:hover,
@@ -256,7 +261,9 @@
   font-size: var(--text-xs);
   font-weight: 500;
   text-align: left;
-  transition: background-color var(--duration-fast) var(--ease), color var(--duration-fast) var(--ease);
+  transition:
+    background-color var(--duration-fast) var(--ease),
+    color var(--duration-fast) var(--ease);
 }
 
 .sidebar-more:hover,
@@ -371,7 +378,10 @@
   background: transparent;
   color: var(--text-muted);
   opacity: 0;
-  transition: background-color var(--duration-fast) var(--ease), color var(--duration-fast) var(--ease), opacity var(--duration-fast) var(--ease);
+  transition:
+    background-color var(--duration-fast) var(--ease),
+    color var(--duration-fast) var(--ease),
+    opacity var(--duration-fast) var(--ease);
 }
 
 .project-row:hover .project-new-chat,
@@ -413,7 +423,9 @@
   font-size: var(--text-sm);
   font-weight: 500;
   text-align: left;
-  transition: background-color var(--duration-fast) var(--ease), color var(--duration-fast) var(--ease);
+  transition:
+    background-color var(--duration-fast) var(--ease),
+    color var(--duration-fast) var(--ease);
 }
 
 .nav-item > svg {
@@ -672,7 +684,9 @@
     transform: translateX(-100%);
     visibility: hidden;
     box-shadow: var(--shadow-modal);
-    transition: transform var(--duration) var(--ease), visibility 0s linear var(--duration);
+    transition:
+      transform var(--duration) var(--ease),
+      visibility 0s linear var(--duration);
   }
 
   .sidebar.sidebar-mobile-open {

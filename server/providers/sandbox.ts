@@ -2,8 +2,15 @@ import { access, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
 import type { Sandbox } from '../../shared/contracts';
 
-export interface WrappedCommand { command: string; args: string[] }
-export interface ReadonlyFileBinding { source: string; target: string; directory?: boolean }
+export interface WrappedCommand {
+  command: string;
+  args: string[];
+}
+export interface ReadonlyFileBinding {
+  source: string;
+  target: string;
+  directory?: boolean;
+}
 
 const TMP_ROOT = '/tmp';
 
@@ -24,9 +31,20 @@ function addTmpDirectories(args: string[], target: string, alreadyAdded: Set<str
   }
 }
 
-export async function bubblewrap(command: string, args: string[], cwd: string, sandbox: Sandbox, writableRuntimeDirs: string[] = [], readonlyFileBindings: ReadonlyFileBinding[] = []): Promise<WrappedCommand> {
+export async function bubblewrap(
+  command: string,
+  args: string[],
+  cwd: string,
+  sandbox: Sandbox,
+  writableRuntimeDirs: string[] = [],
+  readonlyFileBindings: ReadonlyFileBinding[] = [],
+): Promise<WrappedCommand> {
   const bwrap = '/usr/bin/bwrap';
-  try { await access(bwrap); } catch { throw new Error('Política de filesystem indisponível: bubblewrap não está instalado.'); }
+  try {
+    await access(bwrap);
+  } catch {
+    throw new Error('Política de filesystem indisponível: bubblewrap não está instalado.');
+  }
   const requestedRoot = path.resolve(cwd);
   const root = await realpath(requestedRoot);
   if (!(await stat(root)).isDirectory()) throw new Error('A pasta de trabalho do sandbox não é um diretório.');
@@ -37,10 +55,25 @@ export async function bubblewrap(command: string, args: string[], cwd: string, s
       await access(directory);
       const source = await realpath(directory);
       if ((await stat(source)).isDirectory()) runtimeDirs.push({ requested: path.resolve(directory), source });
-    } catch { /* Optional provider runtime directories may not exist yet. */ }
+    } catch {
+      /* Optional provider runtime directories may not exist yet. */
+    }
   }
 
-  const argv = ['--die-with-parent', '--new-session', '--unshare-pid', '--ro-bind', '/', '/', '--proc', '/proc', '--dev', '/dev', '--tmpfs', TMP_ROOT];
+  const argv = [
+    '--die-with-parent',
+    '--new-session',
+    '--unshare-pid',
+    '--ro-bind',
+    '/',
+    '/',
+    '--proc',
+    '/proc',
+    '--dev',
+    '/dev',
+    '--tmpfs',
+    TMP_ROOT,
+  ];
   const bindings: { source: string; target: string; writable: boolean }[] = [];
   const workspaceWritable = sandbox === 'workspace-write';
   if (isWithin(root, TMP_ROOT) || workspaceWritable) {
@@ -70,7 +103,8 @@ export async function bubblewrap(command: string, args: string[], cwd: string, s
   for (const binding of readonlyFileBindings) {
     const source = await realpath(binding.source);
     const sourceInfo = await stat(source);
-    if (binding.directory ? !sourceInfo.isDirectory() : !sourceInfo.isFile()) throw new Error('Caminho de runtime somente leitura inválido.');
+    if (binding.directory ? !sourceInfo.isDirectory() : !sourceInfo.isFile())
+      throw new Error('Caminho de runtime somente leitura inválido.');
     const target = path.resolve(binding.target);
     if (isWithin(target, TMP_ROOT)) addTmpDirectories(argv, path.dirname(target), tmpDirectories);
     argv.push('--ro-bind', source, target);

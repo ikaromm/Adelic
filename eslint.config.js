@@ -15,7 +15,10 @@ export default tseslint.config(
       // The codebase validates untrusted protocol/JSON data at runtime; `any` marks those
       // boundaries today. Kept visible as warnings until they move to zod schemas.
       '@typescript-eslint/no-explicit-any': 'warn',
-      '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_', varsIgnorePattern: '^_', caughtErrors: 'none' }],
+      '@typescript-eslint/no-unused-vars': [
+        'error',
+        { argsIgnorePattern: '^_', varsIgnorePattern: '^_', caughtErrors: 'none' },
+      ],
       // Best-effort cleanup (shutdown, process kill, listeners) deliberately ignores errors.
       'no-empty': ['error', { allowEmptyCatch: true }],
       // ANSI escape sequences are stripped from CLI output on purpose.

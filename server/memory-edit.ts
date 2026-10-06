@@ -18,8 +18,17 @@ export type EditPlan =
 
 const TIERS = new Set(['working', 'episodic', 'semantic', 'procedural']);
 const FAMILIES: Record<string, string> = {
-  sessions: 'Session Summary', _rules: 'Rule', gotchas: 'Gotcha', decisions: 'Decision', procedures: 'Procedure',
-  concepts: 'Concept', notes: 'Note', runbooks: 'Runbook', _slots: 'State', _lint: 'Lint Report', _pending: 'Pending Note',
+  sessions: 'Session Summary',
+  _rules: 'Rule',
+  gotchas: 'Gotcha',
+  decisions: 'Decision',
+  procedures: 'Procedure',
+  concepts: 'Concept',
+  notes: 'Note',
+  runbooks: 'Runbook',
+  _slots: 'State',
+  _lint: 'Lint Report',
+  _pending: 'Pending Note',
 };
 const KIND_TYPES: Record<string, string> = { fact: 'Fact', note: 'Note', procedure: 'Procedure', decision: 'Decision' };
 
@@ -33,8 +42,11 @@ export function derivedType(path: string, frontmatter: Record<string, unknown>):
   return FAMILIES[path.split('/')[0]] ?? 'Note';
 }
 
-const blocked = (reason: string): never => { throw Object.assign(new Error(`Edição bloqueada para preservar os metadados: ${reason}`), { status: 422 }); };
-const isStringArray = (value: unknown): value is string[] => Array.isArray(value) && value.every((item) => typeof item === 'string');
+const blocked = (reason: string): never => {
+  throw Object.assign(new Error(`Edição bloqueada para preservar os metadados: ${reason}`), { status: 422 });
+};
+const isStringArray = (value: unknown): value is string[] =>
+  Array.isArray(value) && value.every((item) => typeof item === 'string');
 
 /** Chooses a writer that reproduces the current frontmatter, or throws before any write. */
 export function planExistingEdit(scope: MemoryScope, path: string, frontmatter: Record<string, unknown>): EditPlan {
@@ -42,19 +54,44 @@ export function planExistingEdit(scope: MemoryScope, path: string, frontmatter: 
   const fm = frontmatter;
   const { tier, tags, pinned, title, kind, expires_at: expires, type, stale_after: staleAfter } = fm;
   if (typeof tier !== 'string' || !TIERS.has(tier)) blocked('tier ausente ou desconhecido');
-  if (tags !== undefined && (!isStringArray(tags) || tags.length === 0)) blocked('tags em formato que o serviço não reproduz');
+  if (tags !== undefined && (!isStringArray(tags) || tags.length === 0))
+    blocked('tags em formato que o serviço não reproduz');
   if (pinned !== undefined && pinned !== true) blocked('pinned diferente de true');
   if (title !== undefined && (typeof title !== 'string' || !title.trim())) blocked('title em formato não suportado');
-  if (kind !== undefined && (typeof kind !== 'string' || !kind.trim() || kind !== kind.trim())) blocked('kind em formato não suportado');
-  if (expires !== undefined && (typeof expires !== 'string' || !expires.trim() || expires !== expires.trim())) blocked('expires_at em formato não suportado');
+  if (kind !== undefined && (typeof kind !== 'string' || !kind.trim() || kind !== kind.trim()))
+    blocked('kind em formato não suportado');
+  if (expires !== undefined && (typeof expires !== 'string' || !expires.trim() || expires !== expires.trim()))
+    blocked('expires_at em formato não suportado');
   if (type !== undefined && type !== derivedType(path, fm)) blocked(`type personalizado (${String(type)})`);
   if (staleAfter !== undefined && staleAfter !== expires) blocked('stale_after diferente de expires_at');
   const generated = fm.generated;
-  if (generated !== undefined && (typeof generated !== 'object' || generated === null || Array.isArray(generated) || Object.keys(generated).some((k) => k !== 'by' && k !== 'at'))) blocked('bloco generated com campos extras');
-  const known = new Set(['tier', 'tags', 'pinned', 'title', 'kind', 'expires_at', 'type', 'stale_after', ...SERVER_MANAGED]);
+  if (
+    generated !== undefined &&
+    (typeof generated !== 'object' ||
+      generated === null ||
+      Array.isArray(generated) ||
+      Object.keys(generated).some((k) => k !== 'by' && k !== 'at'))
+  )
+    blocked('bloco generated com campos extras');
+  const known = new Set([
+    'tier',
+    'tags',
+    'pinned',
+    'title',
+    'kind',
+    'expires_at',
+    'type',
+    'stale_after',
+    ...SERVER_MANAGED,
+  ]);
   const unknown = Object.keys(fm).filter((key) => !known.has(key));
   if (unknown.length) blocked(`campos que nenhum writer do ai-memory preserva (${unknown.sort().join(', ')})`);
-  const base = { tier: tier as string, tags: (tags as string[] | undefined) ?? [], pinned: pinned === true, ...(title === undefined ? {} : { title: title as string }) };
+  const base = {
+    tier: tier as string,
+    tags: (tags as string[] | undefined) ?? [],
+    pinned: pinned === true,
+    ...(title === undefined ? {} : { title: title as string }),
+  };
   if (expires !== undefined) {
     if (kind !== undefined) blocked('kind e expires_at juntos (nenhum writer do ai-memory aceita os dois)');
     return { writer: 'mcp', args: { ...base, expires_at: expires as string } };
@@ -68,7 +105,12 @@ export function planExistingEdit(scope: MemoryScope, path: string, frontmatter: 
  * from `expires_at`) when they hold the derived value.
  */
 export function preservedFrontmatter(path: string, frontmatter: Record<string, unknown>): Record<string, unknown> {
-  return Object.fromEntries(Object.entries(frontmatter).filter(([key, value]) => !SERVER_MANAGED.has(key)
-    && !(key === 'type' && value === derivedType(path, frontmatter))
-    && !(key === 'stale_after' && value === frontmatter.expires_at)));
+  return Object.fromEntries(
+    Object.entries(frontmatter).filter(
+      ([key, value]) =>
+        !SERVER_MANAGED.has(key) &&
+        !(key === 'type' && value === derivedType(path, frontmatter)) &&
+        !(key === 'stale_after' && value === frontmatter.expires_at),
+    ),
+  );
 }

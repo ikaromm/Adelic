@@ -33,6 +33,8 @@ export function relativeTime(value: string | undefined, now = Date.now()): strin
 }
 
 /** Keyboard hint for the global new-conversation shortcut (Ctrl+K, or ⌘K on Apple platforms). */
-export function newConversationShortcut(platform = typeof navigator === 'undefined' ? '' : navigator.platform || ''): string {
+export function newConversationShortcut(
+  platform = typeof navigator === 'undefined' ? '' : navigator.platform || '',
+): string {
   return /mac|iphone|ipad|ipod/i.test(platform) ? '⌘K' : 'Ctrl K';
 }

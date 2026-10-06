@@ -12,11 +12,17 @@ const sessions = [
 
 describe('bootstrap selection after an async refresh', () => {
   it('starts in the most recent standalone conversation without selecting a project', () => {
-    expect(bootstrapSelection({ projects, sessions }, '', '', false)).toEqual({ projectId: '', sessionId: 'loose-new' });
+    expect(bootstrapSelection({ projects, sessions }, '', '', false)).toEqual({
+      projectId: '',
+      sessionId: 'loose-new',
+    });
   });
 
   it('keeps a standalone conversation selected when a snapshot arrives', () => {
-    expect(bootstrapSelection({ projects, sessions }, 'b', 'loose-new', true)).toEqual({ projectId: '', sessionId: 'loose-new' });
+    expect(bootstrapSelection({ projects, sessions }, 'b', 'loose-new', true)).toEqual({
+      projectId: '',
+      sessionId: 'loose-new',
+    });
   });
 
   it('keeps an explicit new deselection through refresh', () => {
@@ -33,15 +39,28 @@ describe('bootstrap selection after an async refresh', () => {
   });
 
   it('falls back to a valid conversation in the prior project when the selection was deleted', () => {
-    expect(bootstrapSelection({ projects, sessions }, 'b', 'deleted', true)).toEqual({ projectId: 'b', sessionId: 'b1' });
+    expect(bootstrapSelection({ projects, sessions }, 'b', 'deleted', true)).toEqual({
+      projectId: 'b',
+      sessionId: 'b1',
+    });
   });
 
   it('keeps the prior project selected if its last conversation was deleted', () => {
-    expect(bootstrapSelection({ projects, sessions: sessions.filter((session) => session.projectId !== 'b') }, 'b', 'deleted', true)).toEqual({ projectId: 'b', sessionId: '' });
+    expect(
+      bootstrapSelection(
+        { projects, sessions: sessions.filter((session) => session.projectId !== 'b') },
+        'b',
+        'deleted',
+        true,
+      ),
+    ).toEqual({ projectId: 'b', sessionId: '' });
   });
 
   it('falls back to the latest standalone conversation when the prior project disappeared', () => {
-    expect(bootstrapSelection({ projects, sessions }, 'missing', 'deleted', true)).toEqual({ projectId: '', sessionId: 'loose-new' });
+    expect(bootstrapSelection({ projects, sessions }, 'missing', 'deleted', true)).toEqual({
+      projectId: '',
+      sessionId: 'loose-new',
+    });
   });
 
   it('does not pair a project with a conversation from another project', () => {
@@ -50,7 +69,10 @@ describe('bootstrap selection after an async refresh', () => {
 });
 
 describe('sidebar conversation list', () => {
-  const list = Array.from({ length: 9 }, (_, index) => ({ id: `s${index}`, updatedAt: `2026-10-0${index + 1}T10:00:00Z` }));
+  const list = Array.from({ length: 9 }, (_, index) => ({
+    id: `s${index}`,
+    updatedAt: `2026-10-0${index + 1}T10:00:00Z`,
+  }));
 
   it('orders by recent activity and reports how many are hidden', () => {
     const { items, hidden } = sidebarSessions(list, 6, false, '');

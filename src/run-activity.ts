@@ -10,7 +10,9 @@ export interface RunActivity {
 /** Keep one visible record for tool lifecycle updates such as started/completed. */
 export function activityForRun(runId: string, tasks: DelegatedTask[], events: RunEvent[]): RunActivity {
   const runTasks = tasks.filter((task) => task.runId === runId);
-  const runEvents = events.filter((event) => event.runId === runId).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  const runEvents = events
+    .filter((event) => event.runId === runId)
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   const actions: RunEvent[] = [];
   const pending = new Map<string, number[]>();
   const calls = new Map<string, number>();
@@ -73,21 +75,33 @@ export function commandPreview(text: string, maxLength = 240): string {
     if (quote === "'" && !body.replaceAll(`'\\''`, '').includes("'")) inner = body.replaceAll(`'\\''`, "'");
     if (quote === '"' && !/(^|[^\\])"/.test(body)) inner = body.replace(/\\(["\\$`])/g, '$1');
   }
-  const line = inner.split('\n').map((item) => item.trim()).find(Boolean) || '';
+  const line =
+    inner
+      .split('\n')
+      .map((item) => item.trim())
+      .find(Boolean) || '';
   return line.length > maxLength ? `${line.slice(0, maxLength - 1)}…` : line;
 }
 
 export function statusLabel(status?: string): string {
   if (!status) return 'Registrada';
   if (isActionInProgress(status)) return 'Em andamento';
-  return ({ completed: 'Concluída', failed: 'Falhou', cancelled: 'Cancelada' } as Record<string, string>)[status] || status;
+  return (
+    ({ completed: 'Concluída', failed: 'Falhou', cancelled: 'Cancelada' } as Record<string, string>)[status] || status
+  );
 }
 
 function isActionInProgress(status?: string): boolean {
-  return status === 'running' || status === 'in_progress' || status === 'started' || status === 'pending' || status === 'queued';
+  return (
+    status === 'running' ||
+    status === 'in_progress' ||
+    status === 'started' ||
+    status === 'pending' ||
+    status === 'queued'
+  );
 }
 
 export function runStatusLabel(status?: RunStatus): string | null {
   if (!status || status === 'completed') return null;
-  return ({ running: 'Em andamento', cancelled: 'Cancelada', interrupted: 'Interrompida', failed: 'Falhou' })[status];
+  return { running: 'Em andamento', cancelled: 'Cancelada', interrupted: 'Interrompida', failed: 'Falhou' }[status];
 }

@@ -6,9 +6,14 @@ class FakeUtility implements UtilityChild {
   killCalls = 0;
   private exitListeners = new Set<(code: number) => void>();
 
-  constructor(readonly state: UtilityState, public pid: number | undefined) {}
+  constructor(
+    readonly state: UtilityState,
+    public pid: number | undefined,
+  ) {}
 
-  postMessage(message: unknown) { this.messages.push(message); }
+  postMessage(message: unknown) {
+    this.messages.push(message);
+  }
 
   kill() {
     this.killCalls++;
@@ -72,9 +77,14 @@ describe('desktop utility process shutdown', () => {
   it('uses SIGKILL as the last resort and waits for the exit event to reap the child', async () => {
     const state: UtilityState = { spawned: true, exited: false };
     const child = new FakeUtility(state, 2144);
-    const forceKill = (pid: number) => { expect(pid).toBe(2144); child.exit(); };
+    const forceKill = (pid: number) => {
+      expect(pid).toBe(2144);
+      child.exit();
+    };
 
-    await expect(stopUtilityProcess(child, state, { gracefulMs: 1, terminateMs: 1, reapMs: 20, forceKill })).resolves.toBe(true);
+    await expect(
+      stopUtilityProcess(child, state, { gracefulMs: 1, terminateMs: 1, reapMs: 20, forceKill }),
+    ).resolves.toBe(true);
     expect(child.killCalls).toBe(1);
     expect(state.exited).toBe(true);
   });

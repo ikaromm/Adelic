@@ -8,12 +8,12 @@
   color-scheme: dark;
 
   /* Surfaces, darkest to lightest. */
-  --app-bg: #0f1015;          /* window frame and sidebar */
-  --canvas: #14151c;          /* chat and page background */
-  --surface: #1a1b24;         /* cards, composer, panels */
-  --surface-raised: #21222c;  /* popovers, inputs, chips (Dracula "background dark") */
-  --surface-hover: #282a36;   /* hover rows (Dracula background) */
-  --surface-active: #303241;  /* pressed / selected neutral rows */
+  --app-bg: #0f1015; /* window frame and sidebar */
+  --canvas: #14151c; /* chat and page background */
+  --surface: #1a1b24; /* cards, composer, panels */
+  --surface-raised: #21222c; /* popovers, inputs, chips (Dracula "background dark") */
+  --surface-hover: #282a36; /* hover rows (Dracula background) */
+  --surface-active: #303241; /* pressed / selected neutral rows */
   --code-bg: #0d0e12;
   --overlay: rgb(6 6 10 / 72%);
 
@@ -27,7 +27,7 @@
   --text-secondary: #c5c8dd;
   --text-muted: #969dc4;
   --text-placeholder: #858cb4;
-  --text-faint: #727aa6;      /* icons and decorative strokes only (≥ 3:1), never body text */
+  --text-faint: #727aa6; /* icons and decorative strokes only (≥ 3:1), never body text */
 
   /* Dracula palette. */
   --purple: #bd93f9;
@@ -37,17 +37,17 @@
   --orange: #ffb86c;
   --red: #ff6e6e;
   --yellow: #f1fa8c;
-  --comment: #6272a4;         /* decorative only: 3.9:1 on canvas */
+  --comment: #6272a4; /* decorative only: 3.9:1 on canvas */
 
   /* Semantic roles. */
   --accent: var(--purple);
   --accent-hover: #c9a7fb;
-  --on-accent: #14151c;       /* 7.5:1 on --accent */
+  --on-accent: #14151c; /* 7.5:1 on --accent */
   --accent-soft: color-mix(in srgb, var(--accent) 14%, transparent);
   --accent-softer: color-mix(in srgb, var(--accent) 8%, transparent);
   --accent-border: color-mix(in srgb, var(--accent) 45%, var(--border));
   --link: var(--cyan);
-  --code-inline: #ff92d0;     /* softened Dracula pink, ≥ 6.8:1 on code chips */
+  --code-inline: #ff92d0; /* softened Dracula pink, ≥ 6.8:1 on code chips */
   --selection: color-mix(in srgb, var(--accent) 32%, transparent);
 
   --success: var(--green);
@@ -62,11 +62,11 @@
   --info: var(--cyan);
   --info-soft: color-mix(in srgb, var(--cyan) 12%, transparent);
 
-  --user-bubble: color-mix(in srgb, var(--accent) 10%, var(--surface));   /* text 13.6:1, muted 5.4:1 */
+  --user-bubble: color-mix(in srgb, var(--accent) 10%, var(--surface)); /* text 13.6:1, muted 5.4:1 */
   --user-bubble-border: color-mix(in srgb, var(--accent) 20%, var(--border));
   --row-hover: color-mix(in srgb, #ffffff 4%, transparent);
   --row-active: color-mix(in srgb, #ffffff 7%, transparent);
-  --row-selected: color-mix(in srgb, var(--accent) 14%, transparent);   /* text 14:1, muted 5.8:1 over --app-bg */
+  --row-selected: color-mix(in srgb, var(--accent) 14%, transparent); /* text 14:1, muted 5.8:1 over --app-bg */
 
   --focus: #c9a7fb;
   --focus-ring: 0 0 0 3px color-mix(in srgb, var(--accent) 30%, transparent);
@@ -78,15 +78,17 @@
 
   /* Typography. No visible text below --text-2xs. */
   --font-sans: 'Inter Variable', Inter, 'Noto Sans', system-ui, -apple-system, 'Segoe UI', sans-serif;
-  --font-mono: 'JetBrains Mono Variable', 'JetBrains Mono', ui-monospace, 'SFMono-Regular', Menlo, Consolas, 'Liberation Mono', monospace;
-  --text-2xs: 11px;   /* kbd, counters, badges */
-  --text-xs: 12px;    /* metadata, captions, timestamps, hints */
-  --text-sm: 13px;    /* sidebar rows, controls, menus, buttons, table cells, descriptions */
-  --text-md: 14px;    /* default UI text, inputs, composer, settings labels */
-  --text-chat: 15px;  /* conversation prose and user bubble */
-  --text-lg: 16px;    /* card and modal titles */
+  --font-mono:
+    'JetBrains Mono Variable', 'JetBrains Mono', ui-monospace, 'SFMono-Regular', Menlo, Consolas, 'Liberation Mono',
+    monospace;
+  --text-2xs: 11px; /* kbd, counters, badges */
+  --text-xs: 12px; /* metadata, captions, timestamps, hints */
+  --text-sm: 13px; /* sidebar rows, controls, menus, buttons, table cells, descriptions */
+  --text-md: 14px; /* default UI text, inputs, composer, settings labels */
+  --text-chat: 15px; /* conversation prose and user bubble */
+  --text-lg: 16px; /* card and modal titles */
   --text-xl: 20px;
-  --text-2xl: 24px;   /* page titles */
+  --text-2xl: 24px; /* page titles */
   --text-display: 28px; /* welcome headline only */
   --leading-tight: 1.3;
   --leading: 1.5;
@@ -120,7 +122,7 @@
   --shadow-modal: 0 28px 80px -24px rgb(0 0 0 / 92%);
 
   /* Motion. */
-  --ease: cubic-bezier(.2, .7, .2, 1);
+  --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
   --duration-fast: 120ms;
   --duration: 180ms;
 

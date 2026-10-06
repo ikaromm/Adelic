@@ -2,8 +2,15 @@ import type { ProviderInfo, Thinking } from '../shared/contracts';
 import { capabilitiesReasoning, modelFor } from '../shared/reasoning';
 
 const labels: Record<string, string> = {
-  auto: 'Automático', none: 'Sem raciocínio', minimal: 'Mínimo', low: 'Baixo',
-  medium: 'Médio', high: 'Alto', xhigh: 'Muito alto', max: 'Máximo', ultra: 'Ultra',
+  auto: 'Automático',
+  none: 'Sem raciocínio',
+  minimal: 'Mínimo',
+  low: 'Baixo',
+  medium: 'Médio',
+  high: 'Alto',
+  xhigh: 'Muito alto',
+  max: 'Máximo',
+  ultra: 'Ultra',
 };
 
 export function thinkingLabel(effort?: string): string {
@@ -17,7 +24,11 @@ export function supportedThinking(provider: ProviderInfo | undefined, modelId?: 
 
 export { modelFor };
 
-export function compatibleThinking(value: Thinking | undefined, provider: ProviderInfo | undefined, modelId?: string): Thinking {
+export function compatibleThinking(
+  value: Thinking | undefined,
+  provider: ProviderInfo | undefined,
+  modelId?: string,
+): Thinking {
   const selected = value || 'auto';
   return supportedThinking(provider, modelId).includes(selected) ? selected : 'auto';
 }

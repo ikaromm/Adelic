@@ -49,7 +49,11 @@ export async function stopUtilityProcess(child: UtilityChild, state: UtilityStat
   state.stopping = true;
 
   if (state.spawned && child.pid !== undefined) {
-    try { child.postMessage({ type: 'shutdown' }); } catch { /* The utility may be exiting already. */ }
+    try {
+      child.postMessage({ type: 'shutdown' });
+    } catch {
+      /* The utility may be exiting already. */
+    }
   } else {
     child.kill();
   }
@@ -60,8 +64,11 @@ export async function stopUtilityProcess(child: UtilityChild, state: UtilityStat
 
   const pid = child.pid;
   if (pid !== undefined) {
-    try { (options.forceKill || ((targetPid) => process.kill(targetPid, 'SIGKILL')))(pid); }
-    catch { /* The process may exit between reading its PID and signaling it. */ }
+    try {
+      (options.forceKill || ((targetPid) => process.kill(targetPid, 'SIGKILL')))(pid);
+    } catch {
+      /* The process may exit between reading its PID and signaling it. */
+    }
   }
   return waitForExit(child, state, reapMs);
 }

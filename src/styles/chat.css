@@ -138,7 +138,10 @@
   background: transparent;
   color: var(--text-muted);
   opacity: 0;
-  transition: background-color var(--duration-fast) var(--ease), color var(--duration-fast) var(--ease), opacity var(--duration-fast) var(--ease);
+  transition:
+    background-color var(--duration-fast) var(--ease),
+    color var(--duration-fast) var(--ease),
+    opacity var(--duration-fast) var(--ease);
 }
 
 .message-row:hover .copy-button,
@@ -218,7 +221,7 @@
 }
 
 .markdown-content > p {
-  margin: 0 0 .8em;
+  margin: 0 0 0.8em;
 }
 
 .markdown-content > :last-child {
@@ -226,7 +229,7 @@
 }
 
 .markdown-content :is(h1, h2, h3, h4, h5, h6) {
-  margin: 1.3em 0 .5em;
+  margin: 1.3em 0 0.5em;
   color: var(--text);
   font-weight: 600;
   line-height: var(--leading-tight);
@@ -258,12 +261,12 @@
 
 .markdown-content ul,
 .markdown-content ol {
-  margin: .3em 0 .9em;
+  margin: 0.3em 0 0.9em;
   padding-left: 1.4em;
 }
 
 .markdown-content li {
-  margin: .25em 0;
+  margin: 0.25em 0;
 }
 
 .markdown-content li::marker {
@@ -287,20 +290,20 @@
 }
 
 .markdown-content blockquote {
-  margin: .8em 0;
+  margin: 0.8em 0;
   padding: 2px 0 2px 14px;
   border-left: 3px solid var(--accent-border);
   color: var(--text-secondary);
 }
 
 .markdown-content :not(pre) > code {
-  padding: .12em .4em;
+  padding: 0.12em 0.4em;
   border: 1px solid var(--border-soft);
   border-radius: var(--radius-xs);
   background: var(--surface-raised);
   color: var(--code-inline);
   font-family: var(--font-mono);
-  font-size: max(.86em, var(--text-2xs));
+  font-size: max(0.86em, var(--text-2xs));
   overflow-wrap: anywhere;
 }
 
@@ -345,7 +348,7 @@
 
 .markdown-content .code-block {
   min-width: 0;
-  margin: .9em 0;
+  margin: 0.9em 0;
   overflow: hidden;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
@@ -414,7 +417,9 @@
 
 .run-activity > details > summary {
   cursor: pointer;
-  transition: background-color var(--duration-fast) var(--ease), color var(--duration-fast) var(--ease);
+  transition:
+    background-color var(--duration-fast) var(--ease),
+    color var(--duration-fast) var(--ease);
 }
 
 .run-activity > details > summary::-webkit-details-marker,
@@ -594,7 +599,10 @@
   color: var(--text-secondary);
   font-size: var(--text-xs);
   font-weight: 500;
-  transition: background-color var(--duration-fast) var(--ease), border-color var(--duration-fast) var(--ease), color var(--duration-fast) var(--ease);
+  transition:
+    background-color var(--duration-fast) var(--ease),
+    border-color var(--duration-fast) var(--ease),
+    color var(--duration-fast) var(--ease);
 }
 
 .task-output-button:hover {
@@ -826,7 +834,7 @@
   color: var(--text);
   font-size: var(--text-display);
   font-weight: 650;
-  letter-spacing: -.025em;
+  letter-spacing: -0.025em;
 }
 
 .welcome-view > p {
@@ -861,7 +869,10 @@
   color: var(--text-secondary);
   font-size: var(--text-sm);
   text-align: left;
-  transition: background-color var(--duration-fast) var(--ease), border-color var(--duration-fast) var(--ease), color var(--duration-fast) var(--ease);
+  transition:
+    background-color var(--duration-fast) var(--ease),
+    border-color var(--duration-fast) var(--ease),
+    color var(--duration-fast) var(--ease);
 }
 
 .welcome-suggestions > button > span,
@@ -944,7 +955,9 @@
   box-shadow: var(--shadow-md);
   color: var(--text-secondary);
   animation: pop-in var(--duration) var(--ease) both;
-  transition: background-color var(--duration-fast) var(--ease), color var(--duration-fast) var(--ease);
+  transition:
+    background-color var(--duration-fast) var(--ease),
+    color var(--duration-fast) var(--ease);
 }
 
 .jump-to-latest:hover {
@@ -957,7 +970,9 @@
   border-radius: var(--radius-2xl);
   background: var(--surface);
   box-shadow: var(--shadow-composer);
-  transition: border-color var(--duration-fast) var(--ease), box-shadow var(--duration-fast) var(--ease);
+  transition:
+    border-color var(--duration-fast) var(--ease),
+    box-shadow var(--duration-fast) var(--ease);
 }
 
 .composer-box:focus-within {
@@ -1033,7 +1048,10 @@
   color: var(--text-secondary);
   font-size: var(--text-sm);
   font-weight: 500;
-  transition: background-color var(--duration-fast) var(--ease), border-color var(--duration-fast) var(--ease), color var(--duration-fast) var(--ease);
+  transition:
+    background-color var(--duration-fast) var(--ease),
+    border-color var(--duration-fast) var(--ease),
+    color var(--duration-fast) var(--ease);
 }
 
 .composer-pill:hover:not(:disabled),
@@ -1049,7 +1067,7 @@
 }
 
 .composer-pill:disabled {
-  opacity: .55;
+  opacity: 0.55;
 }
 
 .composer-pill > svg,
@@ -1097,7 +1115,10 @@
   border-radius: var(--radius-full);
   background: var(--accent);
   color: var(--on-accent);
-  transition: background-color var(--duration-fast) var(--ease), color var(--duration-fast) var(--ease), transform var(--duration-fast) var(--ease);
+  transition:
+    background-color var(--duration-fast) var(--ease),
+    color var(--duration-fast) var(--ease),
+    transform var(--duration-fast) var(--ease);
 }
 
 .send-button:hover:not(:disabled) {
@@ -1105,7 +1126,7 @@
 }
 
 .send-button:active:not(:disabled) {
-  transform: scale(.96);
+  transform: scale(0.96);
 }
 
 .send-button:disabled {
@@ -1143,11 +1164,17 @@
 }
 
 @keyframes popover-from-top {
-  from { opacity: 0; transform: translateY(4px); }
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
 }
 
 @keyframes popover-from-bottom {
-  from { opacity: 0; transform: translateY(-4px); }
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
 }
 
 .composer-popover :focus-visible {
@@ -1189,7 +1216,9 @@
   font-weight: 500;
   text-align: left;
   overflow-wrap: anywhere;
-  transition: background-color var(--duration-fast) var(--ease), color var(--duration-fast) var(--ease);
+  transition:
+    background-color var(--duration-fast) var(--ease),
+    color var(--duration-fast) var(--ease);
 }
 
 .provider-rail > button:hover,
@@ -1228,7 +1257,9 @@
   border-radius: var(--radius-md);
   background: var(--surface);
   color: var(--text-muted);
-  transition: border-color var(--duration-fast) var(--ease), box-shadow var(--duration-fast) var(--ease);
+  transition:
+    border-color var(--duration-fast) var(--ease),
+    box-shadow var(--duration-fast) var(--ease);
 }
 
 .model-search:focus-within {
@@ -1284,7 +1315,9 @@
   background: transparent;
   color: var(--text-secondary);
   text-align: left;
-  transition: background-color var(--duration-fast) var(--ease), color var(--duration-fast) var(--ease);
+  transition:
+    background-color var(--duration-fast) var(--ease),
+    color var(--duration-fast) var(--ease);
 }
 
 .model-option:hover:not(:disabled),
@@ -1303,7 +1336,7 @@
 
 .model-option:disabled,
 .choice-option:disabled {
-  opacity: .5;
+  opacity: 0.5;
 }
 
 /* Options without a description (e.g. thinking levels) use a compact single-line row. */
@@ -1363,7 +1396,7 @@
   color: var(--text-muted);
   font-size: var(--text-2xs);
   font-weight: 600;
-  letter-spacing: .06em;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
 }
 
@@ -1425,7 +1458,10 @@
   color: var(--text-secondary);
   font-size: var(--text-sm);
   font-weight: 500;
-  transition: background-color var(--duration-fast) var(--ease), color var(--duration-fast) var(--ease), box-shadow var(--duration-fast) var(--ease);
+  transition:
+    background-color var(--duration-fast) var(--ease),
+    color var(--duration-fast) var(--ease),
+    box-shadow var(--duration-fast) var(--ease);
 }
 
 .mode-switch > button:hover,

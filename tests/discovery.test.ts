@@ -5,7 +5,9 @@ import path from 'node:path';
 import { desktopPath, findProviderBinary } from '../server/providers/discovery';
 
 const temporaryDirectories: string[] = [];
-afterEach(async () => { await Promise.all(temporaryDirectories.splice(0).map((directory) => rm(directory, { recursive: true, force: true }))); });
+afterEach(async () => {
+  await Promise.all(temporaryDirectories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
+});
 
 async function tempDir() {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'adelic-discovery-'));
@@ -27,9 +29,13 @@ describe('provider binary discovery', () => {
     await executable(path.join(root, 'home/.local/bin/codex'));
     const pathBin = await executable(path.join(root, 'path/codex'));
 
-    await expect(findProviderBinary('codex', {
-      HOME: path.join(root, 'home'), MISE_DATA_DIR: path.join(root, 'mise'), PATH: path.dirname(pathBin),
-    })).resolves.toBe(miseBin);
+    await expect(
+      findProviderBinary('codex', {
+        HOME: path.join(root, 'home'),
+        MISE_DATA_DIR: path.join(root, 'mise'),
+        PATH: path.dirname(pathBin),
+      }),
+    ).resolves.toBe(miseBin);
   });
 
   it('uses a valid explicit override and never falls through from an invalid one', async () => {
@@ -39,12 +45,20 @@ describe('provider binary discovery', () => {
     await executable(path.join(root, 'home/.local/bin/claude'));
     const pathBinary = await executable(path.join(root, 'path/claude'));
 
-    await expect(findProviderBinary('claude', {
-      HOME: path.join(root, 'home'), ADELIC_CLAUDE_BIN: override, PATH: path.dirname(pathBinary),
-    })).resolves.toBe(override);
-    await expect(findProviderBinary('claude', {
-      HOME: path.join(root, 'home'), ADELIC_CLAUDE_BIN: invalidOverride, PATH: path.dirname(pathBinary),
-    })).resolves.toBeUndefined();
+    await expect(
+      findProviderBinary('claude', {
+        HOME: path.join(root, 'home'),
+        ADELIC_CLAUDE_BIN: override,
+        PATH: path.dirname(pathBinary),
+      }),
+    ).resolves.toBe(override);
+    await expect(
+      findProviderBinary('claude', {
+        HOME: path.join(root, 'home'),
+        ADELIC_CLAUDE_BIN: invalidOverride,
+        PATH: path.dirname(pathBinary),
+      }),
+    ).resolves.toBeUndefined();
   });
 
   it('rejects non-files and files without execute permission', async () => {
@@ -68,10 +82,14 @@ describe('provider binary discovery', () => {
   it('finds Kiro under the direct mise tool name and uses PATH as the last fallback', async () => {
     const root = await tempDir();
     const kiro = await executable(path.join(root, 'mise/installs/kiro/1.2.3/bin/kiro-cli'));
-    await expect(findProviderBinary('kiro', { HOME: path.join(root, 'home'), MISE_DATA_DIR: path.join(root, 'mise'), PATH: '' })).resolves.toBe(kiro);
+    await expect(
+      findProviderBinary('kiro', { HOME: path.join(root, 'home'), MISE_DATA_DIR: path.join(root, 'mise'), PATH: '' }),
+    ).resolves.toBe(kiro);
 
     const opencode = await executable(path.join(root, 'path/opencode'));
-    await expect(findProviderBinary('opencode', { HOME: path.join(root, 'home'), PATH: path.dirname(opencode) })).resolves.toBe(opencode);
+    await expect(
+      findProviderBinary('opencode', { HOME: path.join(root, 'home'), PATH: path.dirname(opencode) }),
+    ).resolves.toBe(opencode);
   });
 });
 

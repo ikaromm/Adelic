@@ -11,7 +11,12 @@ const PROVIDERS: Record<ProviderTool, { override: string; binary: string; miseTo
   kiro: { override: 'ADELIC_KIRO_BIN', binary: 'kiro-cli', miseTools: ['kiro', 'kiro-cli'] },
   opencode: { override: 'ADELIC_OPENCODE_BIN', binary: 'opencode', miseTools: ['opencode'] },
 };
-const PROVIDER_LABELS: Record<ProviderTool, string> = { codex: 'Codex', claude: 'Claude Code', kiro: 'Kiro CLI', opencode: 'OpenCode' };
+const PROVIDER_LABELS: Record<ProviderTool, string> = {
+  codex: 'Codex',
+  claude: 'Claude Code',
+  kiro: 'Kiro CLI',
+  opencode: 'OpenCode',
+};
 
 export function providerBinaryMissingDetail(tool: ProviderTool, env: NodeJS.ProcessEnv = process.env): string {
   const override = PROVIDERS[tool].override;
@@ -27,11 +32,15 @@ function homeDir(env: NodeJS.ProcessEnv): string {
 }
 
 function miseDataDirs(env: NodeJS.ProcessEnv, home: string): string[] {
-  return [...new Set([
-    env.MISE_DATA_DIR?.trim(),
-    env.XDG_DATA_HOME?.trim() ? path.join(env.XDG_DATA_HOME.trim(), 'mise') : undefined,
-    path.join(home, '.local/share/mise'),
-  ].filter((item): item is string => Boolean(item)))];
+  return [
+    ...new Set(
+      [
+        env.MISE_DATA_DIR?.trim(),
+        env.XDG_DATA_HOME?.trim() ? path.join(env.XDG_DATA_HOME.trim(), 'mise') : undefined,
+        path.join(home, '.local/share/mise'),
+      ].filter((item): item is string => Boolean(item)),
+    ),
+  ];
 }
 
 async function executableFile(candidate: string): Promise<boolean> {
@@ -40,7 +49,9 @@ async function executableFile(candidate: string): Promise<boolean> {
     if (!info.isFile() || (info.mode & 0o111) === 0) return false;
     await access(candidate, constants.X_OK);
     return true;
-  } catch { return false; }
+  } catch {
+    return false;
+  }
 }
 
 async function firstExecutable(candidates: Iterable<string>): Promise<string | undefined> {
@@ -56,7 +67,11 @@ async function directMiseCandidates(dataDirs: string[], toolNames: string[], bin
       const toolRoot = path.join(installRoot, toolName);
       candidates.push(path.join(toolRoot, 'bin', binary));
       let versions: string[];
-      try { versions = await readdir(toolRoot); } catch { continue; }
+      try {
+        versions = await readdir(toolRoot);
+      } catch {
+        continue;
+      }
       versions.sort((a, b) => {
         if (a === 'latest') return -1;
         if (b === 'latest') return 1;
@@ -74,26 +89,36 @@ async function directMiseCandidates(dataDirs: string[], toolNames: string[], bin
 function localCandidates(tool: ProviderTool, home: string): string[] {
   const localBin = path.join(home, '.local/bin');
   switch (tool) {
-    case 'codex': return [path.join(localBin, 'codex')];
-    case 'claude': return [path.join(localBin, 'claude'), path.join(home, '.claude/local/claude')];
-    case 'kiro': return [path.join(localBin, 'kiro-cli')];
-    case 'opencode': return [path.join(localBin, 'opencode'), path.join(home, '.opencode/bin/opencode')];
+    case 'codex':
+      return [path.join(localBin, 'codex')];
+    case 'claude':
+      return [path.join(localBin, 'claude'), path.join(home, '.claude/local/claude')];
+    case 'kiro':
+      return [path.join(localBin, 'kiro-cli')];
+    case 'opencode':
+      return [path.join(localBin, 'opencode'), path.join(home, '.opencode/bin/opencode')];
   }
 }
 
 function pathCandidates(binary: string, env: NodeJS.ProcessEnv): string[] {
-  return (env.PATH ?? '').split(path.delimiter).filter(Boolean).map((directory) => path.join(directory, binary));
+  return (env.PATH ?? '')
+    .split(path.delimiter)
+    .filter(Boolean)
+    .map((directory) => path.join(directory, binary));
 }
 
 /** Locate a provider CLI without invoking a shell or trusting an invalid override as a fallback. */
-export async function findProviderBinary(tool: ProviderTool, env: NodeJS.ProcessEnv = process.env): Promise<string | undefined> {
+export async function findProviderBinary(
+  tool: ProviderTool,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<string | undefined> {
   const provider = PROVIDERS[tool];
   const override = env[provider.override];
   if (override !== undefined) {
     const configured = override.trim();
     if (!configured) return undefined;
     const resolved = path.resolve(configured);
-    return await executableFile(resolved) ? resolved : undefined;
+    return (await executableFile(resolved)) ? resolved : undefined;
   }
 
   const home = homeDir(env);
@@ -113,14 +138,22 @@ function existingDirectories(candidates: Iterable<string>): string[] {
     const normalized = path.resolve(candidate);
     if (seen.has(normalized)) continue;
     seen.add(normalized);
-    try { if (statSync(normalized).isDirectory()) result.push(normalized); } catch { /* A launcher may have an incomplete PATH. */ }
+    try {
+      if (statSync(normalized).isDirectory()) result.push(normalized);
+    } catch {
+      /* A launcher may have an incomplete PATH. */
+    }
   }
   return result;
 }
 
 function versionedBinDirs(root: string): string[] {
   let entries: string[];
-  try { entries = readdirSync(root); } catch { return []; }
+  try {
+    entries = readdirSync(root);
+  } catch {
+    return [];
+  }
   entries.sort((a, b) => {
     if (a === 'latest') return -1;
     if (b === 'latest') return 1;
@@ -153,13 +186,21 @@ export function desktopPath(env: NodeJS.ProcessEnv = process.env): string {
     ...miseDirs.flatMap((base) => {
       const installs = path.join(base, 'installs');
       let tools: string[];
-      try { tools = readdirSync(installs); } catch { return []; }
+      try {
+        tools = readdirSync(installs);
+      } catch {
+        return [];
+      }
       return tools.flatMap((tool) => versionedBinDirs(path.join(installs, tool)));
     }),
     ...versionedBinDirs(path.join(env.ASDF_DATA_DIR?.trim() || path.join(home, '.asdf'), 'installs/node')),
-    ...versionedBinDirs(env.NVM_DIR?.trim() ? path.join(env.NVM_DIR.trim(), 'versions/node') : path.join(home, '.nvm/versions/node')),
+    ...versionedBinDirs(
+      env.NVM_DIR?.trim() ? path.join(env.NVM_DIR.trim(), 'versions/node') : path.join(home, '.nvm/versions/node'),
+    ),
     ...(env.PATH ?? '').split(path.delimiter).filter(Boolean),
-    '/usr/local/bin', '/usr/bin', '/bin',
+    '/usr/local/bin',
+    '/usr/bin',
+    '/bin',
   ];
   return existingDirectories(candidates.filter((item): item is string => Boolean(item))).join(path.delimiter);
 }

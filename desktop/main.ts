@@ -2,17 +2,13 @@ import { DatabaseSync } from 'node:sqlite';
 import { existsSync, mkdirSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
-import {
-  app, BrowserWindow, dialog, shell, session, utilityProcess,
-  type UtilityProcess,
-} from 'electron';
+import { app, BrowserWindow, dialog, shell, session, utilityProcess, type UtilityProcess } from 'electron';
 import { desktopPath } from '../server/providers/discovery.js';
 import { desktopResources, navigationPolicy, resolveDesktopDataDir } from './policy.js';
 import { stopUtilityProcess, type UtilityState } from './utility-lifecycle.js';
 
 type BackendMessage =
-  | { type: 'ready'; url: string; port: number; nodeVersion: string }
-  | { type: 'error'; message: string };
+  { type: 'ready'; url: string; port: number; nodeVersion: string } | { type: 'error'; message: string };
 type SmokeResult = {
   ok: boolean;
   forwarded?: boolean;
@@ -77,7 +73,10 @@ function writeReport() {
   }
 }
 
-function waitForBackendReady(child: UtilityProcess, backendEntry: string): Promise<Extract<BackendMessage, { type: 'ready' }>> {
+function waitForBackendReady(
+  child: UtilityProcess,
+  backendEntry: string,
+): Promise<Extract<BackendMessage, { type: 'ready' }>> {
   return new Promise((resolveReady, rejectReady) => {
     let settled = false;
     const timeout = setTimeout(() => finish(new Error('O servidor local demorou para iniciar.')), 60_000);
@@ -98,7 +97,8 @@ function waitForBackendReady(child: UtilityProcess, backendEntry: string): Promi
       if (message.type === 'ready') finish(undefined, message);
     };
     const onExit = (code: number) => finish(new Error(`O servidor local encerrou durante a inicialização (${code}).`));
-    const onFatalError = () => finish(new Error(`O processo do servidor local não conseguiu abrir ${basename(backendEntry)}.`));
+    const onFatalError = () =>
+      finish(new Error(`O processo do servidor local não conseguiu abrir ${basename(backendEntry)}.`));
     child.on('message', onMessage);
     child.on('exit', onExit);
     child.on('error', onFatalError);
@@ -172,8 +172,12 @@ function createWindow(iconPath: string) {
   });
   mainWindow = window;
   installWindowPolicies(window);
-  window.once('ready-to-show', () => { if (!window.isDestroyed()) window.show(); });
-  window.on('closed', () => { if (mainWindow === window) mainWindow = null; });
+  window.once('ready-to-show', () => {
+    if (!window.isDestroyed()) window.show();
+  });
+  window.on('closed', () => {
+    if (mainWindow === window) mainWindow = null;
+  });
   return window;
 }
 
@@ -192,7 +196,7 @@ async function runSmoke(window: BrowserWindow) {
 
   const response = await fetch(`${url}/api/bootstrap`, { signal: AbortSignal.timeout(90_000) });
   if (!response.ok) throw new Error(`A API local respondeu com HTTP ${response.status}.`);
-  const bootstrap = await response.json() as { projects?: unknown; sessions?: unknown };
+  const bootstrap = (await response.json()) as { projects?: unknown; sessions?: unknown };
   if (!Array.isArray(bootstrap.projects) || !Array.isArray(bootstrap.sessions)) {
     throw new Error('A API local não retornou os dados persistidos esperados.');
   }
@@ -332,13 +336,33 @@ app.on('before-quit', (event) => {
   void requestQuit(requestedExitCode);
 });
 
-app.on('window-all-closed', () => { void requestQuit(0); });
-app.on('will-quit', () => { if (backend?.pid !== undefined) { try { backend.kill(); } catch { /* Last-resort fallback after Electron shutdown was requested. */ } } });
-process.once('SIGINT', () => { void requestQuit(0); });
-process.once('SIGTERM', () => { void requestQuit(0); });
-
-app.whenReady().then(() => startDesktop()).catch((error: unknown) => {
-  if (shutdownRequested) { void requestQuit(requestedExitCode); return; }
-  const failure = error instanceof Error ? error : new Error('Falha inesperada ao iniciar o Adelic.');
-  void showStartupFailure(failure);
+app.on('window-all-closed', () => {
+  void requestQuit(0);
 });
+app.on('will-quit', () => {
+  if (backend?.pid !== undefined) {
+    try {
+      backend.kill();
+    } catch {
+      /* Last-resort fallback after Electron shutdown was requested. */
+    }
+  }
+});
+process.once('SIGINT', () => {
+  void requestQuit(0);
+});
+process.once('SIGTERM', () => {
+  void requestQuit(0);
+});
+
+app
+  .whenReady()
+  .then(() => startDesktop())
+  .catch((error: unknown) => {
+    if (shutdownRequested) {
+      void requestQuit(requestedExitCode);
+      return;
+    }
+    const failure = error instanceof Error ? error : new Error('Falha inesperada ao iniciar o Adelic.');
+    void showStartupFailure(failure);
+  });

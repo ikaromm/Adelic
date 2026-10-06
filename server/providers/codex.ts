@@ -5,6 +5,15 @@ import { mkdtemp, chmod, rm } from 'node:fs/promises';
 import type { ProviderEvent, ProviderInfo, RunInput, RunResult, Sandbox } from '../../shared/contracts';
 import { abortError, boundedPrompt, emitApproval } from './common';
 import { CommandScope, runCommand, type CommandExecutor, type CommandResult } from './command';
+import {
+  DeltaParams,
+  ErrorParams,
+  ItemParams,
+  TOOL_ITEM_TYPES,
+  ThreadIdParams,
+  TurnParams,
+  parseParams,
+} from './codex-protocol';
 import { errorMessage, isRecord, JsonRpcProcess, type JsonRpcMessage } from './process';
 import { findProviderBinary, hasProviderBinaryOverride, providerBinaryMissingDetail } from './discovery';
 import { canonWritePathWithin, classifyApproval, scanCodexRules } from '../approval-policy';
@@ -526,33 +535,29 @@ export class CodexProvider {
     if (!rpc) return;
     if (rpc.dispatch(message)) return;
     if (!message.method || message.id === undefined) {
-      const params = isRecord(message.params) ? message.params : {};
-      const threadId = String(params.threadId ?? '');
+      const threadId = parseParams(ThreadIdParams, message.params)?.threadId ?? '';
       const turn = this.byThread.get(`${server.key}\n${threadId}`);
       if (!turn) return;
       if (message.method === 'item/agentMessage/delta') {
-        const delta = typeof params.delta === 'string' ? params.delta : '';
-        if (delta) {
-          turn.text += delta;
-          turn.emit({ type: 'delta', text: delta });
+        const params = parseParams(DeltaParams, message.params);
+        if (params?.delta) {
+          turn.text += params.delta;
+          turn.emit({ type: 'delta', text: params.delta });
         }
       } else if (message.method === 'item/started' || message.method === 'item/completed') {
-        const item = isRecord(params.item) ? params.item : {};
-        const itemType = String(item.type ?? '');
-        if (itemType === 'commandExecution' || itemType === 'mcpToolCall' || itemType === 'fileChange')
+        const item = parseParams(ItemParams, message.params)?.item;
+        if (item && TOOL_ITEM_TYPES.has(item.type))
           turn.emit({
             type: 'tool',
-            name: itemType,
-            description: String(item.command ?? item.title ?? itemType),
-            status: message.method === 'item/started' ? 'running' : String(item.status ?? 'completed'),
-            ...(typeof item.id === 'string' || typeof item.id === 'number' ? { toolCallId: String(item.id) } : {}),
+            name: item.type,
+            description: item.command ?? item.title ?? item.type,
+            status: message.method === 'item/started' ? 'running' : (item.status ?? 'completed'),
+            ...(item.id !== undefined ? { toolCallId: item.id } : {}),
           });
       } else if (message.method === 'turn/started') {
-        const info = isRecord(params.turn) ? params.turn : {};
-        turn.turnId = String(info.id ?? '');
+        turn.turnId = parseParams(TurnParams, message.params)?.turn?.id ?? '';
       } else if (message.method === 'turn/completed') {
-        const turnInfo = isRecord(params.turn) ? params.turn : {};
-        const status = String(turnInfo.status ?? 'completed');
+        const status = parseParams(TurnParams, message.params)?.turn?.status ?? 'completed';
         if (status === 'failed')
           this.finishTurn(
             turn,
@@ -566,11 +571,11 @@ export class CodexProvider {
             stopReason: status === 'interrupted' ? 'cancelled' : 'completed',
           });
       } else if (message.method === 'error') {
-        const err = isRecord(params.error) ? params.error : params;
+        const params = parseParams(ErrorParams, message.params);
         this.finishTurn(
           turn,
           { text: turn.text, nativeSessionId: turn.threadId, stopReason: 'completed' },
-          new Error(errorMessage(err.message ?? 'Erro do Codex.')),
+          new Error(errorMessage(params?.error?.message ?? params?.message ?? 'Erro do Codex.')),
         );
       }
       return;

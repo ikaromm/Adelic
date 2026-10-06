@@ -1,5 +1,35 @@
 import { spawn, type ChildProcess, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
+import { z } from 'zod';
+
+const JsonRpcIdSchema = z.union([z.string(), z.number()]);
+/** JSON-RPC 2.0 envelope as sent by the Codex app-server and Kiro ACP. Params stay opaque here. */
+export const JsonRpcMessageSchema = z
+  .object({
+    jsonrpc: z.string().optional(),
+    id: JsonRpcIdSchema.optional(),
+    method: z.string().optional(),
+    params: z.unknown().optional(),
+    result: z.unknown().optional(),
+    error: z
+      .object({ code: z.number().optional(), message: z.string().optional(), data: z.unknown().optional() })
+      .passthrough()
+      .optional(),
+  })
+  .passthrough()
+  .refine((m) => m.method !== undefined || m.id !== undefined, 'mensagem sem method nem id');
+
+/** Parses one protocol line; undefined for non-JSON or non-JSON-RPC lines. */
+export function parseJsonRpcLine(line: string): JsonRpcMessage | undefined {
+  let value: unknown;
+  try {
+    value = JSON.parse(line);
+  } catch {
+    return undefined;
+  }
+  const parsed = JsonRpcMessageSchema.safeParse(value);
+  return parsed.success ? (parsed.data as JsonRpcMessage) : undefined;
+}
 
 export interface JsonRpcMessage {
   jsonrpc?: string;
@@ -19,6 +49,10 @@ export class JsonRpcProcess {
   >();
   private buffer = '';
   private stderrTail = '';
+  /** Protocol health, exposed for diagnostics: skipped non-JSON-RPC lines and handler failures. */
+  ignoredLines = 0;
+  handlerErrors = 0;
+  lastHandlerError = '';
   private closed = false;
   private exitPromise: Promise<void>;
   private exitResolve!: () => void;
@@ -76,10 +110,19 @@ export class JsonRpcProcess {
       const line = this.buffer.slice(0, newline).trim();
       this.buffer = this.buffer.slice(newline + 1);
       if (!line) continue;
+      // Lines that are not JSON or not a JSON-RPC envelope (CLI banners, logs) are skipped.
+      // A valid message whose handler throws must not stop the stream: it is counted so
+      // the failure is visible in diagnostics instead of vanishing.
+      const message = parseJsonRpcLine(line);
+      if (!message) {
+        this.ignoredLines++;
+        continue;
+      }
       try {
-        this.onMessage(JSON.parse(line) as JsonRpcMessage);
-      } catch {
-        /* Ignore malformed unsolicited lines. */
+        this.onMessage(message);
+      } catch (error) {
+        this.handlerErrors++;
+        this.lastHandlerError = sanitizeDiagnostic(errorMessage(error)).slice(0, 300);
       }
     }
   }

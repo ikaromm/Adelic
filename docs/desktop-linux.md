@@ -66,4 +66,8 @@ O smoke requer uma sessão gráfica X11/Wayland. Usa dados temporários e PATH i
 
 O AppImage ainda depende de bibliotecas de desktop do sistema: glibc, GTK3, NSS, ALSA, bibliotecas X11/Wayland e gráficos compatíveis com Electron. Não é um binário para Alpine/musl. O sandbox Chromium deve permanecer ativo; restrições a user namespaces do sistema precisam ser resolvidas na distribuição. A [documentação de segurança do Electron](https://www.electronjs.org/docs/latest/tutorial/security) fundamenta o isolamento do renderer.
 
-A validação desta etapa foi feita em Arch/Omarchy x86_64 com Wayland. Ubuntu, Debian, Fedora e outras distribuições ainda precisam de testes próprios; o pacote produzido não comprova compatibilidade com todas elas. Evidências e limitações estão em [validation.md](validation.md), e os contratos em [desktop-linux.md da especificação](specs/desktop-linux.md).
+Compatibilidade verificada (x86_64):
+- Arch/Omarchy com Wayland: uso real.
+- Ubuntu 24.04, Ubuntu 22.04, Debian 12 e Fedora 42: smoke gráfico headless na CI (X11 via xvfb), com janela, API, SQLite, segunda instância, encerramento e reabertura.
+
+Em Ubuntu 24.04 ou mais novo e Debian 13 ou mais novo, a política do AppArmor que restringe user namespaces precisa ser relaxada para o bubblewrap. Outras distribuições e arquiteturas não foram testadas. Evidências e limitações estão em [validation.md](validation.md), e os contratos em [desktop-linux.md da especificação](specs/desktop-linux.md).

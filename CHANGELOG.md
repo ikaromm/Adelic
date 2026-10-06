@@ -2,7 +2,14 @@
 
 ## Não publicado
 
-_Nada ainda._
+- Busca em todas as conversas (títulos e mensagens, sem diferenciar acentos) com Ctrl+Shift+F, e exportação da conversa aberta em Markdown ou JSON.
+- Tokens por execução, quando o provedor informa (Codex informa; custo continua "não informado", nunca zero).
+- Aviso de nova versão, opcional e desligado por padrão: uma consulta anônima ao GitHub, sem baixar nem instalar nada.
+- Acesso remoto opcional e desligado por padrão, protegido por token (`ADELIC_REMOTE_BIND` e `ADELIC_REMOTE_TOKEN`); veja [acesso remoto](docs/specs/remote-access.md).
+- Respostas do ai-memory e dos CLIs validadas com zod; formatos inesperados viram erros claros em vez de campos vazios.
+- AppImage testado na CI também em Ubuntu 22.04, Debian 12 e Fedora 42; a release só é publicada depois do smoke do AppImage e traz atestado de proveniência.
+- Testes de integração contra ai-memory 2.1.0 e 2.5.2, cobertura com piso, Dependabot, e novos testes de memória, delegação e criação de projeto.
+- Avaliação do ai-jail ([decisão](docs/specs/ai-jail.md)) e [propostas ao ai-memory](docs/specs/ai-memory-proposals.md).
 
 ## 0.4.0 — 2026-10-06
 

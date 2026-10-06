@@ -192,7 +192,8 @@ describe('provider runtime helpers', () => {
     const script = path.join(directory, 'ignore-term.mjs');
     await writeFile(
       script,
-      `#!/usr/bin/env node\nimport fs from 'node:fs';\nfs.writeFileSync(${JSON.stringify(pidPath)}, String(process.pid));\nprocess.on('SIGTERM', () => {});\nsetInterval(() => {}, 1000);\n`,
+      // Ignore SIGTERM before announcing the pid, or a fast kill can land before the handler exists.
+      `#!/usr/bin/env node\nimport fs from 'node:fs';\nprocess.on('SIGTERM', () => {});\nfs.writeFileSync(${JSON.stringify(pidPath)}, String(process.pid));\nsetInterval(() => {}, 1000);\n`,
     );
     await chmod(script, 0o755);
     const rpc = new JsonRpcProcess(script, [], directory, () => undefined);
@@ -217,7 +218,7 @@ describe('provider runtime helpers', () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), 'adelic-command-shutdown-'));
     temporaryDirectories.push(directory);
     const pidPath = path.join(directory, 'pid');
-    const script = `import fs from 'node:fs'; fs.writeFileSync(${JSON.stringify(pidPath)}, String(process.pid)); process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);`;
+    const script = `import fs from 'node:fs'; process.on('SIGTERM', () => {}); fs.writeFileSync(${JSON.stringify(pidPath)}, String(process.pid)); setInterval(() => {}, 1000);`;
     const commands = new CommandScope();
     const pending = commands.run(process.execPath, ['-e', script], 10_000);
     let pidText = '';

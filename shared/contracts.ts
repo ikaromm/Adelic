@@ -659,6 +659,12 @@ export interface RunInput {
    */
   blockedCommands?: string[];
   /**
+   * Graphify paths Adelic trusts (GraphifyService.approvalPaths): the binary and this project's
+   * graph directory. The safe-command classifier auto-approves exactly the query Adelic
+   * suggests. Absent (detached conversations, Graphify off or missing) → graphify asks.
+   */
+  graphifyApproval?: { binary: string; graphsRoot: string };
+  /**
    * MCP servers the project enabled (docs/specs/mcp-catalog.md). Absent or empty means none:
    * providers keep failing closed on any MCP server. Never set for detached conversations.
    */

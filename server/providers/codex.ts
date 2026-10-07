@@ -828,6 +828,7 @@ export class CodexProvider {
           sandbox: turn.input.sandbox,
           networkApprovalContext: params.networkApprovalContext,
           trustedNonLoginShell: environmentTrusted,
+          ...(turn.input.graphifyApproval ? { graphify: turn.input.graphifyApproval } : {}),
         })
           .then((result) => {
             if (

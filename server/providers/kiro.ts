@@ -8,6 +8,8 @@ import { bubblewrap, mcpCommandBindings } from './sandbox';
 import type { RunMcpServer } from '../../shared/mcp';
 import { errorMessage, isRecord, JsonRpcProcess, type JsonRpcMessage } from './process';
 import { findProviderBinary, hasProviderBinaryOverride, providerBinaryMissingDetail } from './discovery';
+import { classifyApproval } from '../approval-policy';
+import { blockedBy } from '../../shared/hooks';
 
 interface KiroTurn {
   input: RunInput;
@@ -75,6 +77,43 @@ export function kiroForeignMcp(response: unknown, approved: string[]): string[] 
     names.push(server.name);
   }
   return names.filter((name) => !approved.includes(name));
+}
+
+/**
+ * The shell command of a Kiro `session/request_permission`, only when the payload identifies
+ * Kiro's own shell tool without ambiguity (Kiro 2.23, ACP v2 engine): a `Running: …` title, a
+ * `rawInput` holding only the command (and Kiro's purpose note), and no other tool kind. Any
+ * extra field (a working directory, for instance) leaves the request manual.
+ */
+export function kiroShellCommand(params: Record<string, unknown>): string | undefined {
+  const toolCall = isRecord(params.toolCall) ? params.toolCall : undefined;
+  if (!toolCall) return undefined;
+  const rawInput = isRecord(toolCall.rawInput) ? toolCall.rawInput : undefined;
+  if (!rawInput || typeof rawInput.command !== 'string' || !rawInput.command.trim()) return undefined;
+  if (Object.keys(rawInput).some((key) => key !== 'command' && key !== '__tool_use_purpose')) return undefined;
+  if (toolCall.kind !== undefined && toolCall.kind !== 'execute') return undefined;
+  if (typeof toolCall.title !== 'string' || !toolCall.title.startsWith('Running: ')) return undefined;
+  return rawInput.command;
+}
+
+/**
+ * Kiro runs shell commands with a shell Adelic does not choose. Commands are auto-approved only
+ * when that shell is bash or sh: non-interactive bash reads only BASH_ENV (neutralized in
+ * kiroEnvironment), and no Kiro shell override is set.
+ */
+export function kiroShellNeutral(env: NodeJS.ProcessEnv): boolean {
+  if (['KIRO_CHAT_SHELL', 'AMAZON_Q_CHAT_SHELL', 'KIRO_SHELL', 'Q_SHELL'].some((name) => env[name])) return false;
+  return !env.SHELL || ['/bin/bash', '/usr/bin/bash', '/bin/sh', '/usr/bin/sh'].includes(env.SHELL);
+}
+
+/** Kiro's environment: shell startup hooks inherited from Adelic are neutralized, as for Codex. */
+export function kiroEnvironment(env: NodeJS.ProcessEnv, home: string): NodeJS.ProcessEnv {
+  const next = Object.fromEntries(
+    Object.entries(env).filter(
+      ([key]) => !key.startsWith('BASH_FUNC_') && !['SHELLOPTS', 'BASHOPTS', 'PS4'].includes(key),
+    ),
+  ) as NodeJS.ProcessEnv;
+  return { ...next, KIRO_HOME: home, KIRO_LOG_NO_COLOR: '1', NO_COLOR: '1', BASH_ENV: '/dev/null', ENV: '/dev/null' };
 }
 
 export function kiroToolEvent(
@@ -266,31 +305,104 @@ export class KiroProvider {
       const processId = this.processIds.get(process) ?? this.nextProcessId++;
       this.processIds.set(process, processId);
       const approvalId = `${turn.input.runId}:${processId}:${String(message.id)}`;
-      this.approvals.set(approvalId, {
-        process,
-        requestId: message.id,
-        runId: turn.input.runId,
-        sessionId,
-        ...(allow ? { allowOptionId: String(allow.optionId) } : {}),
-        ...(deny ? { denyOptionId: String(deny.optionId) } : {}),
-      });
-      const detail =
-        'Kiro ACP v1 não garante comando, diretório nem identidade suficiente para aprovação automática. A solicitação permanecerá pendente para decisão manual.';
-      // Best effort, for the project's blocked commands only (they can only deny): the shell
-      // command Kiro reports in the tool call, when it reports one.
+      const requestId = message.id;
+      const allowOptionId = allow ? String(allow.optionId) : undefined;
+      const denyOptionId = deny ? String(deny.optionId) : undefined;
+      // Best effort, for the project's blocked commands (they can only deny): the shell command
+      // Kiro reports in the tool call, when it reports one.
       const toolCall = isRecord(params.toolCall) ? params.toolCall : {};
       const rawInput = isRecord(toolCall.rawInput) ? toolCall.rawInput : {};
       const command = typeof rawInput.command === 'string' ? rawInput.command : undefined;
-      emitApproval(
-        turn.input,
-        turn.emit,
-        approvalId,
-        String(params.title ?? 'Permitir ferramenta Kiro'),
-        detail,
-        'tool',
-        'pending',
-        { command },
-      );
+      const title = String(params.title ?? toolCall.title ?? 'Permitir ferramenta Kiro');
+      const shellCommand = kiroShellCommand(params);
+      const respondDeny = () =>
+        process.respond(
+          requestId,
+          denyOptionId
+            ? { outcome: { outcome: 'selected', optionId: denyOptionId } }
+            : { outcome: { outcome: 'cancelled' } },
+        );
+      // Project rules only add denials, before any automatic decision (docs/specs/project-hooks.md).
+      const blocked = shellCommand !== undefined ? blockedBy(turn.input.blockedCommands, shellCommand) : undefined;
+      if (blocked) {
+        respondDeny();
+        emitApproval(
+          turn.input,
+          turn.emit,
+          approvalId,
+          'Comando bloqueado pelas regras do projeto',
+          `Padrão: ${blocked}\n${shellCommand}`,
+          'command',
+          'denied',
+          { command: shellCommand, blocked },
+        );
+        return;
+      }
+      const askUser = (reason: string) => {
+        this.approvals.set(approvalId, {
+          process,
+          requestId,
+          runId: turn.input.runId,
+          sessionId,
+          ...(allowOptionId ? { allowOptionId } : {}),
+          ...(denyOptionId ? { denyOptionId } : {}),
+        });
+        emitApproval(turn.input, turn.emit, approvalId, title, reason, 'tool', 'pending', { command });
+      };
+      if (shellCommand === undefined || !allowOptionId) {
+        askUser(
+          shellCommand === undefined
+            ? 'O Kiro não identificou esta solicitação como um comando de shell completo. A solicitação permanecerá pendente para decisão manual.'
+            : 'O Kiro não ofereceu allow_once; a solicitação permanecerá pendente.',
+        );
+        return;
+      }
+      // Kiro reports no per-request cwd: the command runs in the session cwd Adelic created.
+      // Kiro runs it through its own shell, so the text itself must pass the portable grammar.
+      const neutral = kiroShellNeutral(globalThis.process.env);
+      void classifyApproval({
+        tools: turn.input.plan.tools,
+        mode: neutral ? (turn.input.approvalMode ?? 'auto-safe') : 'manual',
+        kind: 'command',
+        command: shellCommand,
+        cwd: turn.input.cwd,
+        workspace: turn.input.cwd,
+        sandbox: turn.input.sandbox,
+        trustedNonLoginShell: false,
+        portableShell: true,
+        ...(turn.input.graphifyApproval ? { graphify: turn.input.graphifyApproval } : {}),
+      })
+        .then((result) => {
+          if (!this.turns.has(turn.input.runId) || turn.process !== process || turn.signal.aborted) {
+            process.respond(requestId, { outcome: { outcome: 'cancelled' } });
+            return;
+          }
+          if (result.decision === 'auto') {
+            // Only this request: allow_once, never allow_always.
+            process.respond(requestId, { outcome: { outcome: 'selected', optionId: allowOptionId } });
+            emitApproval(
+              turn.input,
+              turn.emit,
+              approvalId,
+              'Comando aprovado automaticamente',
+              `${result.reason}\n${shellCommand}`,
+              'command',
+              'approved',
+              { command: shellCommand },
+            );
+            return;
+          }
+          if (result.decision === 'deny') {
+            respondDeny();
+            return;
+          }
+          askUser(
+            neutral
+              ? result.reason
+              : `${result.reason} O shell do Kiro não é bash/sh neutralizado; aprovação automática desativada.`,
+          );
+        })
+        .catch(() => process.respond(requestId, { outcome: { outcome: 'cancelled' } }));
       return;
     }
     if ((message.method !== 'session/notification' && message.method !== 'session/update') || !isRecord(message.params))
@@ -395,7 +507,7 @@ export class KiroProvider {
       wrapped.args,
       input.cwd,
       (message) => this.onMessage(process, message),
-      { ...globalThis.process.env, KIRO_HOME: isolatedHome, KIRO_LOG_NO_COLOR: '1', NO_COLOR: '1' },
+      kiroEnvironment(globalThis.process.env, isolatedHome),
     );
     this.processes.add(process);
     const abortStartup = () => process.kill();

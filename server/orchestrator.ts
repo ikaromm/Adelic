@@ -811,6 +811,22 @@ export class Orchestrator {
     }
   }
   /** `mcpServers` for a run input: empty unless the project enabled catalog entries and tools run. */
+  /**
+   * Trusted Graphify paths for the safe-command classifier: only for runs with tools in a
+   * linked project with Graphify on. A worktree shares the main checkout's graph.
+   */
+  private async graphifyApprovalFor(
+    session: Session,
+    project: Project,
+    tools: boolean,
+  ): Promise<Pick<RunInput, 'graphifyApproval'>> {
+    if (!tools || session.projectId === null || project.graphify?.enabled === false) return {};
+    // Best effort: without trusted paths a graphify query simply asks.
+    const paths = await Promise.resolve()
+      .then(() => this.graphifyService.approvalPaths(this.store.getProject(project.id) ?? project))
+      .catch(() => undefined);
+    return paths ? { graphifyApproval: paths } : {};
+  }
   private mcpFor(session: Session, project: Project, tools: boolean): Pick<RunInput, 'mcpServers'> {
     if (!tools) return {};
     const servers = runMcpServers(this.store, project, session.projectId === null);
@@ -1327,6 +1343,10 @@ export class Orchestrator {
   ) {
     const config = project.orchestration ?? { enabled: true, maxWorkers: 2, review: true };
     const catalog = await this.providerList();
+    // Only deep coordinated runs with tools receive the Graphify query suggestion (see `graph`
+    // below), so only they get the trusted paths to auto-approve it.
+    const trustedGraphify =
+      route.level === 'deep' && route.tools ? await this.graphifyApprovalFor(session, project, true) : {};
     // Attachments go to the phases that receive the user's request: planner and workers.
     // Review and synthesis work from the bounded summaries and only see the file names.
     const request = `${content}${attached.text}`;
@@ -1426,6 +1446,7 @@ export class Orchestrator {
         ...(summary && task.role !== 'reviewer' && task.role !== 'synthesis' ? { summary } : {}),
         ...(taskImages.length ? { attachments: taskImages } : {}),
         ...this.mcpFor(session, project, tools),
+        ...(tools ? trustedGraphify : {}),
       };
     };
     const call = async (input: ReturnType<typeof baseInput>, task: DelegatedTask, streamDirect = false) => {

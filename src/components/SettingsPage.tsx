@@ -27,6 +27,7 @@ import type { VoiceStatus } from '../../shared/voice';
 import { notificationPermission, notificationsEnabled } from '../hooks/useRunNotifications';
 import { CommandsCard } from './CommandsCard';
 import { DiagnosticsCard } from './DiagnosticsCard';
+import { HooksCard } from './HooksCard';
 import { ProjectTools } from './ProjectTools';
 
 export function SettingsPage({
@@ -128,6 +129,8 @@ export function SettingsPage({
               onRefreshProject={onRefreshProject}
             />
           )}
+
+          {project && <HooksCard project={project} />}
 
           {project && (
             <ProjectSpendCard

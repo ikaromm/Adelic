@@ -243,6 +243,11 @@ export class KiroProvider {
       });
       const detail =
         'Kiro ACP v1 não garante comando, diretório nem identidade suficiente para aprovação automática. A solicitação permanecerá pendente para decisão manual.';
+      // Best effort, for the project's blocked commands only (they can only deny): the shell
+      // command Kiro reports in the tool call, when it reports one.
+      const toolCall = isRecord(params.toolCall) ? params.toolCall : {};
+      const rawInput = isRecord(toolCall.rawInput) ? toolCall.rawInput : {};
+      const command = typeof rawInput.command === 'string' ? rawInput.command : undefined;
       emitApproval(
         turn.input,
         turn.emit,
@@ -250,6 +255,8 @@ export class KiroProvider {
         String(params.title ?? 'Permitir ferramenta Kiro'),
         detail,
         'tool',
+        'pending',
+        { command },
       );
       return;
     }

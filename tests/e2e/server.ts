@@ -3,6 +3,7 @@
 //
 // The fake provider reacts to a marker in the current message:
 //   [aprovar] → asks for approval, then answers with the decision
+//   [bloquear] → like [aprovar], for `git push origin main` (blocked by a project rule in hooks.spec.ts)
 //   [lento]   → streams slowly until cancelled
 //   [escrever] → with sandbox workspace-write, edits README.md and creates novo.txt in input.cwd
 //   [medio]   → streams for about two seconds, then completes (message queue flows)
@@ -134,6 +135,7 @@ const providers: ProviderRegistry = {
     const marker =
       [
         '[aprovar]',
+        '[bloquear]',
         '[lento]',
         '[medio]',
         '[normal]',
@@ -210,10 +212,11 @@ const providers: ProviderRegistry = {
         emit({ type: 'delta', text: 'Arquivos alterados.' });
         return { text: 'Arquivos alterados.', stopReason: 'completed' };
       }
-      if (marker === '[aprovar]') {
+      if (marker === '[aprovar]' || marker === '[bloquear]') {
         const id = `e2e-approval-${input.runId}`;
         const decision = new Promise<'approve' | 'deny'>((done) => pending.set(id, done));
-        emitApproval(input, emit, id, 'Executar comando de teste', 'echo e2e', 'command');
+        const command = marker === '[bloquear]' ? 'git   push origin main' : 'echo e2e';
+        emitApproval(input, emit, id, 'Executar comando de teste', command, 'command', 'pending', { command });
         const answer = await Promise.race([decision, sleep(60_000, signal).then(() => 'deny' as const)]);
         const text = answer === 'approve' ? 'Comando aprovado e executado.' : 'Comando negado; nada foi executado.';
         emit({ type: 'delta', text });

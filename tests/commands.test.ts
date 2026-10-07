@@ -279,7 +279,7 @@ describe('migration 5', () => {
       JSON.stringify({ id: 'p', name: 'P', path: dir, createdAt: now(), memoryWorkspace: 'w', memoryProject: 'p' }),
     );
     const result = migrate(db, dir);
-    expect(result).toMatchObject({ from: 4, applied: [5, 6, 8, 10] });
+    expect(result).toMatchObject({ from: 4, applied: [5, 6, 8, 9, 10] });
     expect(result.backupPath).toBeTruthy();
     db.close();
 

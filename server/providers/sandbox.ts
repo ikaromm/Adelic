@@ -38,6 +38,8 @@ export async function bubblewrap(
   sandbox: Sandbox,
   writableRuntimeDirs: string[] = [],
   readonlyFileBindings: ReadonlyFileBinding[] = [],
+  /** `network: false` adds a private network namespace (project checks); agents keep the default. */
+  options: { network?: boolean } = {},
 ): Promise<WrappedCommand> {
   const bwrap = '/usr/bin/bwrap';
   try {
@@ -64,6 +66,7 @@ export async function bubblewrap(
     '--die-with-parent',
     '--new-session',
     '--unshare-pid',
+    ...(options.network === false ? ['--unshare-net'] : []),
     '--ro-bind',
     '/',
     '/',

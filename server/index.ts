@@ -8,6 +8,7 @@ import { GraphifyService, graphify, mountGraphifyRoutes } from './graphify.js';
 import { error, message, originGuard } from './http/common.js';
 import type { BackendContext } from './http/context.js';
 import type { RetryPolicy } from './retry.js';
+import type { runCheck } from './hooks.js';
 import { accessGuard, authRoutes, type RemoteAccess } from './http/auth.js';
 import { commandsRoutes } from './http/commands.js';
 import { automationsRoutes } from './http/automations.js';
@@ -40,6 +41,8 @@ export function createBackend(
   terminal: TerminalService = new TerminalService(),
   // Test hook for the automations scheduler (production uses the system clock).
   automationClock?: AutomationClock,
+  // Test hook for the after-edit check runner (production uses bubblewrap; server/hooks.ts).
+  checkRunner?: typeof runCheck,
 ) {
   const app = express();
   app.disable('x-powered-by');
@@ -53,7 +56,15 @@ export function createBackend(
   // body, after the access guard, so unauthenticated requests never get the bigger parsers.
   const json = express.json({ limit: '128kb', strict: true });
   app.use((req, res, next) => (isAttachmentUpload(req) || isVoiceUpload(req) ? next() : json(req, res, next)));
-  const orchestrator = new Orchestrator(store, providers, undefined, graphifyService, providerList, retryOverrides);
+  const orchestrator = new Orchestrator(
+    store,
+    providers,
+    undefined,
+    graphifyService,
+    providerList,
+    retryOverrides,
+    checkRunner,
+  );
   let providersCache: { at: number; value: Awaited<ReturnType<typeof providers.list>> } | undefined;
   let providersPending: Promise<Awaited<ReturnType<typeof providers.list>>> | undefined;
   async function providerList() {

@@ -9,6 +9,10 @@ export interface RunActivity {
   retries: RunEvent[];
   /** Automatic model switches (Settings.modelFallback). */
   fallbacks: RunEvent[];
+  /** After-edit checks of the project, in order (docs/specs/project-hooks.md). */
+  checks: RunEvent[];
+  /** Approvals denied by the project's blocked commands. */
+  blocked: RunEvent[];
 }
 
 /** Keep one visible record for tool lifecycle updates such as started/completed. */
@@ -45,15 +49,24 @@ export function activityForRun(runId: string, tasks: DelegatedTask[], events: Ru
       else actions[startIndex] = event;
     }
   }
+  const isBlocked = (event: RunEvent) => event.type === 'approval' && event.status === 'blocked';
   return {
     tasks: runTasks,
     events: runEvents.filter(
-      (event) => event.type !== 'error' && event.type !== 'tool' && event.type !== 'retry' && event.type !== 'fallback',
+      (event) =>
+        event.type !== 'error' &&
+        event.type !== 'tool' &&
+        event.type !== 'retry' &&
+        event.type !== 'fallback' &&
+        event.type !== 'check' &&
+        !isBlocked(event),
     ),
     errors: runEvents.filter((event) => event.type === 'error'),
     actions,
     retries: runEvents.filter((event) => event.type === 'retry'),
     fallbacks: runEvents.filter((event) => event.type === 'fallback'),
+    checks: runEvents.filter((event) => event.type === 'check' && event.check),
+    blocked: runEvents.filter(isBlocked),
   };
 }
 
@@ -63,7 +76,8 @@ export function activityIsVisible(activity: RunActivity): boolean {
     activity.actions.length > 0 ||
     activity.errors.length > 0 ||
     activity.retries.length > 0 ||
-    activity.fallbacks.length > 0
+    activity.fallbacks.length > 0 ||
+    activity.blocked.length > 0
   );
 }
 
@@ -146,4 +160,15 @@ export function diffLines(diff: string): { text: string; kind: DiffLineKind }[] 
       else if (text.startsWith('-')) kind = 'del';
       return { text, kind };
     });
+}
+
+/** "2 verificações · 1 falhou" for the activity headline; '' without checks. */
+export function checksSummary(checks: RunEvent[]): string {
+  if (!checks.length) return '';
+  const statuses = checks.map((event) => event.check?.status);
+  const failed = statuses.filter((status) => status === 'failed' || status === 'timeout' || status === 'error').length;
+  const running = statuses.filter((status) => status === 'running').length;
+  const total = `${checks.length} ${checks.length === 1 ? 'verificação' : 'verificações'}`;
+  if (running) return `${total} · rodando`;
+  return failed ? `${total} · ${failed} ${failed === 1 ? 'falhou' : 'falharam'}` : `${total} ok`;
 }

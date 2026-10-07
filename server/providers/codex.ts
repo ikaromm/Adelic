@@ -18,6 +18,7 @@ import {
 import { errorMessage, isRecord, JsonRpcProcess, type JsonRpcMessage } from './process';
 import { findProviderBinary, hasProviderBinaryOverride, providerBinaryMissingDetail } from './discovery';
 import { canonWritePathWithin, classifyApproval, scanCodexRules } from '../approval-policy';
+import { blockedBy } from '../../shared/hooks';
 import { bubblewrap, type ReadonlyFileBinding, type WrappedCommand } from './sandbox';
 
 type CodexToolProfile = 'no-tools' | 'fast-local-tools' | 'deep-tools';
@@ -678,6 +679,24 @@ export class CodexProvider {
           : message.method.includes('fileChange')
             ? 'file'
             : 'permissions';
+      const command = typeof params.command === 'string' ? params.command : undefined;
+      // Project rules (docs/specs/project-hooks.md) only add denials: a blocked command is
+      // declined before the safe-command classifier can approve it, in every approval mode.
+      const blocked = blockedBy(turn.input.blockedCommands, command);
+      if (blocked && message.method === 'item/commandExecution/requestApproval') {
+        rpc.respond(message.id, { decision: 'decline' });
+        emitApproval(
+          turn.input,
+          turn.emit,
+          approvalId,
+          'Comando bloqueado pelas regras do projeto',
+          `Padrão: ${blocked}\n${approvalDetail(message.method, params)}`,
+          'command',
+          'denied',
+          { command, blocked },
+        );
+        return;
+      }
       if (kind === 'command') {
         const environmentTrusted = turn.localEnvironmentVerified && params.environmentId === 'local';
         void classifyApproval({
@@ -711,6 +730,7 @@ export class CodexProvider {
                 detail,
                 'command',
                 'approved',
+                { command },
               );
               return;
             }
@@ -722,7 +742,9 @@ export class CodexProvider {
               method: message.method!,
               params,
             });
-            emitApproval(turn.input, turn.emit, approvalId, 'Permitir ferramenta do Codex', detail, 'tool');
+            emitApproval(turn.input, turn.emit, approvalId, 'Permitir ferramenta do Codex', detail, 'tool', 'pending', {
+              command,
+            });
           })
           .catch(() => rpc.respond(message.id as string | number, { decision: 'decline' }));
         return;

@@ -33,6 +33,7 @@ import type { CommandList, CommandMode, SavedCommand } from '../shared/commands'
 import type { VoiceStatus } from '../shared/voice';
 import type { TerminalCommand, TerminalCommandInfo, TerminalState } from '../shared/terminal';
 import type { Automation, AutomationSchedule } from '../shared/automations';
+import type { CheckResult, ProjectHooks } from '../shared/hooks';
 /** Report from /api/diagnostics: versions, paths and status only, without secrets or content. */
 export interface Diagnostics {
   generatedAt: string;
@@ -416,6 +417,18 @@ export const api = {
         { method: 'POST', body: JSON.stringify({ confirm: true }) },
       ),
   },
+  // Per-project hooks (docs/specs/project-hooks.md).
+  projectHooks: (projectId: string) => request<ProjectHooks>(`/api/projects/${encodeURIComponent(projectId)}/hooks`),
+  saveProjectHooks: (projectId: string, hooks: ProjectHooks) =>
+    request<ProjectHooks>(`/api/projects/${encodeURIComponent(projectId)}/hooks`, {
+      method: 'PUT',
+      body: JSON.stringify(hooks),
+    }),
+  testProjectHook: (projectId: string, index: number) =>
+    request<CheckResult>(`/api/projects/${encodeURIComponent(projectId)}/hooks/test`, {
+      method: 'POST',
+      body: JSON.stringify({ index }),
+    }),
   commands: (projectId?: string | null) =>
     request<CommandList>(`/api/commands${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ''}`),
   createCommand: (data: CommandInput & { projectId: string | null }) =>

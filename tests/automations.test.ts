@@ -862,7 +862,7 @@ describe('migration 10', () => {
     );
     db.exec(`INSERT INTO projects VALUES('p','{}'); INSERT INTO projects VALUES('q','{}');`);
     const result = migrate(db, dir);
-    expect(result.applied).toEqual([10]);
+    expect(result.applied).toEqual([9, 10]);
     db.exec(`PRAGMA foreign_keys=ON;
       INSERT INTO automations VALUES('a','p','{}');
       INSERT INTO automations VALUES('b','q','{}');`);

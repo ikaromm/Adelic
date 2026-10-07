@@ -3,15 +3,18 @@ import {
   Activity,
   ArrowLeftRight,
   ArrowRightLeft,
+  CheckCircle2,
   ChevronDown,
   Code2,
   FileText,
   LoaderCircle,
   RotateCcw,
+  ShieldX,
   Sparkles,
   X,
+  XCircle,
 } from 'lucide-react';
-import type { Bootstrap, DelegatedTask, Message, ModelRef, Run, SessionDetail } from '../../shared/contracts';
+import type { Bootstrap, DelegatedTask, Message, ModelRef, Run, RunEvent, SessionDetail } from '../../shared/contracts';
 import { isCapacityFailure } from '../../shared/model-fallback';
 import { CopyButton, Markdown } from '../Markdown';
 import { formatCost, formatDuration, formatTokens } from '../format';
@@ -21,6 +24,7 @@ import {
   actionNeedsDisclosure,
   activityForRun,
   activityIsVisible,
+  checksSummary,
   commandPreview,
   commandTitle,
   runStatusLabel,
@@ -192,10 +196,15 @@ export function RunActivityPanel({
   const running = runStatus === 'running' || (!runStatus && active);
   const now = useNow(1000, running);
   const outcome = runStatusLabel(runStatus) || (active ? 'Em andamento' : null);
-  const changes = run && <RunChanges run={run} busy={busy || active} />;
+  const changes = (
+    <>
+      {run && <RunChanges run={run} busy={busy || active} />}
+      {activity.checks.length > 0 && <RunChecks checks={activity.checks} />}
+    </>
+  );
   if (!activityIsVisible(activity) && !outcome)
-    return run?.checkpoint?.files?.length ? (
-      <section className={`run-activity ${run.status}`} aria-label="Atividade desta execução">
+    return run?.checkpoint?.files?.length || activity.checks.length ? (
+      <section className={`run-activity ${run?.status ?? 'completed'}`} aria-label="Atividade desta execução">
         {changes}
       </section>
     ) : null;
@@ -227,6 +236,9 @@ export function RunActivityPanel({
       ? `${activity.retries.length} ${activity.retries.length === 1 ? 'nova tentativa' : 'novas tentativas'}`
       : '',
     activity.fallbacks.length ? 'modelo trocado' : '',
+    activity.blocked.length
+      ? `${activity.blocked.length} ${activity.blocked.length === 1 ? 'comando bloqueado' : 'comandos bloqueados'}`
+      : '',
     activity.tasks.length ? `${activity.tasks.length} ${activity.tasks.length === 1 ? 'tarefa' : 'tarefas'}` : '',
     activity.actions.length ? `${activity.actions.length} ${activity.actions.length === 1 ? 'ação' : 'ações'}` : '',
     !running && totalTokens ? `${totalTokens} tokens` : '',
@@ -245,6 +257,15 @@ export function RunActivityPanel({
     <section className={`run-activity ${tone}`} aria-label="Atividade desta execução">
       {activity.errors.map((event) => (
         <RunEventRow key={event.id} event={event} />
+      ))}
+      {activity.blocked.map((event) => (
+        <div className="run-event blocked" key={event.id} title={event.error}>
+          <span className="run-event-icon" aria-hidden="true">
+            <ShieldX size={12} />
+          </span>
+          <span>{event.text}</span>
+          <time>{timeLabel(event.createdAt)}</time>
+        </div>
       ))}
       {activityIsVisible(activity) ? (
         <details className="activity-details">
@@ -430,6 +451,52 @@ export function RetryNotice({
           </details>
         )}
       </div>
+    </div>
+  );
+}
+
+/**
+ * After-edit checks of the project (docs/specs/project-hooks.md): one row per check, with its
+ * bounded output behind a disclosure. They run after the answer, so they sit outside the
+ * collapsed activity.
+ */
+export function RunChecks({ checks }: { checks: RunEvent[] }) {
+  return (
+    <div className="run-checks" role="group" aria-label={`Verificações do projeto: ${checksSummary(checks)}`}>
+      {checks.map((event) => {
+        const check = event.check!;
+        const tone =
+          check.status === 'passed'
+            ? 'passed'
+            : check.status === 'running'
+              ? 'running'
+              : check.status === 'cancelled'
+                ? 'cancelled'
+                : 'failed';
+        const icon =
+          tone === 'running' ? (
+            <LoaderCircle className="spin" size={13} />
+          ) : tone === 'passed' ? (
+            <CheckCircle2 size={13} />
+          ) : (
+            <XCircle size={13} />
+          );
+        return (
+          <details className={`run-check ${tone}`} key={event.id}>
+            <summary>
+              <span className="run-check-icon" aria-hidden="true">
+                {icon}
+              </span>
+              <span className="run-check-title">{event.text}</span>
+              <ChevronDown className="activity-chevron" size={13} aria-hidden="true" />
+            </summary>
+            <pre aria-label={`Saída da verificação ${check.name}`}>
+              {check.truncated ? '… (início da saída omitido; mostrando os últimos 64 KB)\n' : ''}
+              {check.output || check.detail || 'Sem saída.'}
+            </pre>
+          </details>
+        );
+      })}
     </div>
   );
 }

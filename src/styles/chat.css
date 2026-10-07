@@ -2880,3 +2880,112 @@
   gap: 6px;
   margin-left: auto;
 }
+
+/* After-edit checks and blocked commands (docs/specs/project-hooks.md). */
+.run-checks {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.run-check > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  margin-inline: -8px;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  list-style: none;
+  cursor: pointer;
+}
+
+.run-check > summary::-webkit-details-marker {
+  display: none;
+}
+
+.run-check > summary:hover,
+.run-check > summary:focus-visible {
+  background: var(--row-hover);
+  color: var(--text);
+}
+
+.run-check[open] > summary .activity-chevron {
+  transform: rotate(180deg);
+}
+
+.run-check-icon {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  color: var(--text-muted);
+}
+
+.run-check.passed .run-check-icon {
+  color: var(--success);
+}
+
+.run-check.failed .run-check-icon {
+  color: var(--danger);
+}
+
+.run-check.failed .run-check-title {
+  color: var(--text);
+}
+
+.run-check-title {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.run-check > summary .activity-chevron {
+  flex: none;
+  margin-left: auto;
+}
+
+.run-check > pre {
+  max-width: 100%;
+  max-height: 320px;
+  margin: 4px 0 6px;
+  padding: 10px 12px;
+  overflow: auto;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  background: var(--code-bg);
+  color: var(--text-secondary);
+  font: 400 var(--text-xs)/1.55 var(--font-mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.run-event.blocked {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  min-width: 0;
+  padding: 9px 12px;
+  border: 1px solid var(--warning-border);
+  border-radius: var(--radius-md);
+  background: var(--warning-soft);
+  color: var(--text);
+  font-size: var(--text-sm);
+}
+
+.run-event.blocked > span:not(.run-event-icon) {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.run-event.blocked .run-event-icon {
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+
+.run-event.blocked > time {
+  flex: none;
+  margin-left: auto;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+}

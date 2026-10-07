@@ -1,9 +1,16 @@
 import { Router } from 'express';
 import { randomUUID } from 'node:crypto';
 import type { Project } from '../../shared/contracts.js';
-import { CreateProjectSchema, PatchProjectSchema, ProjectFilesQuerySchema, parseBody } from '../../shared/schemas.js';
+import {
+  CreateProjectSchema,
+  HookTestSchema,
+  PatchProjectSchema,
+  ProjectFilesQuerySchema,
+  ProjectHooksSchema,
+  parseBody,
+} from '../../shared/schemas.js';
 import { searchProjectFiles } from '../mentions.js';
-import { error, message } from './common.js';
+import { error, errorStatus, message } from './common.js';
 import { graphifyConfig, mergeLimits, orchestrationConfig, projectPath } from './validation.js';
 import type { BackendContext } from './context.js';
 
@@ -54,6 +61,26 @@ export function projectsRoutes({ store, orchestrator }: BackendContext) {
       res.json(await searchProjectFiles(project.path, query.data.query, query.data.limit));
     } catch (e) {
       error(res, 409, `Não foi possível listar os arquivos do projeto: ${message(e)}`);
+    }
+  });
+  // Per-project hooks (docs/specs/project-hooks.md): stored only in Adelic's database.
+  app.get('/api/projects/:id/hooks', (req, res) => {
+    if (!store.getProject(req.params.id)) return error(res, 404, 'Projeto não encontrado');
+    res.json(store.getHooks(req.params.id));
+  });
+  app.put('/api/projects/:id/hooks', (req, res) => {
+    if (!store.getProject(req.params.id)) return error(res, 404, 'Projeto não encontrado');
+    const parsed = parseBody(ProjectHooksSchema, req.body, 'Configuração de verificações inválida');
+    if (!parsed.ok) return error(res, 400, parsed.message);
+    res.json(store.putHooks(req.params.id, parsed.data));
+  });
+  app.post('/api/projects/:id/hooks/test', async (req, res) => {
+    const parsed = parseBody(HookTestSchema, req.body, 'index inválido');
+    if (!parsed.ok) return error(res, 400, parsed.message);
+    try {
+      res.json(await orchestrator.testHook(req.params.id, parsed.data.index));
+    } catch (e) {
+      error(res, errorStatus(e) ?? 500, message(e));
     }
   });
   app.get('/api/tasks/:id', (req, res) => {

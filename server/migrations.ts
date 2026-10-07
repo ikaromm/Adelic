@@ -155,7 +155,18 @@ export const migrations: Migration[] = [
         CREATE INDEX IF NOT EXISTS compactions_session ON compactions(session_id);`);
     },
   },
-  // Version 9 is reserved for a parallel branch.
+  {
+    version: 9,
+    description: 'Verificações e bloqueios por projeto (hooks)',
+    up(db) {
+      // Separate table instead of a field in projects.data: the hooks hold commands Adelic
+      // executes, and a project PATCH or export must not carry or overwrite them by accident.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS project_hooks(
+          project_id TEXT PRIMARY KEY, data TEXT NOT NULL,
+          FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE);`);
+    },
+  },
   {
     version: 10,
     description: 'Automações agendadas: uma linha por automação, ligada ao projeto',

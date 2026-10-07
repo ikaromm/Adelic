@@ -1,4 +1,50 @@
 import { Component, type ErrorInfo, type ReactNode } from 'react';
+import { getLocale, t as translate, useI18n, type Locale, type MessageKey } from './i18n';
+
+/** Scope names callers pass (pt-BR) and their catalog keys; an unknown scope is shown as given. */
+const SCOPES: Record<string, MessageKey> = {
+  'o Adelic': 'errorBoundary.scope.app',
+  'a conversa': 'errorBoundary.scope.conversation',
+  'o terminal': 'errorBoundary.scope.terminal',
+  'o git': 'errorBoundary.scope.git',
+  'a atividade': 'errorBoundary.scope.activity',
+  'as automações': 'errorBoundary.scope.automations',
+  'a memória': 'errorBoundary.scope.memory',
+  'as configurações': 'errorBoundary.scope.settings',
+};
+/** What failed, in `locale` ("a memória" → en "the memory"). */
+export const errorScopeName = (scope: string, locale: Locale = getLocale()) =>
+  Object.hasOwn(SCOPES, scope) ? translate(SCOPES[scope], undefined, locale) : scope;
+
+function Fallback({
+  scope,
+  error,
+  fullScreen,
+  onRetry,
+}: {
+  scope: string;
+  error: Error;
+  fullScreen?: boolean;
+  onRetry: () => void;
+}) {
+  const { t, locale } = useI18n();
+  const name = errorScopeName(scope, locale);
+  return (
+    <div className={fullScreen ? 'error-boundary error-boundary-full' : 'error-boundary'} role="alert">
+      <h2>{t('errorBoundary.title', { scope: name })}</h2>
+      <p>{t('errorBoundary.body')}</p>
+      <pre>{error.message || String(error)}</pre>
+      <div className="error-boundary-actions">
+        <button type="button" className="primary-button" onClick={onRetry}>
+          {t('errorBoundary.retry')}
+        </button>
+        <button type="button" className="secondary-button" onClick={() => window.location.reload()}>
+          {t('errorBoundary.reload')}
+        </button>
+      </div>
+    </div>
+  );
+}
 
 /**
  * Catches render errors so one broken screen does not blank the whole app.
@@ -28,22 +74,12 @@ export class ErrorBoundary extends Component<
     const { error } = this.state;
     if (!error) return this.props.children;
     return (
-      <div className={this.props.fullScreen ? 'error-boundary error-boundary-full' : 'error-boundary'} role="alert">
-        <h2>Não foi possível exibir {this.props.scope}</h2>
-        <p>
-          Seus dados continuam salvos. Tente de novo; se o erro persistir, recarregue a janela e informe a mensagem
-          abaixo.
-        </p>
-        <pre>{error.message || String(error)}</pre>
-        <div className="error-boundary-actions">
-          <button type="button" className="primary-button" onClick={() => this.setState({ error: null })}>
-            Tentar de novo
-          </button>
-          <button type="button" className="secondary-button" onClick={() => window.location.reload()}>
-            Recarregar
-          </button>
-        </div>
-      </div>
+      <Fallback
+        scope={this.props.scope}
+        error={error}
+        fullScreen={this.props.fullScreen}
+        onRetry={() => this.setState({ error: null })}
+      />
     );
   }
 }

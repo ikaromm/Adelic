@@ -178,10 +178,38 @@ export function nextOccurrences(
 
 const weekdays = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'];
 export const WEEKDAY_LABELS = weekdays;
+
+/** Words of a schedule description in one language (the UI passes translated ones). */
+export interface ScheduleWords {
+  interval: (hours: number) => string;
+  daily: (time: string) => string;
+  /** `days` is the joined list of weekday names. */
+  weekly: (days: string, time: string) => string;
+  everyDay: (time: string) => string;
+  weekday: (day: number) => string;
+  /** Formats the "HH:MM" of a daily or weekly schedule; default: unchanged. */
+  time?: (time: string) => string;
+}
+
+const ptBR: ScheduleWords = {
+  interval: (hours) => `A cada ${hours} h`,
+  daily: (time) => `Diária às ${time}`,
+  weekly: (days, time) => `${days} às ${time}`,
+  everyDay: (time) => `Todos os dias às ${time}`,
+  weekday: (day) => weekdays[day],
+};
+
+/** Schedule description with the given words (see describeSchedule). */
+export function describeScheduleWith(schedule: AutomationSchedule, words: ScheduleWords) {
+  if (schedule.kind === 'interval') return words.interval(schedule.hours);
+  const time = words.time ? words.time(schedule.time) : schedule.time;
+  if (schedule.kind === 'daily') return words.daily(time);
+  const days = [...schedule.days].sort((a, b) => a - b);
+  if (days.length === 7) return words.everyDay(time);
+  return words.weekly(days.map((d) => words.weekday(d)).join(', '), time);
+}
+
 /** Short pt-BR description: "Diária às 09:00", "Seg, Qua às 09:00", "A cada 6 h". */
 export function describeSchedule(schedule: AutomationSchedule) {
-  if (schedule.kind === 'interval') return `A cada ${schedule.hours} h`;
-  if (schedule.kind === 'daily') return `Diária às ${schedule.time}`;
-  const days = [...schedule.days].sort((a, b) => a - b);
-  return `${days.length === 7 ? 'Todos os dias' : days.map((d) => weekdays[d]).join(', ')} às ${schedule.time}`;
+  return describeScheduleWith(schedule, ptBR);
 }

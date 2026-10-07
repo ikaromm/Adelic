@@ -1,9 +1,10 @@
 import { Activity, Bot, Clock3, Gauge, History, Zap } from 'lucide-react';
 import type { Bootstrap, Run } from '../../shared/contracts';
-import { formatCost, formatDuration, formatTokens, runTokens } from '../format';
-import { shortDate, statusName, timeLabel } from '../labels';
+import { useI18n } from '../i18n';
+import { statusName } from '../labels';
 
 export function ActivityPage({ runs, providers }: { runs: Run[]; providers: Bootstrap['providers'] }) {
+  const { t, fmt } = useI18n();
   const completed = runs.filter((run) => run.status === 'completed');
   const durations = runs.flatMap((run) => (run.durationMs != null ? [run.durationMs] : []));
   const firstTokens = runs.flatMap((run) => (run.firstTokenMs != null ? [run.firstTokenMs] : []));
@@ -20,49 +21,55 @@ export function ActivityPage({ runs, providers }: { runs: Run[]; providers: Boot
     <section className="page-content">
       <div className="page-heading">
         <div>
-          <div className="eyebrow">USO E EXECUÇÕES</div>
-          <h1>Atividade</h1>
-          <p>Acompanhe execuções reais dos seus agentes.</p>
+          <div className="eyebrow">{t('activityPage.eyebrow')}</div>
+          <h1>{t('activityPage.title')}</h1>
+          <p>{t('activityPage.subtitle')}</p>
         </div>
         <span className="period-chip">
-          <History size={14} /> Todo o histórico
+          <History size={14} /> {t('activityPage.period')}
         </span>
       </div>
       <div className="metrics-grid">
         <MetricCard
           icon={<Activity size={17} />}
-          label="Execuções"
-          value={String(runs.length)}
-          hint={`${completed.length} concluídas`}
+          label={t('activityPage.runs')}
+          value={fmt.number(runs.length)}
+          hint={t('activityPage.completed', { count: completed.length })}
         />
         <MetricCard
           icon={<Zap size={17} />}
-          label="1ª resposta média"
-          value={meanFirst == null ? '—' : formatDuration(meanFirst)}
-          hint={meanFirst == null ? 'Sem medição disponível' : 'até o primeiro texto'}
+          label={t('activityPage.firstResponse')}
+          value={meanFirst == null ? '—' : fmt.duration(meanFirst)}
+          hint={meanFirst == null ? t('activityPage.noMeasure') : t('activityPage.untilFirstText')}
         />
         <MetricCard
           icon={<Clock3 size={17} />}
-          label="Duração média"
-          value={meanDuration == null ? '—' : formatDuration(meanDuration)}
-          hint={meanDuration == null ? 'Sem medição disponível' : 'das execuções registradas'}
+          label={t('activityPage.meanDuration')}
+          value={meanDuration == null ? '—' : fmt.duration(meanDuration)}
+          hint={meanDuration == null ? t('activityPage.noMeasure') : t('activityPage.ofRecordedRuns')}
         />
         <MetricCard
           icon={<Gauge size={17} />}
-          label="Tokens"
-          value={withTokens.length ? formatTokens(totalTokens)! : '—'}
+          label={t('activityPage.tokens')}
+          value={withTokens.length ? fmt.tokens(totalTokens)! : '—'}
           hint={
-            withTokens.length
-              ? `${withTokens.length} de ${runs.length} execuções informaram${withCost.length ? ` · ${formatCost(totalCost)}` : ' · custo não informado'}`
-              : 'Não informado pelos provedores'
+            !withTokens.length
+              ? t('activityPage.tokensUnreported')
+              : withCost.length
+                ? t('activityPage.tokensHint', {
+                    reported: withTokens.length,
+                    count: runs.length,
+                    cost: fmt.cost(totalCost)!,
+                  })
+                : t('activityPage.tokensHintNoCost', { reported: withTokens.length, count: runs.length })
           }
         />
       </div>
       <div className="activity-section">
         <div className="section-title-row">
           <div>
-            <h2>Execuções recentes</h2>
-            <p>Os dados são registrados localmente.</p>
+            <h2>{t('activityPage.recent')}</h2>
+            <p>{t('activityPage.recentHint')}</p>
           </div>
           <span className="count-chip">{runs.length}</span>
         </div>
@@ -71,17 +78,17 @@ export function ActivityPage({ runs, providers }: { runs: Run[]; providers: Boot
             <div className="empty-icon">
               <Activity size={18} />
             </div>
-            <strong>Nenhuma execução ainda</strong>
-            <span>As conversas concluídas aparecerão aqui.</span>
+            <strong>{t('activityPage.empty')}</strong>
+            <span>{t('activityPage.emptyHint')}</span>
           </div>
         ) : (
           <div className="run-table">
             <div className="run-table-head">
-              <span>AGENTE / MODO</span>
-              <span>STATUS</span>
-              <span>HORÁRIO</span>
-              <span>DURAÇÃO</span>
-              <span>TOKENS / CUSTO</span>
+              <span>{t('activityPage.col.agent')}</span>
+              <span>{t('activityPage.col.status')}</span>
+              <span>{t('activityPage.col.time')}</span>
+              <span>{t('activityPage.col.duration')}</span>
+              <span>{t('activityPage.col.usage')}</span>
             </div>
             {[...runs]
               .sort((a, b) => b.startedAt.localeCompare(a.startedAt))
@@ -94,7 +101,10 @@ export function ActivityPage({ runs, providers }: { runs: Run[]; providers: Boot
                     <span>
                       <strong>{providers.find((p) => p.id === run.providerId)?.name || run.providerId}</strong>
                       <small>
-                        {run.route.level === 'fast' ? 'Rápido' : 'Completo'} · {run.route.reason}
+                        {t('activityPage.route', {
+                          level: t(run.route.level === 'fast' ? 'mode.fast' : 'mode.deep'),
+                          reason: run.route.reason,
+                        })}
                       </small>
                     </span>
                   </div>
@@ -103,11 +113,11 @@ export function ActivityPage({ runs, providers }: { runs: Run[]; providers: Boot
                     {statusName(run.status)}
                   </span>
                   <span>
-                    {shortDate(run.startedAt)} às {timeLabel(run.startedAt)}
+                    {t('activityPage.startedAt', { date: fmt.shortDate(run.startedAt), time: fmt.time(run.startedAt) })}
                   </span>
-                  <span>{run.durationMs == null ? '—' : formatDuration(run.durationMs)}</span>
-                  <span title={run.costUsd == null ? 'Custo não informado pelo provedor' : undefined}>
-                    {[runTokens(run), formatCost(run.costUsd)].filter(Boolean).join(' · ') || '—'}
+                  <span>{run.durationMs == null ? '—' : fmt.duration(run.durationMs)}</span>
+                  <span title={run.costUsd == null ? t('activityPage.costUnreported') : undefined}>
+                    {[fmt.runTokens(run), fmt.cost(run.costUsd)].filter(Boolean).join(' · ') || '—'}
                   </span>
                 </div>
               ))}

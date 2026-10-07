@@ -2,10 +2,12 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { Brain, FileText, Plus, RefreshCw, Search } from 'lucide-react';
 import type { MemoryCatalog, MemoryHit, MemoryPage as MemoryNote, MemoryScope } from '../shared/contracts';
 import { api } from './api';
+import { useI18n } from './i18n';
 import { Markdown } from './Markdown';
 
 type Note = MemoryNote;
 export default function MemoryPage({ visible = true, activated = true }: { visible?: boolean; activated?: boolean }) {
+  const { t, fmt } = useI18n();
   const [catalog, setCatalog] = useState<MemoryCatalog | null>(null);
   const [scope, setScope] = useState<MemoryScope | null>(null);
   const [listing, setListing] = useState<MemoryHit[]>([]);
@@ -38,10 +40,10 @@ export default function MemoryPage({ visible = true, activated = true }: { visib
   pollState.current = { note, offset, editing, creating };
   const scopes = catalog?.scopes || [];
   const readOnly = scope?.project === '_global';
-  const canSwitchAllowed = () => !dirtyRef.current || window.confirm('Descartar as alterações não salvas?');
+  const canSwitchAllowed = () => !dirtyRef.current || window.confirm(t('memory.discardConfirm'));
   const canSwitch = (action: () => void) => {
     if (busyRef.current) return;
-    if (!dirtyRef.current || window.confirm('Descartar as alterações não salvas?')) action();
+    if (!dirtyRef.current || window.confirm(t('memory.discardConfirm'))) action();
   };
   const loadCatalog = useCallback(async (generationId = generation.current) => {
     try {
@@ -326,11 +328,7 @@ export default function MemoryPage({ visible = true, activated = true }: { visib
     } catch (e) {
       if (id !== generation.current) return;
       const failure = e as Error & { status?: number };
-      setError(
-        failure.status === 409
-          ? 'Conflito de edição: a nota foi alterada desde a leitura. Seu rascunho foi preservado; recarregue a versão externa somente se quiser descartá-lo.'
-          : failure.message,
-      );
+      setError(failure.status === 409 ? t('memory.conflict') : failure.message);
       if (failure.status === 409 && note && scope) {
         try {
           const latest = await api.sharedMemoryPage(scope, note.path);
@@ -351,13 +349,13 @@ export default function MemoryPage({ visible = true, activated = true }: { visib
     <section className="page-content shared-memory" hidden={!visible}>
       <div className="page-heading">
         <div>
-          <div className="eyebrow">FONTE COMPARTILHADA</div>
-          <h1>Memória</h1>
-          <p>Biblioteca comum com T3 e Codex. Navegar aqui não altera o contexto das conversas.</p>
+          <div className="eyebrow">{t('memory.eyebrow')}</div>
+          <h1>{t('memory.title')}</h1>
+          <p>{t('memory.subtitle')}</p>
         </div>
         <div className="memory-toolbar">
           <button className="secondary-button" onClick={() => void refresh()} disabled={busy}>
-            <RefreshCw size={15} /> Atualizar
+            <RefreshCw size={15} /> {t('memory.refresh')}
           </button>
           <button
             className="primary-button"
@@ -374,7 +372,7 @@ export default function MemoryPage({ visible = true, activated = true }: { visib
             }
             disabled={!scope || busy || readOnly}
           >
-            <Plus size={15} /> Nova nota
+            <Plus size={15} /> {t('memory.newNote')}
           </button>
         </div>
       </div>
@@ -383,13 +381,13 @@ export default function MemoryPage({ visible = true, activated = true }: { visib
           {error}
         </div>
       )}
-      {catalog && !scopes.length && <div className="empty-panel">Nenhum escopo disponível no catálogo.</div>}
-      {!catalog && !error && <div className="empty-panel">Carregando biblioteca…</div>}
+      {catalog && !scopes.length && <div className="empty-panel">{t('memory.noScopes')}</div>}
+      {!catalog && !error && <div className="empty-panel">{t('memory.loadingLibrary')}</div>}
       {scope && (
         <>
           <div className="memory-library-scope">
             <label>
-              {scope.project === '_global' ? 'Escopo global (somente leitura)' : 'Workspace e projeto'}
+              {scope.project === '_global' ? t('memory.globalScope') : t('memory.scope')}
               <select
                 disabled={busy}
                 value={`${scope.workspace}\0${scope.project}`}
@@ -397,15 +395,21 @@ export default function MemoryPage({ visible = true, activated = true }: { visib
               >
                 {scopes.map((s) => (
                   <option key={`${s.workspace}/${s.project}`} value={`${s.workspace}\0${s.project}`}>
-                    {s.workspace} / {s.project}
-                    {s.project === '_global' ? ' (somente leitura)' : ''} ({s.pageCount})
+                    {t(s.project === '_global' ? 'memory.scopeOptionReadOnly' : 'memory.scopeOption', {
+                      workspace: s.workspace,
+                      project: s.project,
+                      count: s.pageCount,
+                    })}
                   </option>
                 ))}
               </select>
             </label>
             <span>
-              {scopes.find((s) => s.workspace === scope.workspace && s.project === scope.project)?.pageCount ?? total}{' '}
-              notas no catálogo
+              {t('memory.noteCount', {
+                count:
+                  scopes.find((s) => s.workspace === scope.workspace && s.project === scope.project)?.pageCount ??
+                  total,
+              })}
             </span>
           </div>
           <div className="memory-layout">
@@ -416,10 +420,10 @@ export default function MemoryPage({ visible = true, activated = true }: { visib
                   disabled={busy}
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
-                  placeholder="Buscar neste escopo…"
-                  aria-label="Buscar na memória"
+                  placeholder={t('memory.searchPlaceholder')}
+                  aria-label={t('memory.searchLabel')}
                 />
-                <button disabled={busy}>Buscar</button>
+                <button disabled={busy}>{t('memory.search')}</button>
               </form>
               <div className="memory-results">
                 {items.map((item) => (
@@ -441,22 +445,26 @@ export default function MemoryPage({ visible = true, activated = true }: { visib
                   <div className="memory-no-results">
                     <Brain size={21} />
                     <strong>
-                      {busy ? 'Carregando notas…' : hits ? 'Nenhum resultado' : 'Nenhuma nota neste escopo'}
+                      {busy ? t('memory.loadingNotes') : hits ? t('memory.noResults') : t('memory.noNotes')}
                     </strong>
-                    <span>{hits ? 'Tente outra busca.' : 'Crie uma nota ou atualize o catálogo.'}</span>
+                    <span>{hits ? t('memory.tryAnother') : t('memory.createOrRefresh')}</span>
                   </div>
                 )}
               </div>
               {!hits && total > 50 && (
                 <div className="memory-pagination">
                   <button disabled={busy || !offset} onClick={() => void paginate(Math.max(0, offset - 50))}>
-                    Anterior
+                    {t('memory.previous')}
                   </button>
                   <span>
-                    {offset + 1}–{Math.min(offset + 50, total)} de {total}
+                    {t('memory.range', {
+                      from: fmt.number(offset + 1),
+                      to: fmt.number(Math.min(offset + 50, total)),
+                      total: fmt.number(total),
+                    })}
                   </span>
                   <button disabled={busy || offset + 50 >= total} onClick={() => void paginate(offset + 50)}>
-                    Próxima
+                    {t('memory.next')}
                   </button>
                 </div>
               )}
@@ -466,22 +474,22 @@ export default function MemoryPage({ visible = true, activated = true }: { visib
                 <form className="memory-editor" onSubmit={(e) => void save(e)}>
                   <div className="memory-editor-head">
                     <div>
-                      <div className="eyebrow">{creating ? 'NOVA NOTA' : 'EDITAR NOTA'}</div>
-                      <h2>{creating ? 'Adicionar à memória' : note?.title}</h2>
+                      <div className="eyebrow">{creating ? t('memory.newEyebrow') : t('memory.editEyebrow')}</div>
+                      <h2>{creating ? t('memory.addTitle') : note?.title}</h2>
                     </div>
                   </div>
                   <label>
-                    Caminho da nota
+                    {t('memory.path')}
                     <input
                       value={path}
                       disabled={!creating || busy}
                       onChange={(e) => setPath(e.target.value)}
-                      placeholder="notas/assunto.md"
+                      placeholder={t('memory.pathPlaceholder')}
                       required
                     />
                   </label>
                   <label>
-                    Conteúdo
+                    {t('memory.content')}
                     <textarea
                       value={draft}
                       disabled={busy}
@@ -492,13 +500,13 @@ export default function MemoryPage({ visible = true, activated = true }: { visib
                   </label>
                   {external && (
                     <div className="memory-conflict" role="alert">
-                      Esta nota mudou externamente. Seu rascunho foi preservado.{' '}
+                      {t('memory.changedExternally')}{' '}
                       <button
                         type="button"
                         disabled={busy}
                         onClick={() => {
                           if (busy) return;
-                          if (window.confirm('Recarregar a versão externa e descartar seu rascunho?')) {
+                          if (window.confirm(t('memory.reloadConfirm'))) {
                             generation.current++;
                             setNote(external);
                             setDraft(external.body);
@@ -506,7 +514,7 @@ export default function MemoryPage({ visible = true, activated = true }: { visib
                           }
                         }}
                       >
-                        Recarregar versão externa
+                        {t('memory.reloadExternal')}
                       </button>
                     </div>
                   )}
@@ -528,19 +536,19 @@ export default function MemoryPage({ visible = true, activated = true }: { visib
                         })
                       }
                     >
-                      Cancelar
+                      {t('memory.cancel')}
                     </button>
                     <button
                       className="primary-button"
                       disabled={busy || readOnly || !!external || !path.trim() || !draft.trim()}
                     >
-                      {busy ? 'Salvando…' : 'Salvar nota'}
+                      {busy ? t('memory.saving') : t('memory.save')}
                     </button>
                   </div>
                 </form>
               ) : note ? (
                 <article className="memory-article">
-                  <div className="eyebrow">NOTA DA MEMÓRIA</div>
+                  <div className="eyebrow">{t('memory.noteEyebrow')}</div>
                   <h2>{note.title}</h2>
                   <div className="memory-path">
                     <FileText size={13} /> {note.path}
@@ -557,7 +565,7 @@ export default function MemoryPage({ visible = true, activated = true }: { visib
                     }}
                     disabled={busy || readOnly}
                   >
-                    Editar
+                    {t('memory.edit')}
                   </button>
                 </article>
               ) : (
@@ -565,8 +573,8 @@ export default function MemoryPage({ visible = true, activated = true }: { visib
                   <div className="empty-icon">
                     <FileText size={18} />
                   </div>
-                  <h2>Escolha uma nota para ler</h2>
-                  <p>As notas só entram no contexto de conversas vinculadas por buscas apropriadas.</p>
+                  <h2>{t('memory.pickNote')}</h2>
+                  <p>{t('memory.pickNoteHint')}</p>
                 </div>
               )}
             </div>

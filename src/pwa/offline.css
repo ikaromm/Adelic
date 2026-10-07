@@ -68,3 +68,7 @@ body {
   outline: 2px solid var(--focus);
   outline-offset: 2px;
 }
+/* The language not in use (offline.html's inline script picks one). */
+.offline [hidden] {
+  display: none;
+}

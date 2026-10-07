@@ -115,3 +115,35 @@ export async function bubblewrap(
   argv.push('--chdir', root, '--', command, ...args);
   return { command: bwrap, args: argv };
 }
+
+/**
+ * Read-only bindings that make MCP commands reachable inside bubblewrap
+ * (docs/specs/mcp-catalog.md). The sandbox already binds `/` read-only, so only commands
+ * under /tmp (hidden by the tmpfs) need one: their own directory, never /tmp itself.
+ * Directories inside the workspace are left alone so a read-only mount never shadows it.
+ */
+export async function mcpCommandBindings(commands: string[], cwd: string): Promise<ReadonlyFileBinding[]> {
+  if (!commands.length) return [];
+  const root = await realpath(path.resolve(cwd));
+  const bindings = new Map<string, ReadonlyFileBinding>();
+  for (const command of commands) {
+    if (!path.isAbsolute(command)) throw new Error('Comando MCP sem caminho absoluto; nenhuma execução foi iniciada.');
+    let resolved: string;
+    try {
+      resolved = await realpath(command);
+      if (!(await stat(resolved)).isFile()) throw new Error('not a file');
+    } catch {
+      throw new Error(`Comando MCP indisponível: ${command}; nenhuma execução foi iniciada.`);
+    }
+    for (const file of new Set([path.resolve(command), resolved])) {
+      const directory = path.dirname(file);
+      if (!isWithin(directory, TMP_ROOT) || isWithin(directory, root)) continue;
+      if (directory === TMP_ROOT)
+        throw new Error(
+          `Comando MCP direto em /tmp não é liberado no sandbox (${command}); mova-o para uma subpasta própria.`,
+        );
+      bindings.set(directory, { source: await realpath(directory), target: directory, directory: true });
+    }
+  }
+  return [...bindings.values()];
+}

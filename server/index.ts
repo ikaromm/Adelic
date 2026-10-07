@@ -15,6 +15,7 @@ import { automationsRoutes } from './http/automations.js';
 import { AutomationService, type AutomationClock } from './automations.js';
 import { diagnosticsRoutes } from './http/diagnostics.js';
 import { gitRoutes } from './http/git.js';
+import { mcpRoutes } from './http/mcp.js';
 import { memoryRoutes } from './http/memory.js';
 import { projectsRoutes } from './http/projects.js';
 import { plansRoutes } from './http/plans.js';
@@ -139,6 +140,7 @@ export function createBackend(
   app.use(commandsRoutes(context));
   app.use(automationsRoutes(context));
   app.use(memoryRoutes(context));
+  app.use(mcpRoutes(context));
   app.use(diagnosticsRoutes(context));
   app.use(voiceRoutes(context, voice));
   app.use(terminalRoutes(context, terminal));

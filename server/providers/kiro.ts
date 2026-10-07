@@ -4,7 +4,8 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import type { ProviderEvent, ProviderInfo, RunInput, RunResult } from '../../shared/contracts';
 import { abortError, boundedPrompt, emitApproval, IMAGES_UNSUPPORTED } from './common';
 import { CommandScope } from './command';
-import { bubblewrap } from './sandbox';
+import { bubblewrap, mcpCommandBindings } from './sandbox';
+import type { RunMcpServer } from '../../shared/mcp';
 import { errorMessage, isRecord, JsonRpcProcess, type JsonRpcMessage } from './process';
 import { findProviderBinary, hasProviderBinaryOverride, providerBinaryMissingDetail } from './discovery';
 
@@ -42,6 +43,38 @@ export async function kiroPromptBlocks(text: string, images: NonNullable<RunInpu
   for (const image of images)
     blocks.push({ type: 'image', mimeType: image.mime, data: (await readFile(image.path)).toString('base64') });
   return blocks;
+}
+
+/**
+ * ACP `session/new` `mcpServers` (stdio form: name, command, args, env as name/value pairs).
+ * Pass-through names are resolved from Adelic's own environment here; the values travel in
+ * the JSON-RPC body over stdin, never in argv.
+ */
+export function kiroMcpServers(servers: RunMcpServer[], env: NodeJS.ProcessEnv = process.env) {
+  return servers.map((server) => ({
+    name: server.name,
+    command: server.command,
+    args: server.args,
+    env: [
+      ...server.passEnv.flatMap((name) => (env[name] !== undefined ? [{ name, value: env[name]! }] : [])),
+      ...Object.entries(server.env).map(([name, value]) => ({ name, value })),
+    ],
+  }));
+}
+
+/**
+ * Kiro 2.23 answers `_kiro.dev/commands/execute` `mcp` with the servers of the session. Any
+ * name outside the approved list, or an unreadable answer, blocks the run (fail closed).
+ */
+export function kiroForeignMcp(response: unknown, approved: string[]): string[] | undefined {
+  const data = isRecord(response) && isRecord(response.data) ? response.data : undefined;
+  if (!data || !Array.isArray(data.servers)) return undefined;
+  const names: string[] = [];
+  for (const server of data.servers) {
+    if (!isRecord(server) || typeof server.name !== 'string') return undefined;
+    names.push(server.name);
+  }
+  return names.filter((name) => !approved.includes(name));
 }
 
 export function kiroToolEvent(
@@ -311,6 +344,14 @@ export class KiroProvider {
     const agentDir = path.join(isolatedHome, 'agents');
     const agentName = 'adelic-runtime';
     const toolsAllowed = input.plan.tools;
+    // Opt-in MCP: only runs with tools receive the project's approved servers.
+    const mcp = toolsAllowed ? (input.mcpServers ?? []) : [];
+    if (mcp.some((server) => server.tools)) {
+      await rm(isolatedHome, { recursive: true, force: true });
+      throw new Error(
+        'Execução Kiro bloqueada: o Kiro não aplica a lista de ferramentas de servidores MCP recebidos por ACP. Remova a lista do servidor ou use o Codex.',
+      );
+    }
     await mkdir(agentDir, { recursive: true });
     await writeFile(
       path.join(agentDir, `${agentName}.json`),
@@ -329,7 +370,17 @@ export class KiroProvider {
     args.push('--agent', agentName);
     let wrapped: Awaited<ReturnType<typeof bubblewrap>>;
     try {
-      wrapped = await bubblewrap(this.binary, args, input.cwd, input.sandbox, [isolatedHome]);
+      wrapped = await bubblewrap(
+        this.binary,
+        args,
+        input.cwd,
+        input.sandbox,
+        [isolatedHome],
+        await mcpCommandBindings(
+          mcp.map((server) => server.command),
+          input.cwd,
+        ),
+      );
     } catch (error) {
       await rm(isolatedHome, { recursive: true, force: true });
       throw error;
@@ -364,11 +415,33 @@ export class KiroProvider {
       if (images.length && !kiroAcceptsImages(initialized)) throw new Error(IMAGES_UNSUPPORTED);
       const blocks = await kiroPromptBlocks(boundedPrompt(input), images);
       if (signal.aborted) throw abortError(signal);
-      const sessionRaw = await raceAbort(process.request('session/new', { cwd: input.cwd, mcpServers: [] }), signal);
+      const sessionRaw = await raceAbort(
+        process.request('session/new', { cwd: input.cwd, mcpServers: kiroMcpServers(mcp) }),
+        signal,
+      );
       signal.removeEventListener('abort', abortStartup);
       if (signal.aborted) throw abortError(signal);
       const sessionId = String(isRecord(sessionRaw) ? (sessionRaw.sessionId ?? '') : '');
       if (!sessionId) throw new Error('Kiro não retornou o identificador da sessão ACP.');
+      if (mcp.length) {
+        const approved = mcp.map((server) => server.name);
+        const report = await raceAbort(
+          process
+            .request('_kiro.dev/commands/execute', { sessionId, command: { command: 'mcp', args: {} } }, 15_000)
+            .catch(() => undefined),
+          signal,
+        );
+        const foreign = kiroForeignMcp(report, approved);
+        if (!foreign)
+          throw new Error(
+            'Execução Kiro bloqueada: o Kiro não informou os servidores MCP da sessão; nenhum pedido foi enviado.',
+          );
+        if (foreign.length)
+          throw new Error(
+            `Execução Kiro bloqueada: servidor MCP não aprovado pelo Adelic na sessão (${foreign.join(', ')}); nenhum pedido foi enviado.`,
+          );
+        emit({ type: 'status', text: `Servidores MCP do projeto nesta execução: ${approved.join(', ')}` });
+      }
       const result = await new Promise<RunResult>((resolve, reject) => {
         const current: KiroTurn = {
           input,

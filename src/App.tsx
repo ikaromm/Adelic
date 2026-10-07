@@ -2224,6 +2224,16 @@ export default function App() {
               }
               onSetting={updateSetting}
               onModelFallback={(modelFallback) => void enqueueSettingsPatch({ modelFallback })}
+              onProjectUpdated={(updated) =>
+                setData((current) =>
+                  current
+                    ? {
+                        ...current,
+                        projects: current.projects.map((item) => (item.id === updated.id ? updated : item)),
+                      }
+                    : current,
+                )
+              }
               usage={usage.report}
               usageError={usage.error}
               onSpendLimits={(patch) => void changeSpendLimits(patch)}

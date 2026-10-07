@@ -33,6 +33,7 @@ import { expandMessage } from './commands.js';
 import { resolveMentions } from './mentions.js';
 import { parseMentions } from '../shared/mentions.js';
 import { Store } from './store.js';
+import { runMcpServers } from './mcp.js';
 import {
   boundedCoordinatorContext,
   briefFor,
@@ -774,6 +775,12 @@ export class Orchestrator {
       if (!this.shuttingDown && this.store.getSession(sessionId)) void this.drain(sessionId);
     }
   }
+  /** `mcpServers` for a run input: empty unless the project enabled catalog entries and tools run. */
+  private mcpFor(session: Session, project: Project, tools: boolean): Pick<RunInput, 'mcpServers'> {
+    if (!tools) return {};
+    const servers = runMcpServers(this.store, project, session.projectId === null);
+    return servers.length ? { mcpServers: servers } : {};
+  }
   private detachedProject(sessionId: string): Project {
     const path = join(this.store.dataDir, 'conversations', sessionId);
     mkdirSync(path, { recursive: true });
@@ -944,6 +951,8 @@ export class Orchestrator {
           ...(hooks.blockedCommands.length ? { blockedCommands: hooks.blockedCommands } : {}),
           ...(summary ? { summary } : {}),
           ...(attached.images.length ? { attachments: attached.images } : {}),
+          // Opt-in MCP servers: project runs with tools only; never planning (read-only) or detached.
+          ...this.mcpFor(session, project, plan.tools && !readOnlyPlan),
         },
         session.thinking,
         providerCatalog,
@@ -1235,6 +1244,7 @@ export class Orchestrator {
         // work from the bounded task summaries only.
         ...(summary && task.role !== 'reviewer' && task.role !== 'synthesis' ? { summary } : {}),
         ...(taskImages.length ? { attachments: taskImages } : {}),
+        ...this.mcpFor(session, project, tools),
       };
     };
     const call = async (input: ReturnType<typeof baseInput>, task: DelegatedTask, streamDirect = false) => {

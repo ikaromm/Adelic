@@ -10,6 +10,20 @@ import {
 } from './commands.js';
 import { MENTION_PATH_MAX } from './mentions.js';
 import { AUTO_COMPACT_MAX_TOKENS, AUTO_COMPACT_MIN_TOKENS } from './compaction.js';
+import {
+  MCP_ARG_MAX,
+  MCP_ARGS_MAX,
+  MCP_COMMAND_MAX,
+  MCP_DESCRIPTION_MAX,
+  MCP_ENV_MAX,
+  MCP_ENV_NAME,
+  MCP_ENV_VALUE_MAX,
+  MCP_MESSAGES,
+  MCP_NAME,
+  MCP_PROJECT_MAX,
+  MCP_TOOL_NAME,
+  MCP_TOOLS_MAX,
+} from './mcp.js';
 import { TERMINAL_COMMAND_MAX, TERMINAL_TIMEOUT_MAX_SEC, TERMINAL_TIMEOUT_MIN_SEC } from './terminal.js';
 import {
   AUTOMATION_DENY_MAX_MINUTES,
@@ -466,6 +480,77 @@ export const SharedMemoryWriteSchema = z.object({
 });
 /** Legacy save bound to an Adelic project (no version check from the client). */
 export const ProjectMemoryWriteSchema = z.object({ projectId: text(), path: text(500), body: memoryBody });
+
+// MCP catalog (docs/specs/mcp-catalog.md). Only local stdio servers; remote transports are refused.
+const mcpEnvItem = z
+  .object({
+    name: z.string().regex(MCP_ENV_NAME),
+    from: z.enum(['adelic-env', 'literal']),
+    value: z.string().min(1).max(MCP_ENV_VALUE_MAX).optional(),
+  })
+  .strict()
+  .refine((item) => item.from === 'literal' || item.value === undefined);
+const mcpEnv = z
+  .array(mcpEnvItem)
+  .max(MCP_ENV_MAX)
+  .refine((items) => new Set(items.map((item) => item.name)).size === items.length);
+const mcpArgs = z.array(z.string().max(MCP_ARG_MAX)).max(MCP_ARGS_MAX);
+const mcpTools = z
+  .array(z.string().regex(MCP_TOOL_NAME))
+  .max(MCP_TOOLS_MAX)
+  .refine((items) => new Set(items).size === items.length);
+const mcpFields = {
+  description: optional(
+    z
+      .string()
+      .max(MCP_DESCRIPTION_MAX)
+      .transform((value) => value.trim()),
+    MCP_MESSAGES.description,
+  ),
+  transport: optional(z.literal('stdio'), MCP_MESSAGES.transport),
+  args: optional(mcpArgs, MCP_MESSAGES.args),
+  env: optional(mcpEnv, MCP_MESSAGES.env),
+  // `null` (PATCH) removes the allowlist; an empty list is refused (it would allow nothing).
+  tools: optional(z.union([z.null(), mcpTools.min(1)]), MCP_MESSAGES.tools),
+};
+// Remote-transport fields are refused explicitly instead of being silently dropped.
+const noRemote = (value: unknown, ctx: z.RefinementCtx) => {
+  if (
+    value &&
+    typeof value === 'object' &&
+    ['url', 'headers', 'http_headers', 'bearer_token_env_var'].some((key) => key in value)
+  )
+    apiIssue(ctx, MCP_MESSAGES.transport);
+};
+export const CreateMcpServerSchema = z
+  .unknown()
+  .superRefine(noRemote)
+  .pipe(
+    z.object({
+      name: required(z.string().regex(MCP_NAME), MCP_MESSAGES.name),
+      command: required(text(MCP_COMMAND_MAX), MCP_MESSAGES.command),
+      ...mcpFields,
+    }),
+  );
+export const PatchMcpServerSchema = z
+  .unknown()
+  .superRefine(noRemote)
+  .pipe(
+    z.object({
+      name: optional(z.string().regex(MCP_NAME), MCP_MESSAGES.name),
+      command: optional(text(MCP_COMMAND_MAX), MCP_MESSAGES.command),
+      ...mcpFields,
+    }),
+  );
+export const ProjectMcpSchema = z.object({
+  enabled: required(
+    z
+      .array(text(128))
+      .max(MCP_PROJECT_MAX)
+      .refine((ids) => new Set(ids).size === ids.length),
+    MCP_MESSAGES.projectLimit,
+  ),
+});
 
 /** Git panel (docs/specs/git-panel.md). Paths are checked against the current status list. */
 export const GIT_COMMIT_MESSAGE_MAX = 5000;

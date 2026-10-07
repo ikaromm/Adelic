@@ -1,4 +1,5 @@
 import type { CheckResult } from './hooks.js';
+import type { RunMcpServer } from './mcp.js';
 export type ProviderId = 'codex' | 'claude' | 'kiro' | 'opencode';
 export type Mode = 'auto' | 'fast' | 'deep';
 export type ReasoningEffort = string;
@@ -17,6 +18,8 @@ export interface Project {
   graphify?: GraphifyConfig;
   /** Optional monthly limits for this project; they apply while Settings.spendLimits is on. */
   spendLimits?: ProjectSpendLimits;
+  /** MCP catalog ids enabled for runs of this project (docs/specs/mcp-catalog.md); default none. */
+  enabledMcp?: string[];
   /** Git panel settings (docs/specs/git-panel.md). */
   git?: ProjectGitConfig;
 }
@@ -605,6 +608,11 @@ export interface RunInput {
    * command before that decision; the orchestrator denies matching pending requests.
    */
   blockedCommands?: string[];
+  /**
+   * MCP servers the project enabled (docs/specs/mcp-catalog.md). Absent or empty means none:
+   * providers keep failing closed on any MCP server. Never set for detached conversations.
+   */
+  mcpServers?: RunMcpServer[];
 }
 export type ProviderEvent =
   | { type: 'delta'; text: string }

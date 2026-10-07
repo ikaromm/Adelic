@@ -27,6 +27,7 @@ import type { VoiceStatus } from '../../shared/voice';
 import { notificationPermission, notificationsEnabled } from '../hooks/useRunNotifications';
 import { CommandsCard } from './CommandsCard';
 import { DiagnosticsCard } from './DiagnosticsCard';
+import { McpCard } from './McpCard';
 import { HooksCard } from './HooksCard';
 import { ProjectTools } from './ProjectTools';
 
@@ -49,6 +50,7 @@ export function SettingsPage({
   onSetting,
   onSkill,
   onModelFallback,
+  onProjectUpdated,
   usage,
   usageError,
   onSpendLimits,
@@ -90,6 +92,7 @@ export function SettingsPage({
   ) => void;
   onSkill: (id: string, enabled: boolean) => void;
   onModelFallback: (value: NonNullable<Settings['modelFallback']>) => void;
+  onProjectUpdated: (project: Project) => void;
   /** Usage report of this page's scope (the project, when one is open). */
   usage: UsageReport | null;
   usageError: string;
@@ -448,6 +451,7 @@ export function SettingsPage({
             )}
           </section>
           <CommandsCard projects={data.projects} project={project} />
+          <McpCard project={project} onProjectUpdated={onProjectUpdated} />
           <DiagnosticsCard
             updateCheck={data.settings.updateCheck === true}
             onUpdateCheck={(enabled) => onSetting('updateCheck', enabled)}

@@ -178,6 +178,15 @@ export const migrations: Migration[] = [
         CREATE INDEX IF NOT EXISTS automations_project ON automations(project_id);`);
     },
   },
+  {
+    version: 11,
+    description: 'Catálogo de servidores MCP (opt-in por projeto)',
+    up(db) {
+      db.exec(
+        `CREATE TABLE IF NOT EXISTS mcp_servers(id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, data TEXT NOT NULL);`,
+      );
+    },
+  },
 ];
 
 export const schemaVersion = migrations.at(-1)!.version;

@@ -19,7 +19,8 @@ import { errorMessage, isRecord, JsonRpcProcess, type JsonRpcMessage } from './p
 import { findProviderBinary, hasProviderBinaryOverride, providerBinaryMissingDetail } from './discovery';
 import { canonWritePathWithin, classifyApproval, scanCodexRules } from '../approval-policy';
 import { blockedBy } from '../../shared/hooks';
-import { bubblewrap, type ReadonlyFileBinding, type WrappedCommand } from './sandbox';
+import { bubblewrap, mcpCommandBindings, type ReadonlyFileBinding, type WrappedCommand } from './sandbox';
+import type { RunMcpServer } from '../../shared/mcp';
 
 type CodexToolProfile = 'no-tools' | 'fast-local-tools' | 'deep-tools';
 interface CodexServer {
@@ -27,6 +28,8 @@ interface CodexServer {
   cwd: string;
   profile: CodexToolProfile;
   scratch: string;
+  /** Adelic-approved MCP servers of the run that owns this app-server (empty = none). */
+  mcp: RunMcpServer[];
   rpc?: JsonRpcProcess;
   ready: Promise<JsonRpcProcess>;
   cleanup?: Promise<void>;
@@ -38,6 +41,8 @@ interface ActiveTurn {
   threadId?: string;
   turnId?: string;
   localEnvironmentVerified: boolean;
+  /** Names of the Adelic-approved MCP servers configured on this thread. */
+  mcpNames: string[];
   text: string;
   resolve: (result: RunResult) => void;
   reject: (error: Error) => void;
@@ -68,6 +73,31 @@ type CodexWrapper = (
  * Codex 0.160 lists `localImage` (field `path`) among the UserInput variants; the
  * app-server reads the file itself, so the path must be visible inside its sandbox.
  */
+/**
+ * `thread/start` `config.mcp_servers` for the approved servers (verified against codex-cli
+ * 0.160: the thread gets them, `config/read` does not). Literal values travel in the JSON-RPC
+ * body over stdin, never in argv; pass-through names use `env_vars`. Every tool asks for
+ * approval (`default_tools_approval_mode: 'prompt'`); an allowlist becomes `enabled_tools`.
+ */
+export function codexMcpConfig(servers: RunMcpServer[]) {
+  return Object.fromEntries(
+    servers.map((server) => [
+      server.name,
+      {
+        command: server.command,
+        args: server.args,
+        ...(Object.keys(server.env).length ? { env: server.env } : {}),
+        ...(server.passEnv.length ? { env_vars: server.passEnv } : {}),
+        ...(server.tools ? { enabled_tools: server.tools } : {}),
+        enabled: true,
+        required: false,
+        default_tools_approval_mode: 'prompt',
+        startup_timeout_sec: 20,
+      },
+    ]),
+  );
+}
+
 export function codexTurnInput(text: string, imagePaths: string[] = []) {
   return [
     { type: 'text', text, text_elements: [] as unknown[] },
@@ -198,6 +228,8 @@ async function approvedPermissions(
   }
   return requested;
 }
+
+const MCP_DECLINE = { action: 'decline', content: null, _meta: null };
 
 export class CodexProvider {
   private binary?: string;
@@ -394,6 +426,7 @@ export class CodexProvider {
     profile: CodexToolProfile,
     runId: string,
     signal: AbortSignal,
+    mcp: RunMcpServer[] = [],
   ): Promise<CodexServer> {
     if (this.shuttingDown) throw new Error('Codex provider is shutting down');
     if (signal.aborted) throw abortError(signal);
@@ -409,6 +442,7 @@ export class CodexProvider {
       cwd: resolvedCwd,
       profile,
       scratch: '',
+      mcp,
       ready: Promise.resolve(undefined as unknown as JsonRpcProcess),
     };
     this.servers.set(key, server);
@@ -496,7 +530,14 @@ export class CodexProvider {
     if (this.shuttingDown) throw new Error('Codex provider is shutting down');
     if (!this.binary) throw new Error(providerBinaryMissingDetail('codex'));
     const sandbox = server.key.split('\0')[1] as Sandbox;
-    const readonlyAuth = await this.authBinding(server.scratch, server.cwd, sandbox);
+    const readonlyAuth = [
+      // MCP commands are spawned by the app-server inside this sandbox: make them visible.
+      ...(await mcpCommandBindings(
+        server.mcp.map((item) => item.command),
+        server.cwd,
+      )),
+      ...(await this.authBinding(server.scratch, server.cwd, sandbox)),
+    ];
     if (signal.aborted) throw abortError(signal);
     if (this.shuttingDown) throw new Error('Codex provider is shutting down');
     const isolatedHome = path.join(server.scratch, 'CODEX_HOME');
@@ -557,7 +598,13 @@ export class CodexProvider {
       signal.removeEventListener('abort', abortStartup);
     }
   }
-  private async assertNoEnabledMcp(rpc: JsonRpcProcess, cwd: string): Promise<void> {
+  /**
+   * Fails closed on the effective host config: any enabled MCP server there (for example in
+   * ~/.codex/config.toml or a project .codex/config.toml) blocks the run, and so does any host
+   * entry, even disabled, named like an approved one (its fields would merge into ours).
+   * Approved servers live only in the thread config, so they never appear here.
+   */
+  private async assertNoEnabledMcp(rpc: JsonRpcProcess, cwd: string, approved: string[] = []): Promise<void> {
     const raw = await rpc.request(
       'config/read',
       { cwd: await realpath(path.resolve(cwd)), includeLayers: false },
@@ -576,11 +623,54 @@ export class CodexProvider {
       throw new Error('Execução Codex bloqueada: configuração MCP efetiva desconhecida; nenhuma thread foi iniciada.');
     }
     const servers = raw.config.mcp_servers ?? {};
+    if (Object.keys(servers).some((name) => approved.includes(name)))
+      throw new Error(
+        'Execução Codex bloqueada: MCPs personalizados ativos ou com o mesmo nome de um servidor do Adelic na configuração do Codex. Renomeie ou remova a entrada local.',
+      );
     if (Object.values(servers).some((entry) => !isRecord(entry) || entry.enabled !== false)) {
       throw new Error(
         'Execução Codex bloqueada: MCPs personalizados ativos não são suportados neste perfil isolado. Desative-os na configuração efetiva; MCPs integrados do Adelic permanecem disponíveis.',
       );
     }
+  }
+  /**
+   * After `thread/start`, the thread must report only approved MCP servers (plus host entries
+   * explicitly disabled): anything else, an unreadable answer or a tool outside the allowlist
+   * blocks the run before any turn.
+   */
+  private async assertThreadMcp(rpc: JsonRpcProcess, threadId: string, approved: RunMcpServer[]) {
+    const blocked = (detail: string) => new Error(`Execução Codex bloqueada: ${detail}; nenhum turno foi iniciado.`);
+    const seen: Record<string, unknown>[] = [];
+    let cursor: string | null = null;
+    for (let page = 0; page < 5; page++) {
+      const raw = await rpc.request(
+        'mcpServerStatus/list',
+        { threadId, detail: 'toolsAndAuthOnly', limit: 100, cursor },
+        25_000,
+      );
+      if (!isRecord(raw) || !Array.isArray(raw.data) || !raw.data.every(isRecord))
+        throw blocked('lista de servidores MCP da thread ilegível');
+      seen.push(...(raw.data as Record<string, unknown>[]));
+      cursor = typeof raw.nextCursor === 'string' && raw.nextCursor ? raw.nextCursor : null;
+      if (!cursor) break;
+    }
+    if (cursor) throw blocked('lista de servidores MCP da thread longa demais');
+    const failed: string[] = [];
+    for (const entry of seen) {
+      const name = typeof entry.name === 'string' ? entry.name : '';
+      const server = approved.find((item) => item.name === name);
+      if (!server) {
+        if (entry.runtimeStatus === 'disabled') continue;
+        throw blocked(`servidor MCP não aprovado pelo Adelic na thread (${name || 'sem nome'})`);
+      }
+      if (entry.pluginId !== null && entry.pluginId !== undefined)
+        throw blocked(`servidor MCP ${name} veio de um plugin`);
+      const tools = isRecord(entry.tools) ? Object.keys(entry.tools) : [];
+      if (server.tools && tools.some((tool) => !server.tools!.includes(tool)))
+        throw blocked(`servidor MCP ${name} expôs ferramenta fora da lista permitida`);
+      if (entry.runtimeStatus === 'failed') failed.push(name);
+    }
+    return failed;
   }
   private async removeScratch(directory: string) {
     await rm(directory, { recursive: true, force: true });
@@ -643,6 +733,35 @@ export class CodexProvider {
     }
     if (!message.method) return;
     const params = isRecord(message.params) ? message.params : {};
+    if (message.method === 'mcpServer/elicitation/request') {
+      // MCP tool calls and server prompts: always manual, only for an approved server of the
+      // active run with tools. Everything else is declined at the protocol boundary.
+      const turn = this.byThread.get(`${server.key}\n${String(params.threadId ?? '')}`);
+      const serverName = typeof params.serverName === 'string' ? params.serverName : '';
+      if (!turn || !turn.input.plan.tools || !turn.mcpNames.includes(serverName) || params.mode === 'url') {
+        rpc.respond(message.id, MCP_DECLINE);
+        return;
+      }
+      const approvalId = `${turn.input.runId}:${String(message.id)}`;
+      this.approvals.set(approvalId, {
+        runId: turn.input.runId,
+        sessionId: turn.input.sessionId,
+        server,
+        requestId: message.id,
+        method: message.method,
+        params,
+      });
+      const text = typeof params.message === 'string' ? params.message : '';
+      emitApproval(
+        turn.input,
+        turn.emit,
+        approvalId,
+        `Permitir servidor MCP ${serverName}`,
+        [`Servidor MCP: ${serverName}`, text].filter(Boolean).join('\n'),
+        'tool',
+      );
+      return;
+    }
     if (
       message.method === 'item/commandExecution/requestApproval' ||
       message.method === 'item/fileChange/requestApproval' ||
@@ -782,7 +901,9 @@ export class CodexProvider {
           pending.requestId,
           pending.method === 'item/permissions/requestApproval'
             ? { permissions: {}, scope: 'turn' }
-            : { decision: 'decline' },
+            : pending.method === 'mcpServer/elicitation/request'
+              ? MCP_DECLINE
+              : { decision: 'decline' },
         );
         this.approvals.delete(id);
       }
@@ -800,12 +921,30 @@ export class CodexProvider {
           : 'deep-tools';
       if (signal.aborted) throw abortError(signal);
       if (toolsAllowed) await scanCodexRules({ cwd: input.cwd });
-      const server = (ownedServer = await this.ensureServer(input.cwd, input.sandbox, profile, input.runId, signal));
+      // Opt-in MCP: only runs with tools receive the project's approved servers.
+      const mcp = toolsAllowed ? (input.mcpServers ?? []) : [];
+      if (new Set(mcp.map((item) => item.name)).size !== mcp.length)
+        throw new Error('Execução Codex bloqueada: servidores MCP repetidos.');
+      const server = (ownedServer = await this.ensureServer(
+        input.cwd,
+        input.sandbox,
+        profile,
+        input.runId,
+        signal,
+        mcp,
+      ));
       if (signal.aborted) throw abortError(signal);
       const rpc = server.rpc;
       if (!rpc) throw new Error('Codex app-server não está disponível.');
       // Recheck on every run because the app-server caches its config while host files may change.
-      await raceAbort(this.assertNoEnabledMcp(rpc, input.cwd), signal);
+      await raceAbort(
+        this.assertNoEnabledMcp(
+          rpc,
+          input.cwd,
+          mcp.map((item) => item.name),
+        ),
+        signal,
+      );
       if (signal.aborted) throw abortError(signal);
       const imagePaths = await stageCodexImages(server.scratch, input.attachments ?? []);
       if (signal.aborted) throw abortError(signal);
@@ -819,6 +958,7 @@ export class CodexProvider {
           approvalsReviewer: 'user',
           config: {
             allow_login_shell: false,
+            ...(mcp.length ? { mcp_servers: codexMcpConfig(mcp) } : {}),
             shell_environment_policy: {
               set: {
                 TMPDIR: server.scratch,
@@ -867,6 +1007,13 @@ export class CodexProvider {
       const thread = isRecord(threadRaw) && isRecord(threadRaw.thread) ? threadRaw.thread : {};
       const threadId = String(thread.id ?? (isRecord(threadRaw) ? (threadRaw.id ?? '') : ''));
       if (!threadId) throw new Error('Codex não retornou o identificador da thread.');
+      if (mcp.length) {
+        const failed = await raceAbort(this.assertThreadMcp(rpc, threadId, mcp), signal);
+        emit({
+          type: 'status',
+          text: `Servidores MCP do projeto nesta execução: ${mcp.map((item) => item.name).join(', ')}${failed.length ? ` (falharam ao iniciar: ${failed.join(', ')})` : ''}`,
+        });
+      }
       // The reserved native ID is trusted only for a complete local announcement
       // that matches this process's canonical workspace exactly.
       const environments = Array.isArray(thread.environments) ? thread.environments : [];
@@ -903,6 +1050,7 @@ export class CodexProvider {
           server,
           threadId,
           localEnvironmentVerified,
+          mcpNames: mcp.map((item) => item.name),
           text: '',
           resolve,
           reject,
@@ -994,6 +1142,16 @@ export class CodexProvider {
     const pending = this.approvals.get(approvalId);
     if (!pending) throw new Error('Aprovação não está mais pendente.');
     const turn = this.turns.get(pending.runId);
+    if (pending.method === 'mcpServer/elicitation/request') {
+      this.assertPending(approvalId, pending, turn);
+      this.approvals.delete(approvalId);
+      // One call at a time: no "always" or session-wide grant is ever sent.
+      pending.server.rpc?.respond(
+        pending.requestId,
+        decision === 'approve' ? { action: 'accept', content: {}, _meta: null } : MCP_DECLINE,
+      );
+      return;
+    }
     if (pending.method === 'item/permissions/requestApproval') {
       const permissions = decision === 'approve' && turn ? await approvedPermissions(turn, pending.params) : undefined;
       this.assertPending(approvalId, pending, turn);

@@ -1,3 +1,5 @@
+**Português** · [English](README.en.md)
+
 # Adelic
 
 Aplicativo local para conversar com agentes, organizar projetos e compartilhar contexto, com interface web e pacote desktop Linux. A primeira versão usa os runtimes instalados no computador; o login continua no Codex, Claude Code ou Kiro.

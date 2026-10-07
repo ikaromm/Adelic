@@ -41,6 +41,7 @@ import { COMPACTION_PROMPT_MARKER } from '../../server/compaction.js';
 import { VoiceService, type CommandRunner } from '../../server/voice.js';
 import { TerminalService } from '../../server/terminal.js';
 import { startFakeMemory } from './fake-memory.js';
+import { createFakeUpdater } from './fake-updater.js';
 
 const port = Number(process.env.E2E_PORT || 4399);
 // Optional simulated ai-memory (E2E_MEMORY_PORT); otherwise ADELIC_MEMORY_URL points nowhere.
@@ -296,6 +297,8 @@ const bwrapWorks =
     },
   ).status === 0;
 const terminal = new TerminalService(bwrapWorks ? {} : { wrap: async (command, args) => ({ command, args }) });
+// "Atualizar Adelic": a scripted checkout two commits behind; the restart only flips the commit.
+const updater = createFakeUpdater();
 // Short retry delays so the retry flows finish quickly.
 const { app } = createBackend(
   store,
@@ -305,7 +308,11 @@ const { app } = createBackend(
   { baseDelayMs: 150, maxDelayMs: 400 },
   voice,
   terminal,
+  undefined,
+  undefined,
+  updater.service,
 );
+app.post('/e2e/update/reset', (_req, res) => res.json(updater.reset()));
 app.get('/e2e/voice', (req, res) => {
   const mode = String(req.query.mode);
   if (mode === 'local' || mode === 'remote' || mode === 'missing') voiceMode = mode;

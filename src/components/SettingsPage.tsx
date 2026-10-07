@@ -81,6 +81,7 @@ export function SettingsPage({
       | 'responseStyle'
       | 'approvalMode'
       | 'updateCheck'
+      | 'updateChannel'
       | 'autoRetry'
       | 'notifications'
       | 'autoCompact'
@@ -455,6 +456,8 @@ export function SettingsPage({
           <DiagnosticsCard
             updateCheck={data.settings.updateCheck === true}
             onUpdateCheck={(enabled) => onSetting('updateCheck', enabled)}
+            updateChannel={data.settings.updateChannel ?? 'master'}
+            onUpdateChannel={(channel) => onSetting('updateChannel', channel)}
           />
         </div>
         <aside className="settings-aside">

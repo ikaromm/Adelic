@@ -247,6 +247,20 @@ export const RetryRunSchema = z.object({
   model: optional(text(120), 'model inválido'),
   overrideLimit: overrideLimit(),
 });
+/** Self-update channel of a git checkout (docs/specs/self-update.md). */
+export const UpdateChannelSchema = z.enum(['master', 'develop']);
+export const UpdateCheckSchema = z
+  .object({ channel: optional(UpdateChannelSchema, 'channel deve ser master ou develop') })
+  .strict();
+/** "Atualizar agora": always an explicit confirmation. */
+export const UpdateApplySchema = z
+  .object({
+    confirm: required(z.literal(true), 'confirm: true é obrigatório para atualizar'),
+    channel: optional(UpdateChannelSchema, 'channel deve ser master ou develop'),
+    /** The commit or version the confirmation showed; refused if it changed since. */
+    target: optional(z.string().regex(/^[0-9a-f]{7,64}$|^\d+\.\d+\.\d+$/), 'target inválido'),
+  })
+  .strict();
 export const SettingsPatchSchema = z.object({
   defaultProviderId: optional(ProviderIdSchema, 'defaultProviderId inválido'),
   defaultMode: optional(ModeSchema, 'defaultMode inválido'),
@@ -255,6 +269,7 @@ export const SettingsPatchSchema = z.object({
   responseStyle: optional(z.enum(['concise', 'balanced']), 'responseStyle inválido'),
   approvalMode: optional(z.enum(['auto-safe', 'manual']), 'approvalMode inválido'),
   updateCheck: optional(z.boolean(), 'updateCheck deve ser booleano'),
+  updateChannel: optional(UpdateChannelSchema, 'updateChannel deve ser master ou develop'),
   autoRetry: optional(z.boolean(), 'autoRetry deve ser booleano'),
   notifications: optional(z.boolean(), 'notifications deve ser booleano'),
   modelFallback: optional(

@@ -1,6 +1,6 @@
 # Desktop Linux
 
-O pacote inicial é **Linux x86_64**, em AppImage. Electron 44.5.1 incorpora Node 24.21.0 e SQLite; o backend roda em um processo utilitário e escolhe uma porta livre em `127.0.0.1`. A janela usa a mesma interface escura do modo web. Os pacotes são distribuídos pelas [releases do GitHub](https://github.com/ikaromm/Adelic/releases); o aplicativo não tem atualização automática.
+O pacote inicial é **Linux x86_64**, em AppImage. Electron 44.5.1 incorpora Node 24.21.0 e SQLite; o backend roda em um processo utilitário e escolhe uma porta livre em `127.0.0.1`. A janela usa a mesma interface escura do modo web. Os pacotes são distribuídos pelas [releases do GitHub](https://github.com/ikaromm/Adelic/releases); o aplicativo não se atualiza sozinho; **Configurações › Diagnóstico › Atualizar Adelic** baixa a nova release, confere o SHA-256 e reinicia quando você pede ([atualizar o Adelic](specs/self-update.md)).
 
 ## Abrir e instalar
 

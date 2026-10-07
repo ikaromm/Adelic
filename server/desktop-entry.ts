@@ -1,9 +1,14 @@
 import { startServer, type RunningServer } from './runtime.js';
 
+type ParentMessage =
+  | { type: 'ready'; url: string; port: number; nodeVersion: string }
+  | { type: 'error'; message: string }
+  // After "Atualizar Adelic" (docs/specs/self-update.md): the main process stops this
+  // backend as usual and relaunches the (replaced) AppImage.
+  | { type: 'relaunch' };
+
 interface UtilityParentPort {
-  postMessage(
-    message: { type: 'ready'; url: string; port: number; nodeVersion: string } | { type: 'error'; message: string },
-  ): void;
+  postMessage(message: ParentMessage): void;
   on(event: 'message' | 'disconnect', listener: (event: unknown) => void): this;
 }
 
@@ -11,9 +16,7 @@ const parentPort = (process as NodeJS.Process & { parentPort?: UtilityParentPort
 let runtime: RunningServer | undefined;
 let stopping: Promise<void> | undefined;
 
-function send(
-  message: { type: 'ready'; url: string; port: number; nodeVersion: string } | { type: 'error'; message: string },
-) {
+function send(message: ParentMessage) {
   try {
     parentPort?.postMessage(message);
   } catch {
@@ -63,6 +66,7 @@ async function main() {
     webDir: process.env.ADELIC_WEB_DIR,
     dataDir: process.env.ADELIC_DATA_DIR,
     development: false,
+    restart: () => send({ type: 'relaunch' }),
   });
   send({ type: 'ready', url: runtime.url, port: runtime.port, nodeVersion: process.versions.node });
 }

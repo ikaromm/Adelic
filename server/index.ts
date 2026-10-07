@@ -28,6 +28,8 @@ import { terminalRoutes } from './http/terminal.js';
 import { TerminalService } from './terminal.js';
 import { APP_CSP } from '../shared/terminal.js';
 import { worktreesRoutes } from './http/worktrees.js';
+import { updateRoutes } from './http/update.js';
+import { SelfUpdateService, type SelfUpdater } from './self-update.js';
 
 export function createBackend(
   store: Store,
@@ -45,6 +47,8 @@ export function createBackend(
   automationClock?: AutomationClock,
   // Test hook for the after-edit check runner (production uses bubblewrap; server/hooks.ts).
   checkRunner?: typeof runCheck,
+  // "Atualizar Adelic" (server/self-update.ts); the runtime passes one with a restart function.
+  selfUpdater: SelfUpdater = new SelfUpdateService(),
 ) {
   const app = express();
   app.disable('x-powered-by');
@@ -146,6 +150,7 @@ export function createBackend(
   app.use(memoryRoutes(context));
   app.use(mcpRoutes(context));
   app.use(diagnosticsRoutes(context));
+  app.use(updateRoutes(context, selfUpdater));
   app.use(voiceRoutes(context, voice));
   app.use(terminalRoutes(context, terminal));
   app.get('/api/health', async (_req, res) => {

@@ -1211,6 +1211,7 @@ export default function App() {
       | 'responseStyle'
       | 'approvalMode'
       | 'updateCheck'
+      | 'updateChannel'
       | 'autoRetry'
       | 'notifications'
       | 'autoCompact'

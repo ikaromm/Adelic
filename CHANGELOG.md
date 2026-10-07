@@ -2,6 +2,7 @@
 
 ## Não publicado
 
+- Limites de uso, desligados por padrão: tokens e custo por dia e por mês, e por projeto no mês, conferidos antes de cada chamada ao agente (respostas, tarefas, compactação, resumo de passagem, fila). Avisa em 80% e, atingido, recusa com o motivo e **Continuar mesmo assim** para aquela mensagem; custo não informado nunca conta como zero. Veja [limites de uso](docs/specs/spend-limits.md).
 - Menções `@arquivo` no campo de mensagem: a lista sugere os arquivos do projeto enquanto você digita, e os arquivos de texto mencionados (até 5, 512 KB cada) entram no pedido ao agente, com o caminho conferido para não sair do projeto. Veja [menções de arquivos](docs/specs/mentions.md).
 - Troca de modelo quando o atual está sobrecarregado ou no limite de requisições: **Tentar com outro modelo** oferece até 3 alternativas e muda a conversa para a escolhida; opcionalmente, **Trocar de modelo se o atual estiver sobrecarregado** tenta até 3 modelos configurados, só naquela resposta, depois das novas tentativas e só sem efeito visível. Veja [troca de modelo](docs/specs/retries.md#troca-de-modelo).
 - Paleta de comandos com Ctrl+P (⌘P): ações, conversas, projetos, agente e modelo, modo e comandos salvos, com busca sem acentos e escolhas recentes primeiro. Veja [paleta de comandos](docs/specs/command-palette.md).

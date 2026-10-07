@@ -23,6 +23,7 @@ import {
   type QueuedMessage,
   type Plan,
   type Compaction,
+  type UsageTotals,
   QUEUE_LIMIT,
 } from '../shared/contracts.js';
 import type { SavedCommand } from '../shared/commands.js';
@@ -452,6 +453,53 @@ export class Store {
     return sessionId
       ? this.rows<Run>('runs', "WHERE json_extract(data,'$.sessionId')=? ORDER BY rowid DESC", [sessionId])
       : this.rows<Run>('runs', 'ORDER BY rowid DESC');
+  }
+  /**
+   * Usage of the runs started in each period [from, to), in one scan of the runs table
+   * (docs/specs/spend-limits.md). With `projectId`, only runs of conversations currently
+   * linked to that project. Tokens sum what runs reported; cost is NULL when no run did.
+   * Bounds are ISO instants (`toISOString()`), compared as text with `startedAt`.
+   */
+  usageTotals(periods: { from: string; to: string }[], projectId?: string): UsageTotals[] {
+    if (!periods.length) return [];
+    const inPeriod = (i: number) => `s >= :f${i} AND s < :t${i}`;
+    const columns = periods
+      .map(
+        (_, i) => `SUM(CASE WHEN ${inPeriod(i)} THEN 1 ELSE 0 END) AS runs${i},
+          SUM(CASE WHEN ${inPeriod(i)} THEN COALESCE(i,0)+COALESCE(o,0) ELSE 0 END) AS tokens${i},
+          SUM(CASE WHEN ${inPeriod(i)} THEN c END) AS cost${i},
+          SUM(CASE WHEN ${inPeriod(i)} AND c IS NULL AND st <> 'running' THEN 1 ELSE 0 END) AS nocost${i},
+          SUM(CASE WHEN ${inPeriod(i)} AND i IS NULL AND o IS NULL AND st <> 'running' THEN 1 ELSE 0 END) AS notokens${i}`,
+      )
+      .join(',\n');
+    const params: Record<string, SQLInputValue> = {
+      lo: periods.reduce((min, p) => (p.from < min ? p.from : min), periods[0].from),
+      hi: periods.reduce((max, p) => (p.to > max ? p.to : max), periods[0].to),
+    };
+    periods.forEach((p, i) => {
+      params[`f${i}`] = p.from;
+      params[`t${i}`] = p.to;
+    });
+    if (projectId) params.project = projectId;
+    const row = this.db
+      .prepare(
+        `SELECT ${columns} FROM (
+           SELECT json_extract(r.data,'$.startedAt') AS s, json_extract(r.data,'$.inputTokens') AS i,
+                  json_extract(r.data,'$.outputTokens') AS o, json_extract(r.data,'$.costUsd') AS c,
+                  json_extract(r.data,'$.status') AS st
+             FROM runs r ${projectId ? 'JOIN sessions se ON se.id = r.session_id WHERE se.project_id = :project' : ''}
+         ) WHERE s >= :lo AND s < :hi`,
+      )
+      .get(params) as Record<string, number | null>;
+    return periods.map((p, i) => ({
+      from: p.from,
+      to: p.to,
+      tokens: Number(row[`tokens${i}`] ?? 0),
+      costUsd: row[`cost${i}`] === null || row[`cost${i}`] === undefined ? null : Number(row[`cost${i}`]),
+      runs: Number(row[`runs${i}`] ?? 0),
+      runsWithoutCost: Number(row[`nocost${i}`] ?? 0),
+      runsWithoutTokens: Number(row[`notokens${i}`] ?? 0),
+    }));
   }
   addEvent(e: RunEvent) {
     this.db

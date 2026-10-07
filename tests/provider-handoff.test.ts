@@ -522,6 +522,8 @@ describe('performHandoff', () => {
     expect(denied).toEqual(['ap:deny']);
     expect(result.message?.handoff?.fallback).toContain('tempo esgotado');
     expect(result.session.nativeSessionId).toBeUndefined();
-    expect(events).toEqual(['message', 'session']);
+    // The summary call is recorded as a run (started, then failed) for the usage limits.
+    expect(events).toEqual(['run', 'run', 'message', 'session']);
+    expect(store.listRuns('s')[0]).toMatchObject({ status: 'failed', handoff: { toProviderId: 'kiro' } });
   });
 });

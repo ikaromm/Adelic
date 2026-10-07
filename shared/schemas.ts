@@ -10,6 +10,7 @@ import {
 } from './commands.js';
 import { MENTION_PATH_MAX } from './mentions.js';
 import { AUTO_COMPACT_MAX_TOKENS, AUTO_COMPACT_MIN_TOKENS } from './compaction.js';
+import { SPEND_COST_MAX, SPEND_TOKENS_MAX, hasCents } from './spend-limits.js';
 
 // Request schemas shared by the server routes (and usable by the UI). Each field keeps
 // the exact error message the API returned before zod, so clients see no change.
@@ -69,6 +70,31 @@ export const OrchestrationPatchSchema = z
   .strict();
 export const GraphifyConfigSchema = z.object({ enabled: z.boolean() }).strict();
 
+// Usage limits (docs/specs/spend-limits.md): `null` clears a limit, absent keeps it.
+export const SpendTokensSchema = z.number().int().min(0).max(SPEND_TOKENS_MAX);
+export const SpendCostSchema = z.number().min(0).max(SPEND_COST_MAX).refine(hasCents);
+export const SPEND_LIMITS_MESSAGE =
+  'spendLimits inválido (tokens: inteiros não negativos; custo: dólares não negativos com até 2 casas; null remove o limite)';
+export const SpendLimitsPatchSchema = z
+  .object({
+    enabled: z.boolean(),
+    dailyTokens: SpendTokensSchema.nullable(),
+    monthlyTokens: SpendTokensSchema.nullable(),
+    dailyCostUsd: SpendCostSchema.nullable(),
+    monthlyCostUsd: SpendCostSchema.nullable(),
+  })
+  .partial()
+  .strict();
+export const ProjectSpendLimitsPatchSchema = z.union([
+  z.null(),
+  z
+    .object({ monthlyTokens: SpendTokensSchema.nullable(), monthlyCostUsd: SpendCostSchema.nullable() })
+    .partial()
+    .strict(),
+]);
+/** "Continuar mesmo assim": skip the usage limits for this one request (never stored). */
+const overrideLimit = () => optional(z.boolean(), 'overrideLimit deve ser booleano');
+
 export const CreateProjectSchema = z.object({
   name: text(),
   path: text(4096),
@@ -79,6 +105,10 @@ export const PatchProjectSchema = z.object({
   name: optional(text(), 'Campos de projeto inválidos'),
   memoryWorkspace: optional(text(100), 'Campos de projeto inválidos'),
   memoryProject: optional(text(100), 'Campos de projeto inválidos'),
+  spendLimits: optional(
+    ProjectSpendLimitsPatchSchema,
+    'spendLimits inválido (monthlyTokens inteiro não negativo, monthlyCostUsd com até 2 casas; null remove)',
+  ),
 });
 
 const projectRef = z.union([z.null(), text()]);
@@ -103,6 +133,7 @@ export const HandoffSchema = z.object({
   providerId: required(ProviderIdSchema, 'providerId inválido'),
   model: optional(text(120), 'model inválido'),
   summary: required(z.enum(['model', 'local', 'none']), 'summary deve ser model, local ou none'),
+  overrideLimit: overrideLimit(),
 });
 
 export const AttachmentIdsSchema = z
@@ -117,6 +148,7 @@ export const SendMessageSchema = z.object({
     AttachmentIdsSchema,
     `attachmentIds inválido (até ${MAX_ATTACHMENTS_PER_MESSAGE} anexos, sem repetição)`,
   ),
+  overrideLimit: overrideLimit(),
 });
 /** Edit and resend a user message (docs/specs/edit-branch.md); omitted attachmentIds keep the message's own. */
 export const EditMessageSchema = SendMessageSchema;
@@ -145,7 +177,11 @@ export const QueueMessageSchema = z.object({
   content: required(text(32000), 'content obrigatório (máximo 32000 caracteres)'),
   clientId: optional(text(128), 'clientId inválido'),
   attachmentIds: attachmentIdsField,
+  /** Applies only when the message starts right away (the conversation was idle). */
+  overrideLimit: overrideLimit(),
 });
+/** "Retomar fila"; with `overrideLimit`, only the next message passes the usage limits. */
+export const QueueResumeSchema = z.object({ overrideLimit: overrideLimit() });
 export const QueueEditSchema = z.object({
   content: required(text(32000), 'content obrigatório (máximo 32000 caracteres)'),
 });
@@ -155,6 +191,7 @@ export const SendNowSchema = z.object({
   clientId: optional(text(128), 'clientId inválido'),
   itemId: optional(text(128), 'itemId inválido'),
   attachmentIds: attachmentIdsField,
+  overrideLimit: overrideLimit(),
 });
 export const ApprovalDecisionSchema = z.object({
   decision: required(z.enum(['approve', 'deny']), 'decision deve ser approve ou deny'),
@@ -174,6 +211,7 @@ export const ModelFallbackSchema = z
 export const RetryRunSchema = z.object({
   providerId: optional(ProviderIdSchema, 'providerId inválido'),
   model: optional(text(120), 'model inválido'),
+  overrideLimit: overrideLimit(),
 });
 export const SettingsPatchSchema = z.object({
   defaultProviderId: optional(ProviderIdSchema, 'defaultProviderId inválido'),
@@ -194,9 +232,10 @@ export const SettingsPatchSchema = z.object({
     z.number().int().min(AUTO_COMPACT_MIN_TOKENS).max(AUTO_COMPACT_MAX_TOKENS),
     `autoCompactTokens deve ser um inteiro entre ${AUTO_COMPACT_MIN_TOKENS} e ${AUTO_COMPACT_MAX_TOKENS}`,
   ),
+  spendLimits: optional(SpendLimitsPatchSchema, SPEND_LIMITS_MESSAGE),
 });
-/** "Compactar conversa" takes no options (docs/specs/compaction.md). */
-export const CompactSchema = z.object({}).strict();
+/** "Compactar conversa" takes no options besides the one-off limit override (docs/specs/compaction.md). */
+export const CompactSchema = z.object({ overrideLimit: z.boolean().optional() }).strict();
 export const RestoreRunSchema = z.object({
   confirm: required(z.literal(true), 'confirm: true é obrigatório para desfazer alterações'),
 });
@@ -208,6 +247,7 @@ export const PlanEditSchema = z.object({
 });
 export const PlanApproveSchema = z.object({
   mode: required(z.enum(['all', 'next']), 'mode deve ser all ou next'),
+  overrideLimit: overrideLimit(),
 });
 export const PlanTaskStatusSchema = z.object({
   status: required(z.enum(['skipped', 'pending']), 'status deve ser skipped ou pending'),
@@ -238,6 +278,11 @@ export const PatchCommandSchema = z.object({
   description: optional(commandDescription, commandMessages.description),
   template: optional(commandTemplate, commandMessages.template),
   mode: optional(z.union([z.null(), z.enum(commandModes)]), commandMessages.mode),
+});
+
+/** Query of GET /api/usage. */
+export const UsageQuerySchema = z.object({
+  projectId: optional(text(200), 'projectId inválido'),
 });
 
 /** Query of GET /api/projects/:id/files (the file autocomplete for `@` mentions). */

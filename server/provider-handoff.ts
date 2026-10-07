@@ -5,6 +5,7 @@ import type {
   ProviderId,
   ProviderInfo,
   ProviderRegistry,
+  Run,
   RunInput,
   Session,
   StreamEvent,
@@ -12,6 +13,7 @@ import type {
 import { adaptEffort } from '../shared/reasoning.js';
 import { selectHistory } from './router.js';
 import type { Store } from './store.js';
+import { UsageMeter, applyUsage } from './usage.js';
 
 // "Continuar com outro agente" (docs/specs/provider-handoff.md): switch a conversation to
 // another provider, optionally carrying a summary. The summary is a visible `role: 'system'`
@@ -178,6 +180,8 @@ export interface HandoffDeps {
   /** Aborted when the user cancels the handoff. */
   signal: AbortSignal;
   timeoutMs?: number;
+  /** Called right before the summary model call; throws to refuse it (usage limits). */
+  beforeModelCall?: () => void;
 }
 
 /** Validates the target against the catalog; returns both providers. */
@@ -193,7 +197,7 @@ function validateTarget(catalog: ProviderInfo[], session: Session, request: Hand
 
 /** One read-only, tool-less call on the current provider; resolves to the summary text. */
 async function modelSummary(
-  deps: HandoffDeps,
+  deps: HandoffDeps & { target: ProviderId },
   session: Session,
   provider: ProviderInfo,
   messages: Message[],
@@ -202,8 +206,29 @@ async function modelSummary(
   const timeout = AbortSignal.timeout(deps.timeoutMs ?? HANDOFF_TIMEOUT_MS);
   const signal = AbortSignal.any([deps.signal, timeout]);
   const level = provider.capabilities.fast ? 'fast' : 'deep';
+  // The summary call is recorded as a run without messages, so its usage counts toward the
+  // usage limits and shows in Atividade (docs/specs/spend-limits.md).
+  const run: Run = {
+    id: randomUUID(),
+    sessionId: session.id,
+    providerId: provider.id,
+    ...(session.model ? { model: session.model } : {}),
+    status: 'running',
+    route: {
+      level,
+      reason: 'Resumo para continuar com outro agente',
+      tools: false,
+      memory: false,
+      contextBudget: 0,
+    },
+    startedAt: new Date().toISOString(),
+    handoff: { toProviderId: deps.target },
+  };
+  deps.store.putRun(run);
+  deps.emit({ type: 'run', run: { ...run } });
+  const usage = new UsageMeter();
   const input: RunInput = {
-    runId: `handoff:${randomUUID()}`,
+    runId: `handoff:${run.id}`,
     sessionId: session.id,
     providerId: provider.id,
     model: session.model,
@@ -223,25 +248,43 @@ async function modelSummary(
   };
   let text = '';
   try {
-    const result = await deps.providers.run(
-      input,
-      (event) => {
-        if (event.type === 'delta') text += event.text;
-        // Nothing may run during a summary: any approval request is denied at once.
-        else if (event.type === 'approval') void deps.providers.approve(event.approval.id, 'deny').catch(() => {});
-      },
-      signal,
-    );
-    if (!text.trim() && result.text) text = result.text;
-  } catch (e) {
+    try {
+      const result = await deps.providers.run(
+        input,
+        (event) => {
+          if (event.type === 'delta') text += event.text;
+          // Nothing may run during a summary: any approval request is denied at once.
+          else if (event.type === 'approval') void deps.providers.approve(event.approval.id, 'deny').catch(() => {});
+          else if (event.type === 'usage') usage.event(event);
+        },
+        signal,
+      );
+      usage.result(result);
+      if (!text.trim() && result.text) text = result.text;
+    } catch (e) {
+      if (deps.signal.aborted) throw httpError('Passagem cancelada', 409, { cancelled: true });
+      if (timeout.aborted) throw new Error('tempo esgotado', { cause: e });
+      throw e;
+    }
     if (deps.signal.aborted) throw httpError('Passagem cancelada', 409, { cancelled: true });
-    if (timeout.aborted) throw new Error('tempo esgotado', { cause: e });
+    const summary = text.trim().slice(0, HANDOFF_SUMMARY_MAX);
+    if (!summary) throw new Error('o agente não devolveu um resumo');
+    run.status = 'completed';
+    return summary;
+  } catch (e) {
+    run.status = deps.signal.aborted ? 'cancelled' : 'failed';
+    if (run.status === 'failed') run.error = e instanceof Error ? e.message : String(e);
     throw e;
+  } finally {
+    applyUsage(run, usage.totals());
+    run.completedAt = new Date().toISOString();
+    run.durationMs = Date.now() - Date.parse(run.startedAt);
+    // The conversation may have been deleted meanwhile (its runs go with it).
+    if (deps.store.getSession(session.id)) {
+      deps.store.putRun(run);
+      deps.emit({ type: 'run', run });
+    }
   }
-  if (deps.signal.aborted) throw httpError('Passagem cancelada', 409, { cancelled: true });
-  const summary = text.trim().slice(0, HANDOFF_SUMMARY_MAX);
-  if (!summary) throw new Error('o agente não devolveu um resumo');
-  return summary;
 }
 
 /**
@@ -270,8 +313,10 @@ export async function performHandoff(
       content = localSummary(messages, fallback);
       source = 'local';
     } else {
+      // Usage limits: checked only when a model call would happen, outside the local fallback.
+      deps.beforeModelCall?.();
       try {
-        content = await modelSummary(deps, session, current, messages, target.name);
+        content = await modelSummary({ ...deps, target: target.id }, session, current, messages, target.name);
         source = 'model';
       } catch (e) {
         if ((e as { cancelled?: boolean }).cancelled) throw e;

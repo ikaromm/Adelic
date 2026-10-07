@@ -2158,3 +2158,45 @@ label.setting-row > input {
     max-width: none;
   }
 }
+
+/* Usage limits (docs/specs/spend-limits.md). */
+.spend-limit-row > input {
+  width: 160px;
+  max-width: 45%;
+  height: 34px;
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+}
+.spend-limit-row > input[aria-invalid='true'] {
+  border-color: var(--danger-border);
+}
+.usage-summary {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 12px 0 0;
+  border-top: 1px solid var(--border-soft);
+}
+.usage-summary > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  font-size: var(--text-sm);
+}
+.usage-summary dt {
+  min-width: 64px;
+  color: var(--text-muted);
+}
+.usage-summary dd {
+  margin: 0;
+  min-width: 0;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+@container main-area (max-width: 560px) {
+  .spend-limit-row > input {
+    width: 100%;
+    max-width: none;
+  }
+}

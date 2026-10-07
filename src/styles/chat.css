@@ -2806,3 +2806,30 @@
     width: auto;
   }
 }
+
+/* Usage limits (docs/specs/spend-limits.md): banner at 80% and the refusal notice. */
+.composer-wrap > .spend-warning {
+  border-color: var(--warning-border);
+  background: color-mix(in srgb, var(--orange) 8%, var(--canvas));
+  color: var(--text);
+}
+.spend-warning > span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.spend-limit-notice {
+  flex-wrap: wrap;
+}
+.spend-limit-notice > span:first-child {
+  flex: 1 1 220px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.spend-limit-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}

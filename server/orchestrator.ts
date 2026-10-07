@@ -19,6 +19,7 @@ import type {
   Session,
   RunInput,
   RunPlanRef,
+  RunResult,
   Settings,
   StoredAttachment,
   AttachmentMeta,
@@ -69,6 +70,7 @@ import {
   runContext,
   summarisable,
 } from './compaction.js';
+import { UsageMeter, addUsage, applyUsage, assertWithinLimits, isSpendLimitError } from './usage.js';
 
 type Started = { runId: string; messageId: string };
 type RoutePlanLevel = Run['route']['level'];
@@ -77,6 +79,8 @@ export interface StartOptions {
   planTask?: { planId: string; taskId: string; prompt: string };
   /** Edit and resend: this user message and everything after it are discarded first. */
   replaceFrom?: string;
+  /** "Continuar mesmo assim": skip the usage limits for this one run (never persisted). */
+  overrideLimit?: boolean;
 }
 /** A plan-mode run: its kind and the prompt that replaces the usual one. */
 type SpecialRun = { ref: RunPlanRef; prompt: string };
@@ -111,6 +115,8 @@ export class Orchestrator {
   private drains = new Map<string, Promise<{ itemId: string; result: Started } | undefined>>();
   /** "Enviar agora": the queued item that replaces the run being cancelled. */
   private interrupting = new Map<string, string>();
+  /** Queued items allowed past the usage limits once ("Continuar mesmo assim"); memory only. */
+  private limitOverrides = new Set<string>();
   /** Plan mode: plans, their approval and sequential task execution. */
   readonly plans: Plans;
   constructor(
@@ -174,7 +180,7 @@ export class Orchestrator {
     if (compact === 'invalid') throw Object.assign(new Error(COMPACT_INVALID), { status: 400 });
     if (compact === 'compact') {
       if (attachments.length) throw Object.assign(new Error('/compactar não aceita anexos'), { status: 400 });
-      return this.compact(session.id);
+      return this.compact(session.id, { overrideLimit: options.overrideLimit });
     }
     if (!options.planTask && planCommand(content) === '')
       throw Object.assign(new Error('Escreva o pedido depois de /plano'), { status: 400 });
@@ -193,6 +199,8 @@ export class Orchestrator {
       throw Object.assign(new Error('Já existe uma execução ativa nesta conversa'), { status: 409 });
     }
     session = this.store.getSession(session.id) ?? session;
+    // Usage limits: refused before the run exists and before any provider call.
+    if (!options.overrideLimit) assertWithinLimits(this.store, session.projectId);
     if (!this.store.getSession(session.id)) throw Object.assign(new Error('Conversa não encontrada'), { status: 404 });
     if (this.active.has(session.id) || session.activeRunId)
       throw Object.assign(new Error('Já existe uma execução ativa nesta conversa'), { status: 409 });
@@ -409,6 +417,7 @@ export class Orchestrator {
     /** Already validated as belonging to this conversation; undefined keeps the message's own. */
     attachments: StoredAttachment[] | undefined,
     clientMessageId?: string,
+    overrideLimit = false,
   ): Promise<Started> {
     const session = this.requireSession(sessionId);
     if (clientMessageId) {
@@ -435,7 +444,7 @@ export class Orchestrator {
         return stored && stored.sessionId === sessionId ? [stored] : [];
       });
     // No await before start(): its reservation is taken synchronously, so the checks above hold.
-    return this.start(session, content, clientMessageId, kept, { replaceFrom: messageId });
+    return this.start(session, content, clientMessageId, kept, { replaceFrom: messageId, overrideLimit });
   }
   // ---- Conversation compaction (docs/specs/compaction.md) ----
   compactions(sessionId: string) {
@@ -447,7 +456,7 @@ export class Orchestrator {
    * run (no messages). On success the summary becomes the context of the next runs and the
    * native session is dropped, so the next turn starts fresh from the summary.
    */
-  async compact(sessionId: string): Promise<Started> {
+  async compact(sessionId: string, options: { overrideLimit?: boolean } = {}): Promise<Started> {
     if (this.shuttingDown) throw Object.assign(new Error('Orquestrador está encerrando'), { status: 503 });
     const session = this.requireSession(sessionId);
     if (this.isActive(sessionId) || session.activeRunId)
@@ -461,6 +470,7 @@ export class Orchestrator {
     const pending = messagesAfter(messages, compactions.at(-1));
     if (!summarisable(pending).length)
       throw Object.assign(new Error('Não há mensagens novas para compactar'), { status: 409 });
+    if (!options.overrideLimit) assertWithinLimits(this.store, session.projectId);
     const project =
       session.projectId === null ? this.detachedProject(session.id) : this.store.getProject(session.projectId);
     if (!project) throw Object.assign(new Error('Projeto não encontrado'), { status: 404 });
@@ -486,15 +496,14 @@ export class Orchestrator {
     this.store.putSession(running);
     this.emit({ type: 'run', run });
     this.emit({ type: 'session', session: running });
+    const usage = new UsageMeter();
     active.done = (async () => {
       try {
         this.publishEvent(sessionId, run.id, 'status', COMPACTING_TEXT);
-        const usage: Pick<Run, 'inputTokens' | 'outputTokens' | 'costUsd'> = {};
         await this.summarise(running, project, run.id, run, compactions, pending, settings, controller.signal, {
           auto: false,
           usage,
         });
-        Object.assign(run, usage);
         run.status = 'completed';
         this.publishEvent(sessionId, run.id, 'status', 'Conversa compactada');
       } catch (e) {
@@ -506,6 +515,8 @@ export class Orchestrator {
           this.publishEvent(sessionId, run.id, 'error', `Não foi possível compactar a conversa: ${run.error}`);
         }
       } finally {
+        // Recorded on failure and cancel too: tokens already used still count (spend limits).
+        applyUsage(run, usage.totals());
         run.completedAt = new Date().toISOString();
         run.durationMs = Date.now() - Date.parse(run.startedAt);
         this.store.putRun(run);
@@ -544,6 +555,8 @@ export class Orchestrator {
     const reason = autoCompactReason(settings, history, compactions, this.store.listRuns(session.id));
     if (!reason) return undefined;
     this.publishEvent(session.id, run.id, 'status', COMPACTING_TEXT);
+    // The summary call's usage is part of this run (counted by the usage limits).
+    const usage = new UsageMeter();
     try {
       const compaction = await this.summarise(
         session,
@@ -554,7 +567,7 @@ export class Orchestrator {
         history,
         settings,
         signal,
-        { auto: true },
+        { auto: true, usage },
       );
       this.publishEvent(session.id, run.id, 'status', `Conversa compactada antes desta mensagem: ${reason}`);
       return compaction;
@@ -567,6 +580,8 @@ export class Orchestrator {
         `Não foi possível compactar a conversa (${errorText(e)}); a mensagem seguiu sem compactar.`,
       );
       return undefined;
+    } finally {
+      addUsage(run, usage.totals());
     }
   }
   /** The summary call itself, then storing the compaction and dropping the native session. */
@@ -579,7 +594,7 @@ export class Orchestrator {
     messages: Message[],
     settings: Settings,
     signal: AbortSignal,
-    options: { auto: boolean; usage?: Pick<Run, 'inputTokens' | 'outputTokens' | 'costUsd'> },
+    options: { auto: boolean; usage?: UsageMeter },
   ): Promise<Compaction> {
     const covered = messages.at(-1);
     if (!covered) throw new Error('Não há mensagens novas para compactar');
@@ -614,9 +629,10 @@ export class Orchestrator {
     );
     let text = '';
     const result = await withRetry(
-      (effects) => {
+      async (effects) => {
         text = '';
-        return this.providers.run(
+        options.usage?.attempt();
+        const attempt = await this.providers.run(
           input,
           (event) => {
             // The summary is shown only once complete, so partial text does not block a retry.
@@ -626,14 +642,12 @@ export class Orchestrator {
               // Tools are off; anything that still asks is refused without the user.
               effects.note('approval');
               void this.providers.approve(event.approval.id, 'deny').catch(() => undefined);
-            } else if (event.type === 'usage' && options.usage) {
-              options.usage.inputTokens = event.inputTokens ?? options.usage.inputTokens;
-              options.usage.outputTokens = event.outputTokens ?? options.usage.outputTokens;
-              options.usage.costUsd = event.costUsd ?? options.usage.costUsd;
-            }
+            } else if (event.type === 'usage') options.usage?.event(event);
           },
           signal,
         );
+        options.usage?.result(attempt);
+        return attempt;
       },
       {
         policy: this.retryPolicy(settings),
@@ -642,11 +656,6 @@ export class Orchestrator {
       },
     );
     if (signal.aborted || result.stopReason === 'cancelled') throw new Error('Execução cancelada');
-    if (options.usage) {
-      options.usage.inputTokens ??= result.inputTokens;
-      options.usage.outputTokens ??= result.outputTokens;
-      if (result.costUsd !== undefined) options.usage.costUsd = result.costUsd;
-    }
     const summary = cleanSummary(result.text || text);
     if (!summary) throw new Error('O agente não devolveu um resumo');
     const compaction = this.store.addCompaction({
@@ -683,7 +692,7 @@ export class Orchestrator {
    * while the summary is written, so messages, PATCH and other handoffs wait for 409, and
    * cancelling the conversation aborts the summary call.
    */
-  async handoff(sessionId: string, request: HandoffRequest) {
+  async handoff(sessionId: string, request: HandoffRequest, options: { overrideLimit?: boolean } = {}) {
     if (this.shuttingDown) throw Object.assign(new Error('Orquestrador está encerrando'), { status: 503 });
     const session = this.requireSession(sessionId);
     if (this.isActive(sessionId) || session.activeRunId)
@@ -713,6 +722,7 @@ export class Orchestrator {
           emit: (event) => this.emit(event),
           cwd,
           signal: controller.signal,
+          beforeModelCall: options.overrideLimit ? undefined : () => assertWithinLimits(this.store, session.projectId),
         },
         session,
         request,
@@ -757,6 +767,8 @@ export class Orchestrator {
       firstTokenAt: number | undefined;
     const started = Date.parse(run.startedAt);
     let memoryContext: string | undefined;
+    // Usage of the direct call over every attempt (retries, model fallback), failed ones included.
+    const directUsage = new UsageMeter();
     try {
       // The project is reserved for this run, so nothing else writes there until `after`.
       if (mayWrite) {
@@ -900,8 +912,9 @@ export class Orchestrator {
       this.emit({ type: 'message', message: assistant });
       // `fallback`: an attempt with another model for this run only (Settings.modelFallback);
       // its native session must not replace the conversation's.
-      const performOnce = (effects: EffectTracker, input: RunInput = directInput, fallback = false) =>
-        this.providers.run(
+      const performOnce = async (effects: EffectTracker, input: RunInput = directInput, fallback = false) => {
+        directUsage.attempt();
+        const attempt = await this.providers.run(
           input,
           (event: ProviderEvent) => {
             if (event.type === 'delta' || event.type === 'tool' || event.type === 'approval')
@@ -954,14 +967,13 @@ export class Orchestrator {
               session.nativeSessionId = event.nativeSessionId;
               this.store.putSession(session);
               this.emit({ type: 'session', session });
-            } else if (event.type === 'usage') {
-              run.inputTokens = event.inputTokens;
-              run.outputTokens = event.outputTokens;
-              run.costUsd = event.costUsd;
-            }
+            } else if (event.type === 'usage') directUsage.event(event);
           },
           controller.signal,
         );
+        directUsage.result(attempt);
+        return attempt;
+      };
       // Retries only while nothing was shown or executed; see server/retry.ts. Then, when the
       // model stays overloaded, the configured fallback models (one attempt each).
       const perform = () =>
@@ -1000,9 +1012,6 @@ export class Orchestrator {
           ? await this.withProjectWrite(project.id, perform)
           : await perform();
       if (!response && result.text) response = result.text;
-      if (run.inputTokens === undefined) run.inputTokens = result.inputTokens;
-      if (run.outputTokens === undefined) run.outputTokens = result.outputTokens;
-      if (result.costUsd !== undefined) run.costUsd = result.costUsd;
       run.status = controller.signal.aborted || result.stopReason === 'cancelled' ? 'cancelled' : 'completed';
     } catch (e) {
       if (controller.signal.aborted) run.status = 'cancelled';
@@ -1024,6 +1033,7 @@ export class Orchestrator {
         this.emit({ type: 'task', task: { ...task, output: undefined } });
       }
     } finally {
+      addUsage(run, directUsage.totals());
       if (run.checkpoint) run.checkpoint = await checkpointAfter(run.id, run.checkpoint);
       run.completedAt = new Date().toISOString();
       run.durationMs = Date.now() - started;
@@ -1179,7 +1189,7 @@ export class Orchestrator {
     };
     const call = async (input: ReturnType<typeof baseInput>, task: DelegatedTask, streamDirect = false) => {
       if (controller.signal.aborted) throw new Error('Execução cancelada');
-      let eventInput: number | undefined, eventOutput: number | undefined, eventCost: number | undefined;
+      const usage = new UsageMeter();
       const effectiveInput = this.applyThinking(input, session.thinking, catalog);
       task.effort = effectiveInput.plan.effort;
       this.store.putTask(task);
@@ -1200,11 +1210,12 @@ export class Orchestrator {
       }
       const startOutput = task.output || '',
         startContent = assistant.content;
-      const attempt = (effects: EffectTracker, attemptInput: RunInput) => {
+      const attempt = async (effects: EffectTracker, attemptInput: RunInput) => {
         // A retried attempt starts from the state before the failed one.
         task.output = startOutput;
         if (streamDirect) assistant.content = startContent;
-        return this.providers.run(
+        usage.attempt();
+        const attemptResult = await this.providers.run(
           attemptInput,
           (event: ProviderEvent) => {
             if (event.type === 'delta' || event.type === 'tool' || event.type === 'approval')
@@ -1239,62 +1250,60 @@ export class Orchestrator {
                 status: event.status,
                 ...(event.toolCallId ? { toolCallId: `${input.runId}:${event.toolCallId}` } : {}),
               });
-            else if (event.type === 'usage') {
-              eventInput = event.inputTokens ?? eventInput;
-              eventOutput = event.outputTokens ?? eventOutput;
-              eventCost = event.costUsd ?? eventCost;
-            }
+            else if (event.type === 'usage') usage.event(event);
           },
           controller.signal,
         );
+        usage.result(attemptResult);
+        return attemptResult;
       };
-      const result = await this.withModelFallback(
-        () =>
-          withRetry((effects) => attempt(effects, effectiveInput), {
-            policy: this.retryPolicy(settings),
-            signal: controller.signal,
-            onRetry: (progress) => this.noteRetry(session.id, run, progress, task.title),
-          }),
-        {
-          sessionId: session.id,
-          run,
-          settings,
-          catalog,
-          signal: controller.signal,
-          current: { providerId: input.providerId, model: input.model },
-          input: effectiveInput,
-          taskTitle: task.title,
-        },
-        (target, effects) => {
-          // Delegated calls never resume a native session; their history is in the prompt.
-          const switched = this.applyThinking(
-            {
-              ...effectiveInput,
-              providerId: target.providerId,
-              model: target.model,
-              plan: { ...effectiveInput.plan, effort: input.plan.effort },
-            },
-            session.thinking,
+      let result: RunResult;
+      try {
+        result = await this.withModelFallback(
+          () =>
+            withRetry((effects) => attempt(effects, effectiveInput), {
+              policy: this.retryPolicy(settings),
+              signal: controller.signal,
+              onRetry: (progress) => this.noteRetry(session.id, run, progress, task.title),
+            }),
+          {
+            sessionId: session.id,
+            run,
+            settings,
             catalog,
-          );
-          task.providerId = target.providerId;
-          task.model = target.model;
-          task.effort = switched.plan.effort;
-          emitTask(task);
-          if (streamDirect && assistant.providerId !== target.providerId) {
-            assistant.providerId = target.providerId;
-            this.store.updateMessage(assistant);
-            this.emit({ type: 'message', message: assistant });
-          }
-          return attempt(effects, switched);
-        },
-      );
-      const inputTokens = eventInput ?? result.inputTokens,
-        outputTokens = eventOutput ?? result.outputTokens,
-        costUsd = eventCost ?? result.costUsd;
-      if (inputTokens !== undefined) run.inputTokens = (run.inputTokens ?? 0) + inputTokens;
-      if (outputTokens !== undefined) run.outputTokens = (run.outputTokens ?? 0) + outputTokens;
-      if (costUsd !== undefined) run.costUsd = (run.costUsd ?? 0) + costUsd;
+            signal: controller.signal,
+            current: { providerId: input.providerId, model: input.model },
+            input: effectiveInput,
+            taskTitle: task.title,
+          },
+          (target, effects) => {
+            // Delegated calls never resume a native session; their history is in the prompt.
+            const switched = this.applyThinking(
+              {
+                ...effectiveInput,
+                providerId: target.providerId,
+                model: target.model,
+                plan: { ...effectiveInput.plan, effort: input.plan.effort },
+              },
+              session.thinking,
+              catalog,
+            );
+            task.providerId = target.providerId;
+            task.model = target.model;
+            task.effort = switched.plan.effort;
+            emitTask(task);
+            if (streamDirect && assistant.providerId !== target.providerId) {
+              assistant.providerId = target.providerId;
+              this.store.updateMessage(assistant);
+              this.emit({ type: 'message', message: assistant });
+            }
+            return attempt(effects, switched);
+          },
+        );
+      } finally {
+        // Every task's usage belongs to the run, failed attempts included (spend limits).
+        addUsage(run, usage.totals());
+      }
       if (result.text) {
         task.output = result.text;
         this.store.putTask(task);
@@ -1835,7 +1844,14 @@ export class Orchestrator {
    * Adds a message to the queue. When the conversation is idle and the queue is not
    * paused it starts right away, so a run that ends just before the request loses nothing.
    */
-  async enqueue(sessionId: string, content: string, clientId?: string, attachments: AttachmentMeta[] = []) {
+  async enqueue(
+    sessionId: string,
+    content: string,
+    clientId?: string,
+    attachments: AttachmentMeta[] = [],
+    /** Applies only when the message starts right away. */
+    overrideLimit = false,
+  ) {
     this.requireSession(sessionId);
     // A retried request whose item already left the queue and started.
     const startedRun = clientId ? this.store.findClientMessage(sessionId, clientId) : undefined;
@@ -1849,7 +1865,7 @@ export class Orchestrator {
       createdAt: new Date().toISOString(),
     });
     this.emitQueue(sessionId);
-    const started = await this.drain(sessionId);
+    const started = await this.drain(sessionId, undefined, overrideLimit ? item.id : undefined);
     return { item, started: started && started.itemId === item.id ? started.result : undefined };
   }
   editQueued(sessionId: string, itemId: string, content: string) {
@@ -1863,15 +1879,20 @@ export class Orchestrator {
     this.requireSession(sessionId);
     if (!this.store.removeQueued(sessionId, itemId))
       throw Object.assign(new Error('Mensagem não está mais na fila'), { status: 404 });
+    this.limitOverrides.delete(itemId);
     this.clearPauseIfEmpty(sessionId);
     this.emitQueue(sessionId);
   }
-  /** "Retomar fila": clears the pause and starts the next item when nothing is running. */
-  async resumeQueue(sessionId: string) {
+  /**
+   * "Retomar fila": clears the pause and starts the next item when nothing is running. With
+   * `overrideLimit` ("Continuar mesmo assim"), that next item alone may pass the usage limits.
+   */
+  async resumeQueue(sessionId: string, overrideLimit = false) {
     this.requireSession(sessionId);
     this.store.setQueuePause(sessionId, null);
     this.emitQueue(sessionId);
-    const started = await this.drain(sessionId);
+    const next = overrideLimit ? this.store.listQueue(sessionId)[0]?.id : undefined;
+    const started = await this.drain(sessionId, undefined, next);
     return { queue: this.store.getQueue(sessionId), started: started?.result };
   }
   /**
@@ -1881,6 +1902,7 @@ export class Orchestrator {
   async sendNow(
     sessionId: string,
     input: { content: string; clientId?: string; attachments?: AttachmentMeta[] } | { itemId: string },
+    overrideLimit = false,
   ) {
     this.requireSession(sessionId);
     let itemId: string;
@@ -1902,6 +1924,8 @@ export class Orchestrator {
       ).id;
       this.emitQueue(sessionId);
     }
+    // Remembered in memory for this item only, since it may start after the cancel completes.
+    if (overrideLimit) this.limitOverrides.add(itemId);
     if (!this.isActive(sessionId)) return { started: (await this.drain(sessionId, itemId))?.result };
     this.interrupting.set(sessionId, itemId);
     const starting = this.starting.get(sessionId);
@@ -1981,7 +2005,13 @@ export class Orchestrator {
    * Starts the next queued message (or `itemId`, ignoring a pause) when the session is idle.
    * A start that fails puts the item back at the front and pauses the queue.
    */
-  private drain(sessionId: string, itemId?: string): Promise<{ itemId: string; result: Started } | undefined> {
+  private drain(
+    sessionId: string,
+    itemId?: string,
+    /** This item may pass the usage limits once ("Continuar mesmo assim"). */
+    overrideItem?: string,
+  ): Promise<{ itemId: string; result: Started } | undefined> {
+    if (overrideItem) this.limitOverrides.add(overrideItem);
     const running = this.drains.get(sessionId);
     if (running) return running.then(() => (this.isActive(sessionId) ? undefined : this.drain(sessionId, itemId)));
     const work = (async () => {
@@ -2000,7 +2030,10 @@ export class Orchestrator {
             throw Object.assign(new Error(`Anexo “${meta.name}” não está mais disponível`), { status: 400 });
           return stored;
         });
-        const result = await this.start(session, item.content, item.clientId ?? item.id, attachments);
+        const overrideLimit = this.limitOverrides.delete(item.id);
+        const result = await this.start(session, item.content, item.clientId ?? item.id, attachments, {
+          overrideLimit,
+        });
         return { itemId: item.id, result };
       } catch (e) {
         // Put the message back where it was, unless the conversation is gone.
@@ -2009,7 +2042,8 @@ export class Orchestrator {
         const cancelled = (e as { cancelled?: boolean }).cancelled === true;
         if (!this.interrupting.has(sessionId))
           this.store.setQueuePause(sessionId, {
-            reason: cancelled ? 'cancelled' : 'failed',
+            // A usage limit pauses the queue until "Retomar fila" or "Continuar mesmo assim".
+            reason: isSpendLimitError(e) ? 'limit' : cancelled ? 'cancelled' : 'failed',
             at: new Date().toISOString(),
             error: errorText(e).slice(0, 500),
           });
@@ -2133,7 +2167,11 @@ export class Orchestrator {
    * like PATCH /api/sessions/:id (no native session, thinking kept only when supported), and the
    * switch is undone when the new run cannot start.
    */
-  async retryRun(runId: string, target: { providerId?: ProviderId; model?: string } = {}) {
+  async retryRun(
+    runId: string,
+    target: { providerId?: ProviderId; model?: string } = {},
+    options: { overrideLimit?: boolean } = {},
+  ) {
     const run = this.store.getRun(runId);
     if (!run) throw Object.assign(new Error('Execução não encontrada'), { status: 404 });
     const session = this.requireSession(run.sessionId);
@@ -2172,7 +2210,9 @@ export class Orchestrator {
       this.emit({ type: 'session', session: next });
     }
     try {
-      const started = await this.start(next, request.content, undefined, attachments);
+      const started = await this.start(next, request.content, undefined, attachments, {
+        overrideLimit: options.overrideLimit,
+      });
       return { ...started, session: this.store.getSession(session.id) ?? next };
     } catch (error) {
       if (next !== session) {

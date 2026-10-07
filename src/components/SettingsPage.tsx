@@ -15,7 +15,10 @@ import type {
   ProjectCoordination,
   ProviderInfo,
   Settings,
+  UsageReport,
 } from '../../shared/contracts';
+import type { SpendLimitsPatch } from '../api';
+import { ProjectSpendCard, SpendLimitsCard } from './SpendLimits';
 import { MODEL_FALLBACK_MAX } from '../../shared/schemas';
 import { modelLabel } from '../../shared/model-fallback';
 import { integrationName } from '../labels';
@@ -43,6 +46,10 @@ export function SettingsPage({
   onSetting,
   onSkill,
   onModelFallback,
+  usage,
+  usageError,
+  onSpendLimits,
+  onProjectSpendLimits,
   notice,
 }: {
   data: Bootstrap;
@@ -77,6 +84,11 @@ export function SettingsPage({
   ) => void;
   onSkill: (id: string, enabled: boolean) => void;
   onModelFallback: (value: NonNullable<Settings['modelFallback']>) => void;
+  /** Usage report of this page's scope (the project, when one is open). */
+  usage: UsageReport | null;
+  usageError: string;
+  onSpendLimits: (patch: SpendLimitsPatch) => void;
+  onProjectSpendLimits: (patch: { monthlyTokens?: number | null; monthlyCostUsd?: number | null }) => void;
   notice: string;
 }) {
   const [memoryWorkspace, setMemoryWorkspace] = useState(project?.memoryWorkspace || '');
@@ -109,6 +121,16 @@ export function SettingsPage({
               onGraphifyEnabled={onGraphifyEnabled}
               onIndexGraphify={onIndexGraphify}
               onRefreshProject={onRefreshProject}
+            />
+          )}
+
+          {project && (
+            <ProjectSpendCard
+              projectName={project.name}
+              limits={project.spendLimits}
+              globalEnabled={data.settings.spendLimits?.enabled === true}
+              report={usage}
+              onChange={onProjectSpendLimits}
             />
           )}
 
@@ -225,6 +247,12 @@ export function SettingsPage({
               onChange={(enabled) => onSetting('notifications', enabled)}
             />
           </section>
+          <SpendLimitsCard
+            limits={data.settings.spendLimits}
+            report={usage}
+            error={usageError}
+            onChange={onSpendLimits}
+          />
           <section className="settings-card">
             <div className="settings-card-heading">
               <div className="settings-card-icon purple">

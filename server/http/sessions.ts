@@ -14,13 +14,14 @@ import {
   PatchSessionSchema,
   QueueEditSchema,
   QueueMessageSchema,
+  QueueResumeSchema,
   SendMessageSchema,
   UploadAttachmentSchema,
   SendNowSchema,
   parseBody,
   text,
 } from '../../shared/schemas.js';
-import { error, errorStatus, message } from './common.js';
+import { error, errorStatus, failure, message } from './common.js';
 
 const titleSchema = text(160);
 import type { BackendContext } from './context.js';
@@ -209,10 +210,11 @@ export function sessionsRoutes({ store, orchestrator, providerList }: BackendCon
     if (!store.getSession(req.params.id)) return error(res, 404, 'Conversa não encontrada');
     const parsed = parseBody(HandoffSchema, req.body, 'Passagem inválida');
     if (!parsed.ok) return error(res, 400, parsed.message);
+    const { overrideLimit, ...request } = parsed.data;
     try {
-      res.status(202).json(await orchestrator.handoff(req.params.id, parsed.data));
+      res.status(202).json(await orchestrator.handoff(req.params.id, request, { overrideLimit }));
     } catch (e) {
-      error(res, errorStatus(e) || 500, message(e));
+      failure(res, e);
     }
   });
   app.delete('/api/sessions/:id', (req, res) => {
@@ -261,15 +263,14 @@ export function sessionsRoutes({ store, orchestrator, providerList }: BackendCon
     if (!s) return error(res, 404, 'Conversa não encontrada');
     const parsed = parseBody(SendMessageSchema, req.body, 'content obrigatório (máximo 32000 caracteres)');
     if (!parsed.ok) return error(res, 400, parsed.message);
-    const { content, clientMessageId, attachmentIds = [] } = parsed.data;
+    const { content, clientMessageId, attachmentIds = [], overrideLimit } = parsed.data;
     const attachments = ownedAttachments(s.id, attachmentIds);
     if (!attachments) return error(res, 400, MISSING_ATTACHMENT);
     try {
-      const result = await orchestrator.start(s, content, clientMessageId, attachments);
+      const result = await orchestrator.start(s, content, clientMessageId, attachments, { overrideLimit });
       res.status(202).json(result);
     } catch (e) {
-      const status = errorStatus(e) || 500;
-      error(res, status, message(e));
+      failure(res, e);
     }
   });
   // Edit and resend, and branch a conversation (docs/specs/edit-branch.md).
@@ -280,7 +281,7 @@ export function sessionsRoutes({ store, orchestrator, providerList }: BackendCon
     // a repeated request finds its run even though the edited message no longer exists.
     const parsed = parseBody(EditMessageSchema, req.body, 'content obrigatório (máximo 32000 caracteres)');
     if (!parsed.ok) return error(res, 400, parsed.message);
-    const { content, clientMessageId, attachmentIds } = parsed.data;
+    const { content, clientMessageId, attachmentIds, overrideLimit } = parsed.data;
     const attachments = attachmentIds ? ownedAttachments(s.id, attachmentIds) : undefined;
     if (attachmentIds && !attachments) return error(res, 400, MISSING_ATTACHMENT);
     try {
@@ -290,10 +291,11 @@ export function sessionsRoutes({ store, orchestrator, providerList }: BackendCon
         content,
         attachments,
         clientMessageId,
+        overrideLimit,
       );
       res.status(202).json(result);
     } catch (e) {
-      error(res, errorStatus(e) || 500, message(e));
+      failure(res, e);
     }
   });
   // Conversation compaction (docs/specs/compaction.md): one read-only summary call.
@@ -302,10 +304,10 @@ export function sessionsRoutes({ store, orchestrator, providerList }: BackendCon
     const parsed = parseBody(CompactSchema, req.body, 'Compactar não aceita opções');
     if (!parsed.ok) return error(res, 400, parsed.message);
     try {
-      const { runId } = await orchestrator.compact(req.params.id);
+      const { runId } = await orchestrator.compact(req.params.id, { overrideLimit: parsed.data.overrideLimit });
       res.status(202).json({ runId });
     } catch (e) {
-      error(res, errorStatus(e) || 500, message(e));
+      failure(res, e);
     }
   });
   app.post('/api/sessions/:id/branch', (req, res) => {
@@ -341,7 +343,7 @@ export function sessionsRoutes({ store, orchestrator, providerList }: BackendCon
       try {
         await handler(req, res);
       } catch (e) {
-        error(res, errorStatus(e) || 500, message(e));
+        failure(res, e);
       }
     };
   const id = (req: Request, key = 'id') => String(req.params[key]);
@@ -361,6 +363,7 @@ export function sessionsRoutes({ store, orchestrator, providerList }: BackendCon
         parsed.data.content,
         parsed.data.clientId,
         attachments.map(attachmentMeta),
+        parsed.data.overrideLimit === true,
       );
       res.status(result.started ? 202 : 201).json({ ...result, queue: orchestrator.queue(id(req)) });
     }),
@@ -382,7 +385,11 @@ export function sessionsRoutes({ store, orchestrator, providerList }: BackendCon
   );
   app.post(
     '/api/sessions/:id/queue/resume',
-    queueRoute(async (req, res) => res.json(await orchestrator.resumeQueue(id(req)))),
+    queueRoute(async (req, res) => {
+      const parsed = parseBody(QueueResumeSchema, req.body, 'Pedido inválido');
+      if (!parsed.ok) return error(res, 400, parsed.message);
+      res.json(await orchestrator.resumeQueue(id(req), parsed.data.overrideLimit === true));
+    }),
   );
   app.post(
     '/api/sessions/:id/queue/:itemId/steer',
@@ -396,7 +403,7 @@ export function sessionsRoutes({ store, orchestrator, providerList }: BackendCon
     queueRoute(async (req, res) => {
       const parsed = parseBody(SendNowSchema, req.body, 'Envie content ou itemId');
       if (!parsed.ok) return error(res, 400, parsed.message);
-      const { content, clientId, itemId, attachmentIds = [] } = parsed.data;
+      const { content, clientId, itemId, attachmentIds = [], overrideLimit } = parsed.data;
       if (Boolean(content) === Boolean(itemId)) return error(res, 400, 'Envie content ou itemId');
       if (itemId && attachmentIds.length) return error(res, 400, 'attachmentIds só vale com content');
       const attachments = ownedAttachments(id(req), attachmentIds);
@@ -404,6 +411,7 @@ export function sessionsRoutes({ store, orchestrator, providerList }: BackendCon
       const result = await orchestrator.sendNow(
         id(req),
         itemId ? { itemId } : { content: content!, clientId, attachments: attachments.map(attachmentMeta) },
+        overrideLimit === true,
       );
       res.status(202).json({ ...result, queue: orchestrator.queue(id(req)) });
     }),

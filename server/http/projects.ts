@@ -4,7 +4,7 @@ import type { Project } from '../../shared/contracts.js';
 import { CreateProjectSchema, PatchProjectSchema, ProjectFilesQuerySchema, parseBody } from '../../shared/schemas.js';
 import { searchProjectFiles } from '../mentions.js';
 import { error, message } from './common.js';
-import { graphifyConfig, orchestrationConfig, projectPath } from './validation.js';
+import { graphifyConfig, mergeLimits, orchestrationConfig, projectPath } from './validation.js';
 import type { BackendContext } from './context.js';
 
 export function projectsRoutes({ store, orchestrator }: BackendContext) {
@@ -80,6 +80,14 @@ export function projectsRoutes({ store, orchestrator }: BackendContext) {
     p.name = fields.data.name ?? p.name;
     p.memoryWorkspace = fields.data.memoryWorkspace ?? p.memoryWorkspace;
     p.memoryProject = fields.data.memoryProject ?? p.memoryProject;
+    // Monthly usage limits of the project: merged field by field; `null` clears one or all.
+    const limits = fields.data.spendLimits;
+    if (limits === null) delete p.spendLimits;
+    else if (limits) {
+      const merged = mergeLimits(p.spendLimits ?? {}, limits);
+      if (Object.keys(merged).length) p.spendLimits = merged;
+      else delete p.spendLimits;
+    }
     res.json(store.updateProject(p));
   });
   return app;

@@ -50,6 +50,8 @@ export function isAttentive(doc: { hidden: boolean; hasFocus(): boolean }) {
 export function noticeFor(event: StreamEvent, titleOf: (sessionId: string) => string | undefined): RunNotice | null {
   if (event.type === 'run') {
     const { run } = event;
+    // The handoff summary call is followed in its own dialog.
+    if (run.handoff) return null;
     const conversation = clip(titleOf(run.sessionId) || 'Conversa', MAX_TITLE);
     if (run.status === 'completed')
       return {

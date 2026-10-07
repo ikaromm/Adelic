@@ -23,6 +23,7 @@ export function composerKeyAction(
 export function queuePauseLabel(queue: MessageQueue | null) {
   const reason = queue?.paused?.reason;
   if (!reason) return '';
+  if (reason === 'limit') return queue?.paused?.error || 'Limite de uso atingido.';
   return reason === 'cancelled'
     ? 'A execução foi cancelada.'
     : reason === 'interrupted'
@@ -104,7 +105,8 @@ export function useMessageQueue(sessionId: string, onError: (message: string) =>
       run((id) => api.enqueue(id, content, crypto.randomUUID(), attachmentIds)),
     edit: (itemId: string, content: string) => run((id) => api.editQueued(id, itemId, content)),
     remove: (itemId: string) => run((id) => api.removeQueued(id, itemId)),
-    resume: () => run((id) => api.resumeQueue(id)),
+    /** With `overrideLimit` ("Continuar mesmo assim"), only the next message passes the usage limits. */
+    resume: (overrideLimit = false) => run((id) => api.resumeQueue(id, overrideLimit)),
     steer: (itemId: string) => run((id) => api.steerQueued(id, itemId)),
     sendNow: (target: SendNowTarget) => {
       setConfirming(null);

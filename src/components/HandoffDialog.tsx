@@ -18,6 +18,7 @@ export function HandoffDialog({
   fixedTarget,
   busy,
   error,
+  limitBlocked,
   onConfirm,
   onCancelRunning,
   onClose,
@@ -27,7 +28,9 @@ export function HandoffDialog({
   fixedTarget?: HandoffTarget;
   busy: boolean;
   error: string;
-  onConfirm: (target: HandoffTarget, summary: HandoffSummaryMode) => void;
+  /** `error` is a usage limit: offer "Continuar mesmo assim" for the summary call. */
+  limitBlocked?: boolean;
+  onConfirm: (target: HandoffTarget, summary: HandoffSummaryMode, overrideLimit?: boolean) => void;
   /** Stops the summary call while it runs. */
   onCancelRunning: () => void;
   onClose: () => void;
@@ -143,6 +146,19 @@ export function HandoffDialog({
           <div className="form-error" role="alert">
             {error}
           </div>
+        )}
+        {error && limitBlocked && target && (
+          <button
+            type="button"
+            className="secondary-button"
+            disabled={busy}
+            onClick={() => {
+              setRunning('model');
+              onConfirm({ providerId: target.id, ...(model ? { model } : {}) }, 'model', true);
+            }}
+          >
+            Continuar mesmo assim
+          </button>
         )}
         <div className="modal-actions">
           <button type="button" className="secondary-button" onClick={close}>

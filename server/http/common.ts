@@ -1,4 +1,5 @@
 import type { NextFunction, Request, Response } from 'express';
+import { SPEND_LIMIT_CODE } from '../../shared/spend-limits.js';
 
 export const error = (res: Response, status: number, message: string) => res.status(status).json({ error: message });
 export const str = (v: unknown, max = 200) =>
@@ -10,6 +11,16 @@ export function message(e: unknown) {
 export function errorStatus(e: unknown): number | undefined {
   const status = (e as { status?: unknown } | null)?.status;
   return typeof status === 'number' ? status : undefined;
+}
+/**
+ * Sends a thrown error as `{ error }` with its status. A usage-limit refusal also carries
+ * `code: 'spend_limit'` and the limit, so the UI can offer "Continuar mesmo assim".
+ */
+export function failure(res: Response, e: unknown, fallbackStatus = 500) {
+  const { code, limit } = (e ?? {}) as { code?: unknown; limit?: unknown };
+  return res
+    .status(errorStatus(e) || fallbackStatus)
+    .json({ error: message(e), ...(code === SPEND_LIMIT_CODE ? { code, limit } : {}) });
 }
 
 /** Loopback-only API: rejects foreign Host headers and cross-site mutations. */

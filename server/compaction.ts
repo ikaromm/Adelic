@@ -108,6 +108,7 @@ export function autoCompactReason(
     .filter(
       (r) =>
         !r.compaction &&
+        !r.handoff &&
         r.status !== 'running' &&
         r.id !== latest?.runId &&
         (!latest || r.startedAt > latest.createdAt),

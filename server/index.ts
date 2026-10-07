@@ -17,6 +17,7 @@ import { plansRoutes } from './http/plans.js';
 import { runsRoutes } from './http/runs.js';
 import { isAttachmentUpload, sessionsRoutes } from './http/sessions.js';
 import { settingsRoutes } from './http/settings.js';
+import { worktreesRoutes } from './http/worktrees.js';
 
 export function createBackend(
   store: Store,
@@ -34,6 +35,8 @@ export function createBackend(
   const json = express.json({ limit: '128kb', strict: true });
   app.use((req, res, next) => (isAttachmentUpload(req) ? next() : json(req, res, next)));
   const orchestrator = new Orchestrator(store, providers, undefined, graphifyService, providerList, retryOverrides);
+  // Worktree records whose folder is gone (docs/specs/worktrees.md).
+  void orchestrator.pruneWorktrees().catch(() => undefined);
   let providersCache: { at: number; value: Awaited<ReturnType<typeof providers.list>> } | undefined;
   let providersPending: Promise<Awaited<ReturnType<typeof providers.list>>> | undefined;
   async function providerList() {
@@ -99,6 +102,7 @@ export function createBackend(
   const context: BackendContext = { store, orchestrator, providerList };
   app.use(projectsRoutes(context));
   app.use(sessionsRoutes(context));
+  app.use(worktreesRoutes(context));
   app.use(runsRoutes(context));
   app.use(plansRoutes(context));
   app.use(settingsRoutes(context));

@@ -38,7 +38,7 @@ export const LIMITS = {
 };
 const TIMEOUT_MS = 120_000;
 
-const SAFE_CONFIG = [
+export const SAFE_CONFIG = [
   'core.fsmonitor=false',
   'core.untrackedCache=false',
   'core.splitIndex=false',
@@ -62,7 +62,7 @@ export class CheckpointError extends Error {
   }
 }
 
-interface Repo {
+export interface Repo {
   /** Real path of the snapshotted folder (the project); may be below the repository top. */
   root: string;
   /** Repository top level; tree and file paths are relative to it. */
@@ -89,7 +89,7 @@ function baseEnv(repo?: Repo, extra: Record<string, string> = {}) {
   };
 }
 
-function git(
+export function git(
   cwd: string,
   args: string[],
   opts: {
@@ -98,12 +98,14 @@ function git(
     env?: Record<string, string>;
     maxBytes?: number;
     timeoutMs?: number;
+    /** `-c` arguments placed before the command; defaults to SAFE_CONFIG (with the Adelic identity). */
+    config?: string[];
   } = {},
 ): Promise<Buffer> {
   return new Promise((done, fail) => {
     const child = execFile(
       'git',
-      [...SAFE_CONFIG, ...args],
+      [...(opts.config ?? SAFE_CONFIG), ...args],
       {
         cwd,
         env: baseEnv(opts.repo, opts.env),
@@ -126,11 +128,11 @@ function git(
 
 /** Git records only the owner's execute bit. */
 const fileMode = (mode: number) => (mode & 0o100 ? '100755' : '100644');
-const lines = (b: Buffer) => b.toString('utf8').split('\n').filter(Boolean);
-const nulSplit = (b: Buffer) => b.toString('utf8').split('\0').filter(Boolean);
+export const lines = (b: Buffer) => b.toString('utf8').split('\n').filter(Boolean);
+export const nulSplit = (b: Buffer) => b.toString('utf8').split('\0').filter(Boolean);
 
 /** Finds the repository for `path`, or undefined when it is not inside a work tree. */
-async function openRepo(path: string, requireToplevel: boolean): Promise<Repo | undefined> {
+export async function openRepo(path: string, requireToplevel: boolean): Promise<Repo | undefined> {
   let root: string;
   try {
     root = await realpath(path);
@@ -184,7 +186,7 @@ export function blobId(data: Buffer, format: Repo['format']) {
 }
 
 /** Writes a tree of the folder's tracked and non-ignored files; returns its id. */
-async function writeSnapshotTree(repo: Repo): Promise<string> {
+export async function writeSnapshotTree(repo: Repo): Promise<string> {
   const listed = nulSplit(
     await git(repo.root, ['ls-files', '-z', '--full-name', '--cached', '--others', '--exclude-standard'], { repo }),
   );
@@ -307,14 +309,14 @@ export async function checkpointAfter(runId: string, checkpoint: RunCheckpoint):
   }
 }
 
-interface RawChange extends FileChange {
+export interface RawChange extends FileChange {
   oldMode: string;
   newMode: string;
   oldId: string;
   newId: string;
 }
 
-async function changedFiles(repo: Repo, before: string, after: string): Promise<RawChange[]> {
+export async function changedFiles(repo: Repo, before: string, after: string): Promise<RawChange[]> {
   const raw = nulSplit(
     await git(repo.top, ['diff-tree', '-r', '-z', '--no-renames', '--raw', before, after], { repo }),
   );

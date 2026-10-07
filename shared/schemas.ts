@@ -197,6 +197,14 @@ export const SettingsPatchSchema = z.object({
 });
 /** "Compactar conversa" takes no options (docs/specs/compaction.md). */
 export const CompactSchema = z.object({}).strict();
+/** Isolated worktree per conversation (docs/specs/worktrees.md). */
+export const CreateWorktreeSchema = z.object({}).strict();
+export const ApplyWorktreeSchema = z.object({
+  confirm: required(z.literal(true), 'confirm: true é obrigatório para aplicar no projeto'),
+});
+export const DiscardWorktreeSchema = z.object({
+  deleteBranch: optional(z.boolean(), 'deleteBranch deve ser booleano'),
+});
 export const RestoreRunSchema = z.object({
   confirm: required(z.literal(true), 'confirm: true é obrigatório para desfazer alterações'),
 });
@@ -254,6 +262,8 @@ export const ProjectFilesQuerySchema = z.object({
       .refine((n) => n >= 1 && n <= 200),
     'limit deve ser um inteiro de 1 a 200',
   ).transform((value) => value ?? 50),
+  /** The conversation asking: with a worktree, its files are listed instead of the project's. */
+  sessionId: optional(text(128), 'sessionId inválido'),
 });
 
 export type ParseResult<T> = { ok: true; data: T } | { ok: false; message: string };

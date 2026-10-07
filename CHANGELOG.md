@@ -2,6 +2,7 @@
 
 ## Não publicado
 
+- **Trabalhar em uma cópia isolada (worktree)** por conversa: as execuções rodam num `git worktree` próprio, fora do repositório, em paralelo à pasta principal; o painel mostra os arquivos alterados e oferece **Aplicar no projeto** (merge `--no-ff` só com a pasta principal limpa e em um branch; conflito desfaz o merge) e **Descartar worktree**. Veja [cópia isolada](docs/specs/worktrees.md).
 - Menções `@arquivo` no campo de mensagem: a lista sugere os arquivos do projeto enquanto você digita, e os arquivos de texto mencionados (até 5, 512 KB cada) entram no pedido ao agente, com o caminho conferido para não sair do projeto. Veja [menções de arquivos](docs/specs/mentions.md).
 - Troca de modelo quando o atual está sobrecarregado ou no limite de requisições: **Tentar com outro modelo** oferece até 3 alternativas e muda a conversa para a escolhida; opcionalmente, **Trocar de modelo se o atual estiver sobrecarregado** tenta até 3 modelos configurados, só naquela resposta, depois das novas tentativas e só sem efeito visível. Veja [troca de modelo](docs/specs/retries.md#troca-de-modelo).
 - Paleta de comandos com Ctrl+P (⌘P): ações, conversas, projetos, agente e modelo, modo e comandos salvos, com busca sem acentos e escolhas recentes primeiro. Veja [paleta de comandos](docs/specs/command-palette.md).

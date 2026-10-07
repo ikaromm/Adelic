@@ -48,6 +48,8 @@ export function useFileMentions(
   setValue: (v: string) => void,
   textarea: RefObject<HTMLTextAreaElement | null>,
   disabled = false,
+  /** The conversation: with a worktree, the server lists that copy's files. */
+  sessionId?: string,
 ) {
   const [caret, setCaret] = useState<number | null>(null);
   const [result, setResult] = useState<{ key: string; projectId: string; files: string[]; error?: string } | null>(
@@ -63,14 +65,14 @@ export function useFileMentions(
   const position = caret === null ? value.length : Math.min(caret, value.length);
   const mention = disabled || dismissed === value ? undefined : activeMention(value, position);
   const query = mention?.query;
-  const key = `${projectId ?? ''}\0${query ?? ''}`;
+  const key = `${projectId ?? ''}\0${sessionId ?? ''}\0${query ?? ''}`;
 
   useEffect(() => {
     if (query === undefined || !projectId) return;
     const controller = new AbortController();
     const timer = setTimeout(() => {
       api
-        .projectFiles(projectId, query, FETCH_LIMIT, controller.signal)
+        .projectFiles(projectId, query, FETCH_LIMIT, controller.signal, sessionId)
         .then((list) => setResult({ key, projectId, files: list.files }))
         .catch((e: Error) => {
           if (!controller.signal.aborted) setResult({ key, projectId, files: [], error: e.message });
@@ -80,7 +82,7 @@ export function useFileMentions(
       clearTimeout(timer);
       controller.abort();
     };
-  }, [key, projectId, query]);
+  }, [key, projectId, query, sessionId]);
   // Keeps the previous results on screen while the next query loads.
   const items = result && query !== undefined && result.projectId === projectId ? result.files : [];
   const fresh = result?.key === key;

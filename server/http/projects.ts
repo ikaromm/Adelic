@@ -51,7 +51,9 @@ export function projectsRoutes({ store, orchestrator }: BackendContext) {
     const query = parseBody(ProjectFilesQuerySchema, req.query, 'Parâmetros inválidos');
     if (!query.ok) return error(res, 400, query.message);
     try {
-      res.json(await searchProjectFiles(project.path, query.data.query, query.data.limit));
+      const session = query.data.sessionId ? store.getSession(query.data.sessionId) : undefined;
+      const root = session?.projectId === project.id && session.worktree ? session.worktree.path : project.path;
+      res.json(await searchProjectFiles(root, query.data.query, query.data.limit));
     } catch (e) {
       error(res, 409, `Não foi possível listar os arquivos do projeto: ${message(e)}`);
     }

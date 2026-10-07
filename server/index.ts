@@ -27,6 +27,7 @@ import { VoiceService } from './voice.js';
 import { terminalRoutes } from './http/terminal.js';
 import { TerminalService } from './terminal.js';
 import { APP_CSP } from '../shared/terminal.js';
+import { worktreesRoutes } from './http/worktrees.js';
 
 export function createBackend(
   store: Store,
@@ -66,6 +67,8 @@ export function createBackend(
     retryOverrides,
     checkRunner,
   );
+  // Worktree records whose folder is gone (docs/specs/worktrees.md).
+  void orchestrator.pruneWorktrees().catch(() => undefined);
   let providersCache: { at: number; value: Awaited<ReturnType<typeof providers.list>> } | undefined;
   let providersPending: Promise<Awaited<ReturnType<typeof providers.list>>> | undefined;
   async function providerList() {
@@ -134,6 +137,7 @@ export function createBackend(
   app.use(projectsRoutes(context));
   app.use(gitRoutes(context));
   app.use(sessionsRoutes(context));
+  app.use(worktreesRoutes(context));
   app.use(runsRoutes(context));
   app.use(plansRoutes(context));
   app.use(settingsRoutes(context));

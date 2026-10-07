@@ -13,6 +13,7 @@ import {
 } from '../shared/hooks.js';
 import { bubblewrap } from './providers/sandbox.js';
 import { terminateChildProcess } from './providers/process.js';
+import { sandboxInitPid } from './terminal.js';
 
 /** Environment passed to a check: no tokens or Adelic settings, only what tools commonly need. */
 export function checkEnvironment(source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
@@ -82,13 +83,18 @@ export async function runCheck(check: AfterEditCheck, cwd: string, options: Chec
   }
   if (options.signal.aborted) return { ...base, status: 'cancelled', detail: abortReason(options.signal) };
   const tail = new Tail(CHECK_OUTPUT_MAX);
-  const child = spawn(wrapped.command, wrapped.args, {
+  // bubblewrap's `--new-session` moves the sandboxed tree out of the launcher's process group,
+  // so killing the group does not reach it: `--info-fd 3` reports the sandbox's init PID, and
+  // killing that init ends the whole PID namespace (same approach as server/terminal.ts).
+  const infoFd = !options.wrap;
+  const child = spawn(wrapped.command, infoFd ? ['--info-fd', '3', ...wrapped.args] : wrapped.args, {
     cwd,
     env: checkEnvironment(),
-    stdio: ['ignore', 'pipe', 'pipe'],
+    stdio: infoFd ? ['ignore', 'pipe', 'pipe', 'pipe'] : ['ignore', 'pipe', 'pipe'],
     detached: process.platform !== 'win32',
     windowsHide: true,
   });
+  const sandboxPid = infoFd ? sandboxInitPid(child) : Promise.resolve(undefined);
   let lastProgress = 0;
   let progressTimer: NodeJS.Timeout | undefined;
   const progressMs = options.progressMs ?? 2000;
@@ -103,13 +109,24 @@ export async function runCheck(check: AfterEditCheck, cwd: string, options: Chec
     const wait = Math.max(0, lastProgress + progressMs - Date.now());
     progressTimer = setTimeout(progress, wait);
   };
-  child.stdout.on('data', onData);
-  child.stderr.on('data', onData);
+  child.stdout!.on('data', onData);
+  child.stderr!.on('data', onData);
   let stop: 'timeout' | 'cancelled' | undefined;
   let terminating: Promise<void> | undefined;
   const kill = (why: 'timeout' | 'cancelled') => {
     stop ??= why;
-    terminating ??= terminateChildProcess(child);
+    terminating ??= (async () => {
+      const pid = await sandboxPid;
+      // The launcher has not reaped its child while it is alive, so the PID cannot be reused.
+      if (pid && child.exitCode === null && child.signalCode === null) {
+        try {
+          process.kill(pid, 'SIGKILL');
+        } catch {
+          /* Already gone. */
+        }
+      }
+      await terminateChildProcess(child);
+    })();
   };
   const timer = setTimeout(() => kill('timeout'), check.timeoutSec * 1000);
   const onAbort = () => kill('cancelled');

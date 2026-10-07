@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, realpathSync } from 'node:fs';
+import { existsSync, mkdirSync, realpathSync } from 'node:fs';
 import { join, sep } from 'node:path';
 import type {
   Approval,
@@ -59,6 +59,16 @@ import {
 } from './retry.js';
 import { availableModel, modelLabel, resolvedModel, sameModel } from '../shared/model-fallback.js';
 import { CheckpointError, checkpointAfter, checkpointBefore, restoreCheckpoint } from './checkpoints.js';
+import {
+  applyWorktree,
+  createWorktree,
+  mainRepo,
+  pruneRepo,
+  removeWorktree,
+  worktreeDiff,
+  worktreeMissing,
+  worktreeStatus,
+} from './worktrees.js';
 import { buildPlanningPrompt, planCommand } from './plan-markdown.js';
 import { Plans } from './plans.js';
 import { boundedHistory, handoffHistory, performHandoff, type HandoffRequest } from './provider-handoff.js';
@@ -113,6 +123,10 @@ export class Orchestrator {
   private restoring = new Set<string>();
   /** Real paths of repositories where a git panel mutation (stage, commit, push…) is running. */
   private gitOps = new Set<string>();
+  /** Real paths of main checkouts receiving "Aplicar no projeto"; runs there cannot start. */
+  private applying = new Set<string>();
+  /** Conversations whose worktree is being created, applied or discarded. */
+  private worktreeBusy = new Set<string>();
   private starting = new Map<string, StartingRun>();
   private shuttingDown = false;
   private deciding = new Set<string>();
@@ -260,10 +274,13 @@ export class Orchestrator {
         throw Object.assign(new Error('A configuração da conversa mudou durante a descoberta; tente novamente.'), {
           status: 409,
         });
-      const project =
-        session.projectId === null ? this.detachedProject(session.id) : this.store.getProject(session.projectId);
-      if (!project) throw Object.assign(new Error('Projeto não encontrado'), { status: 404 });
-      if (this.writingProjects.has(project.id) || this.reservedProjectWrites.has(project.id))
+      if (this.worktreeBusy.has(session.id))
+        throw Object.assign(new Error('A cópia isolada desta conversa está sendo alterada; tente de novo'), {
+          status: 409,
+        });
+      const project = this.workspaceFor(session);
+      const writeKey = this.writeKey(session, project);
+      if (this.writingProjects.has(writeKey) || this.reservedProjectWrites.has(writeKey))
         throw Object.assign(new Error('Já há uma execução alterando este projeto'), { status: 409 });
       if (hasImages) this.assertImageSupport(session, project, catalog!);
       const projectPath = realPath(project.path);
@@ -273,6 +290,10 @@ export class Orchestrator {
         });
       if ([...this.gitOps].some((path) => overlaps(path, projectPath)))
         throw Object.assign(new Error('Uma operação do git está em andamento neste projeto; tente de novo'), {
+          status: 409,
+        });
+      if ([...this.applying].some((path) => overlaps(path, projectPath)))
+        throw Object.assign(new Error('Uma cópia isolada está sendo aplicada neste projeto; tente de novo'), {
           status: 409,
         });
       const stored = this.store.listMessages(session.id);
@@ -390,7 +411,7 @@ export class Orchestrator {
       if (options.replaceFrom) delete session.nativeSessionId;
       const discarded = this.store.createRun(user, assistant, run, session, clientMessageId, options.replaceFrom);
       if (options.planTask) this.plans.taskStarted(options.planTask.planId, options.planTask.taskId, runId);
-      if (reserveProject) this.reservedProjectWrites.set(project.id, runId);
+      if (reserveProject) this.reservedProjectWrites.set(writeKey, runId);
       const active = { runId, controller, projectPath, writes: reserveProject } as {
         runId: string;
         controller: AbortController;
@@ -512,9 +533,7 @@ export class Orchestrator {
     if (!summarisable(pending).length)
       throw Object.assign(new Error('Não há mensagens novas para compactar'), { status: 409 });
     if (!options.overrideLimit) assertWithinLimits(this.store, session.projectId);
-    const project =
-      session.projectId === null ? this.detachedProject(session.id) : this.store.getProject(session.projectId);
-    if (!project) throw Object.assign(new Error('Projeto não encontrado'), { status: 404 });
+    const project = this.workspaceFor(session);
     const settings = structuredClone(this.store.getSettings()!);
     const now = new Date().toISOString();
     const run: Run = {
@@ -750,11 +769,7 @@ export class Orchestrator {
     const reservation: StartingRun = { controller, done, finish };
     this.starting.set(sessionId, reservation);
     try {
-      const cwd =
-        session.projectId === null
-          ? this.detachedProject(session.id).path
-          : this.store.getProject(session.projectId)?.path;
-      if (!cwd) throw Object.assign(new Error('Projeto não encontrado'), { status: 404 });
+      const cwd = this.workspaceFor(session).path;
       return await performHandoff(
         {
           store: this.store,
@@ -780,6 +795,150 @@ export class Orchestrator {
     if (!tools) return {};
     const servers = runMcpServers(this.store, project, session.projectId === null);
     return servers.length ? { mcpServers: servers } : {};
+  }
+  /**
+   * The folder a conversation's runs work in: its worktree when enabled (the project, with that
+   * path), else the project, or the detached conversation's own folder.
+   */
+  private workspaceFor(session: Session): Project {
+    if (session.projectId === null) return this.detachedProject(session.id);
+    const project = this.store.getProject(session.projectId);
+    if (!project) throw Object.assign(new Error('Projeto não encontrado'), { status: 404 });
+    if (!session.worktree) return project;
+    if (!existsSync(join(session.worktree.path, '.git')))
+      throw Object.assign(new Error('A pasta da cópia isolada desta conversa não existe mais; descarte-a'), {
+        status: 409,
+      });
+    return { ...project, path: session.worktree.path };
+  }
+  /**
+   * Write serialization key: the project, or the conversation's worktree, which never conflicts
+   * with the main checkout (two runs of the same conversation still serialize).
+   */
+  private writeKey(session: Session, project: Project) {
+    return session.worktree && session.projectId !== null ? `worktree:${session.id}` : project.id;
+  }
+  // ---- Isolated worktree per conversation (docs/specs/worktrees.md) ----
+  private worktreeProject(sessionId: string) {
+    const session = this.requireSession(sessionId);
+    if (session.projectId === null)
+      throw Object.assign(new Error('Conversas avulsas não têm cópia isolada'), { status: 409 });
+    const project = this.store.getProject(session.projectId);
+    if (!project) throw Object.assign(new Error('Projeto não encontrado'), { status: 404 });
+    return { session, project };
+  }
+  private assertIdle(session: Session) {
+    if (session.activeRunId || this.isActive(session.id))
+      throw Object.assign(new Error('Há uma execução em andamento nesta conversa; aguarde ou cancele antes'), {
+        status: 409,
+      });
+    if (this.store.listPlans(session.id).some((plan) => plan.status === 'executing'))
+      throw Object.assign(new Error('Um plano está em execução nesta conversa'), { status: 409 });
+    if (this.worktreeBusy.has(session.id))
+      throw Object.assign(new Error('A cópia isolada desta conversa já está sendo alterada'), { status: 409 });
+  }
+  /** Runs one worktree operation at a time per conversation; runs there wait for 409 meanwhile. */
+  private async withWorktree<T>(sessionId: string, work: () => Promise<T>) {
+    this.worktreeBusy.add(sessionId);
+    try {
+      return await work();
+    } finally {
+      this.worktreeBusy.delete(sessionId);
+    }
+  }
+  private saveWorktree(sessionId: string, worktree: Session['worktree']) {
+    const latest = this.requireSession(sessionId);
+    if (worktree) latest.worktree = worktree;
+    else delete latest.worktree;
+    // The native thread knows the other folder.
+    delete latest.nativeSessionId;
+    latest.updatedAt = new Date().toISOString();
+    this.store.putSession(latest);
+    this.emit({ type: 'session', session: latest });
+    return latest;
+  }
+  async worktreeInfo(sessionId: string) {
+    const { session, project } = this.worktreeProject(sessionId);
+    if (!session.worktree) {
+      const { reason } = await mainRepo(project);
+      return { enabled: false, available: !reason, ...(reason ? { reason } : {}) };
+    }
+    return worktreeStatus(project, session.worktree);
+  }
+  async enableWorktree(sessionId: string) {
+    const { session, project } = this.worktreeProject(sessionId);
+    if (session.worktree) throw Object.assign(new Error('Esta conversa já usa uma cópia isolada'), { status: 409 });
+    this.assertIdle(session);
+    return this.withWorktree(sessionId, async () => {
+      const worktree = await createWorktree(project, session, this.store.dataDir);
+      return this.saveWorktree(sessionId, worktree);
+    });
+  }
+  async worktreeFileDiff(sessionId: string, path: string) {
+    const { session, project } = this.worktreeProject(sessionId);
+    if (!session.worktree) throw Object.assign(new Error('Esta conversa não usa uma cópia isolada'), { status: 404 });
+    return worktreeDiff(project, session.worktree, path);
+  }
+  /** "Aplicar no projeto": refused while a run is active in the conversation or the main checkout. */
+  async applyWorktree(sessionId: string) {
+    const { session, project } = this.worktreeProject(sessionId);
+    if (!session.worktree) throw Object.assign(new Error('Esta conversa não usa uma cópia isolada'), { status: 404 });
+    this.assertIdle(session);
+    const main = realPath(project.path);
+    if (
+      this.busyAt(main) ||
+      this.writingProjects.has(project.id) ||
+      this.reservedProjectWrites.has(project.id) ||
+      [...this.restoring, ...this.applying, ...this.gitOps].some((path) => overlaps(path, main))
+    )
+      throw Object.assign(new Error('Há uma execução em andamento no projeto; aguarde ou cancele antes de aplicar'), {
+        status: 409,
+      });
+    const worktree = session.worktree;
+    this.applying.add(main);
+    try {
+      return await this.withWorktree(sessionId, async () => {
+        const result = await applyWorktree(project, worktree, session.title);
+        return { ...result, status: await worktreeStatus(project, worktree) };
+      });
+    } finally {
+      this.applying.delete(main);
+    }
+  }
+  async discardWorktree(sessionId: string, deleteBranch = false) {
+    const { session, project } = this.worktreeProject(sessionId);
+    if (!session.worktree) throw Object.assign(new Error('Esta conversa não usa uma cópia isolada'), { status: 404 });
+    this.assertIdle(session);
+    const worktree = session.worktree;
+    return this.withWorktree(sessionId, async () => {
+      const result = await removeWorktree(project, worktree, this.store.dataDir, { deleteBranch });
+      return { ...result, session: this.saveWorktree(sessionId, undefined) };
+    });
+  }
+  /** Conversation deletion: the folder goes, the branch stays unless already merged. */
+  async dropWorktree(session: Session) {
+    if (!session.worktree) return;
+    const project = session.projectId === null ? undefined : this.store.getProject(session.projectId);
+    await removeWorktree(project, session.worktree, this.store.dataDir).catch(() => undefined);
+  }
+  /**
+   * Startup: records whose folder is gone are dropped and `git worktree prune` clears their
+   * admin entries in each affected repository. Returns the conversations updated.
+   */
+  async pruneWorktrees() {
+    const pruned: string[] = [];
+    const repos = new Map<string, Project>();
+    for (const session of this.store.listSessions()) {
+      if (!session.worktree || !(await worktreeMissing(session.worktree))) continue;
+      const project = session.projectId === null ? undefined : this.store.getProject(session.projectId);
+      if (project) repos.set(project.path, project);
+      delete session.worktree;
+      delete session.nativeSessionId;
+      this.store.putSession(session);
+      pruned.push(session.id);
+    }
+    for (const project of repos.values()) await pruneRepo(project).catch(() => undefined);
+    return pruned;
   }
   private detachedProject(sessionId: string): Project {
     const path = join(this.store.dataDir, 'conversations', sessionId);
@@ -1064,7 +1223,7 @@ export class Orchestrator {
         );
       const result =
         plan.tools && settings.sandbox === 'workspace-write'
-          ? await this.withProjectWrite(project.id, perform)
+          ? await this.withProjectWrite(this.writeKey(session, project), perform)
           : await perform();
       if (!response && result.text) response = result.text;
       run.status = controller.signal.aborted || result.stopReason === 'cancelled' ? 'cancelled' : 'completed';
@@ -1111,7 +1270,8 @@ export class Orchestrator {
         this.store.putSession(latest);
         this.emit({ type: 'session', session: latest });
       }
-      if (this.reservedProjectWrites.get(project.id) === run.id) this.reservedProjectWrites.delete(project.id);
+      const writeKey = this.writeKey(session, project);
+      if (this.reservedProjectWrites.get(writeKey) === run.id) this.reservedProjectWrites.delete(writeKey);
       this.active.delete(session.id);
       this.emit({ type: 'message', message: assistant });
       this.emit({ type: 'run', run });
@@ -1374,7 +1534,13 @@ export class Orchestrator {
     const graph = async (query: string) =>
       session.projectId === null || project.graphify?.enabled === false || route.level !== 'deep' || !route.tools
         ? ''
-        : await graphifyContext(project, query, controller.signal, this.graphifyService);
+        : // A worktree shares the main checkout's paths: its graph is the project's own.
+          await graphifyContext(
+            this.store.getProject(project.id) ?? project,
+            query,
+            controller.signal,
+            this.graphifyService,
+          );
     const mapPaths = graphifyPaths;
     const getBrief = () => (session.projectId === null ? null : this.store.getBrief(session.projectId));
     const saveBrief = (objective: string, summary: string, paths: string[]) => {
@@ -1439,7 +1605,9 @@ export class Orchestrator {
           if (controller.signal.aborted) throw new Error('Execução cancelada');
           return call(input, task, streamDirect);
         };
-        const result = serialize ? await this.withProjectWrite(project.id, perform) : await perform();
+        const result = serialize
+          ? await this.withProjectWrite(this.writeKey(session, project), perform)
+          : await perform();
         const output = result.text || task.output || '';
         finishTask(task, result.stopReason === 'cancelled' ? 'cancelled' : 'completed', output);
         if (result.stopReason === 'cancelled') throw new Error('Execução cancelada');
@@ -1484,7 +1652,9 @@ export class Orchestrator {
           return call(input, task, true);
         };
         const result =
-          settings.sandbox === 'workspace-write' ? await this.withProjectWrite(project.id, perform) : await perform();
+          settings.sandbox === 'workspace-write'
+            ? await this.withProjectWrite(this.writeKey(session, project), perform)
+            : await perform();
         const output = result.text || task.output || '';
         if (assistant.content === before && output) {
           assistant.content += output;
@@ -1815,7 +1985,7 @@ export class Orchestrator {
       const project =
         session?.projectId === null
           ? join(this.store.dataDir, 'conversations', sessionId)
-          : session && this.store.getProject(session.projectId)?.path;
+          : (session?.worktree?.path ?? (session && this.store.getProject(session.projectId)?.path));
       if (!project || overlaps(realPath(project), path)) return true;
     }
     return false;
@@ -1827,14 +1997,19 @@ export class Orchestrator {
   gitBlock(path: string): string | undefined {
     const root = realPath(path);
     const writing = [...new Set([...this.writingProjects, ...this.reservedProjectWrites.keys()])].some((id) => {
-      const sessionId = id.startsWith('detached:') ? id.slice('detached:'.length) : undefined;
-      const folder = sessionId ? join(this.store.dataDir, 'conversations', sessionId) : this.store.getProject(id)?.path;
+      const folder = id.startsWith('detached:')
+        ? join(this.store.dataDir, 'conversations', id.slice('detached:'.length))
+        : id.startsWith('worktree:')
+          ? this.store.getSession(id.slice('worktree:'.length))?.worktree?.path
+          : this.store.getProject(id)?.path;
       return folder !== undefined && overlaps(realPath(folder), root);
     });
     if (writing) return 'Há uma execução alterando arquivos neste projeto; aguarde ela terminar';
     if ([...this.restoring].some((p) => overlaps(p, root)))
       return 'As alterações de uma execução estão sendo desfeitas neste projeto';
     if ([...this.gitOps].some((p) => overlaps(p, root))) return 'Outra operação do git está em andamento neste projeto';
+    if ([...this.applying].some((p) => overlaps(p, root)))
+      return 'Uma cópia isolada está sendo aplicada neste projeto; tente de novo';
     return undefined;
   }
   /** Runs a git panel mutation in `path`; 409 when gitBlock refuses. New runs there wait for 409. */
@@ -1861,7 +2036,11 @@ export class Orchestrator {
     if (!run.checkpoint?.available || !root || !run.checkpoint.after)
       throw new CheckpointError('Esta execução não tem alterações registradas para desfazer', 404);
     if (run.checkpoint.restoredAt) throw new CheckpointError('As alterações desta execução já foram desfeitas');
-    if (this.busyAt(root) || [...this.restoring, ...this.gitOps].some((path) => overlaps(path, root)))
+    if (
+      this.busyAt(root) ||
+      [...this.restoring, ...this.gitOps, ...this.applying].some((path) => overlaps(path, root)) ||
+      [...this.worktreeBusy].some((id) => this.store.getSession(id)?.worktree?.path === root)
+    )
       throw new CheckpointError('Há uma execução em andamento neste projeto; aguarde ou cancele antes de desfazer');
     this.restoring.add(root);
     try {

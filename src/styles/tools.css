@@ -5,11 +5,14 @@
 }
 
 .tools-panel {
+  /* Above the composer: on short screens the composer (with its toolbar) may reach this far. */
+  position: relative;
+  z-index: 2;
   display: flex;
-  flex: none;
+  flex: 0 1 auto;
   flex-direction: column;
   height: min(48vh, 480px);
-  min-height: 240px;
+  min-height: 200px;
   border-top: 1px solid var(--border);
   background: var(--surface);
 }

@@ -153,6 +153,8 @@ export function sessionsRoutes({ store, orchestrator, providerList }: BackendCon
       if (body.projectId && !store.getProject(body.projectId)) return error(res, 404, 'Projeto não encontrado');
       projectId = body.projectId;
     }
+    if (snapshot.worktree && projectId !== snapshot.projectId)
+      return error(res, 409, 'Descarte a cópia isolada (worktree) antes de mudar o projeto da conversa');
     const title = body.title ?? snapshot.title;
     const providerId = body.providerId ?? snapshot.providerId;
     const providerChanged = providerId !== snapshot.providerId;
@@ -217,10 +219,12 @@ export function sessionsRoutes({ store, orchestrator, providerList }: BackendCon
       failure(res, e);
     }
   });
-  app.delete('/api/sessions/:id', (req, res) => {
+  app.delete('/api/sessions/:id', async (req, res) => {
     const s = store.getSession(req.params.id);
     if (!s) return error(res, 404, 'Conversa não encontrada');
-    if (s.activeRunId) return error(res, 409, 'Conversa em execução');
+    if (s.activeRunId || orchestrator.isActive(s.id)) return error(res, 409, 'Conversa em execução');
+    // The worktree folder goes with the conversation; its branch stays unless merged.
+    await orchestrator.dropWorktree(s);
     store.deleteSession(s.id);
     res.status(204).end();
   });

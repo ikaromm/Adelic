@@ -186,6 +186,41 @@ export interface Session {
   planFirst?: boolean;
   /** "Ramificar daqui": the conversation and message this one was copied from (docs/specs/edit-branch.md). */
   branchedFrom?: { sessionId: string; messageId: string };
+  /** Isolated git worktree the conversation's runs work in (docs/specs/worktrees.md). */
+  worktree?: SessionWorktree;
+}
+/** A conversation's own checkout, outside the user's repository (`<dataDir>/worktrees/<sessionId>`). */
+export interface SessionWorktree {
+  path: string;
+  branch: string;
+  /** Commit the branch started from. */
+  base: string;
+  createdAt: string;
+}
+/** GET /api/sessions/:id/worktree. */
+export interface WorktreeStatus {
+  enabled: boolean;
+  /** Whether a worktree can be created (git repository root with a commit); only when not enabled. */
+  available: boolean;
+  reason?: string;
+  worktree?: SessionWorktree;
+  /** False when the folder disappeared or is no longer a checkout of the branch. */
+  exists?: boolean;
+  /** Changed files relative to `base`, uncommitted ones included. */
+  files?: FileChange[];
+  omitted?: number;
+  /** Commits on the branch after `base`. */
+  commits?: number;
+  /** Uncommitted changes in the worktree. */
+  dirty?: boolean;
+  /** Everything is in the main checkout's HEAD: branch tip merged and nothing uncommitted. */
+  merged?: boolean;
+  /** The branch tip is in the main checkout's HEAD (no commits of its own left); discarding deletes it. */
+  branchMerged?: boolean;
+  /** Why "Aplicar no projeto" would be refused right now (main checkout dirty, detached…). */
+  applyBlocked?: string;
+  /** Branch checked out in the main checkout, when on one. */
+  mainBranch?: string;
 }
 export interface RoutePlan {
   /** Availability for this phase; fast user turns may use tools while internal planning stays false. */

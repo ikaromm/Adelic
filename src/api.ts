@@ -28,6 +28,7 @@ import type {
   Skill,
   SpendLimitStatus,
   UsageReport,
+  WorktreeStatus,
 } from '../shared/contracts';
 import type { CommandList, CommandMode, SavedCommand } from '../shared/commands';
 import type { VoiceStatus } from '../shared/voice';
@@ -310,6 +311,28 @@ export const api = {
     request<{ path: string; diff: string; truncated: boolean }>(
       `/api/runs/${encodeURIComponent(id)}/diff?path=${encodeURIComponent(path)}`,
     ),
+  // Isolated worktree per conversation (docs/specs/worktrees.md).
+  worktree: (sessionId: string) => request<WorktreeStatus>(`/api/sessions/${encodeURIComponent(sessionId)}/worktree`),
+  enableWorktree: (sessionId: string) =>
+    request<{ session: Session; status: WorktreeStatus }>(`/api/sessions/${encodeURIComponent(sessionId)}/worktree`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    }),
+  worktreeDiff: (sessionId: string, path: string) =>
+    request<{ path: string; diff: string; truncated: boolean }>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/worktree/diff?path=${encodeURIComponent(path)}`,
+    ),
+  applyWorktree: (sessionId: string) =>
+    request<{ commit: string; branch: string; status: WorktreeStatus }>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/worktree/apply`,
+      { method: 'POST', body: JSON.stringify({ confirm: true }) },
+    ),
+  // The origin guard requires a JSON body on every mutation, DELETE included.
+  discardWorktree: (sessionId: string, deleteBranch: boolean) =>
+    request<{ removed: boolean; branchDeleted: boolean; branch: string; session: Session }>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/worktree`,
+      { method: 'DELETE', body: JSON.stringify({ deleteBranch }) },
+    ),
   restoreRun: (id: string) =>
     request<{ restored: string[]; run: Run }>(`/api/runs/${encodeURIComponent(id)}/restore`, {
       method: 'POST',
@@ -370,9 +393,9 @@ export const api = {
   skill: (id: string, enabled: boolean) =>
     request<Skill>(`/api/skills/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ enabled }) }),
   /** Ranked project files for `@` mentions (relative paths). */
-  projectFiles: (projectId: string, query: string, limit = 50, signal?: AbortSignal) =>
+  projectFiles: (projectId: string, query: string, limit = 50, signal?: AbortSignal, sessionId?: string) =>
     request<{ files: string[]; truncated: boolean }>(
-      `/api/projects/${encodeURIComponent(projectId)}/files?${new URLSearchParams({ query, limit: String(limit) })}`,
+      `/api/projects/${encodeURIComponent(projectId)}/files?${new URLSearchParams({ query, limit: String(limit), ...(sessionId ? { sessionId } : {}) })}`,
       { signal },
     ),
   /** Git panel (docs/specs/git-panel.md). */

@@ -86,7 +86,7 @@ interface Entry {
 }
 
 /** Reads `{"child-pid": N}` from bubblewrap's info fd (closed once the sandbox is set up). */
-function sandboxInitPid(child: ChildProcess): Promise<number | undefined> {
+export function sandboxInitPid(child: ChildProcess): Promise<number | undefined> {
   const info = child.stdio[3] as NodeJS.ReadableStream | null | undefined;
   if (!info) return Promise.resolve(undefined);
   return new Promise((resolve) => {

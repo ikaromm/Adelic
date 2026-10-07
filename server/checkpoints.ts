@@ -226,7 +226,7 @@ export function blobId(data: Buffer, format: Repo['format']) {
 }
 
 /** Writes a tree of the folder's tracked and non-ignored files; returns its id. */
-async function writeSnapshotTree(repo: Repo): Promise<string> {
+export async function writeSnapshotTree(repo: Repo): Promise<string> {
   const listed = nulSplit(
     await git(repo.root, ['ls-files', '-z', '--full-name', '--cached', '--others', '--exclude-standard'], { repo }),
   );
@@ -349,14 +349,14 @@ export async function checkpointAfter(runId: string, checkpoint: RunCheckpoint):
   }
 }
 
-interface RawChange extends FileChange {
+export interface RawChange extends FileChange {
   oldMode: string;
   newMode: string;
   oldId: string;
   newId: string;
 }
 
-async function changedFiles(repo: Repo, before: string, after: string): Promise<RawChange[]> {
+export async function changedFiles(repo: Repo, before: string, after: string): Promise<RawChange[]> {
   const raw = nulSplit(
     await git(repo.top, ['diff-tree', '-r', '-z', '--no-renames', '--raw', before, after], { repo }),
   );

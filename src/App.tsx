@@ -88,6 +88,7 @@ import { isLimitError, useUsage } from './hooks/useUsage';
 import type { ApiError, SpendLimitsPatch } from './api';
 import { SIDEBAR_LIMIT, SessionItem, SidebarNav, UpdateNotice, type Page } from './components/Sidebar';
 import { ToolsPanel, type ToolsTab } from './components/ToolsPanel';
+import { WorktreePanel } from './components/WorktreePanel';
 
 type LocalStream = { runId: string; messageId: string; content: string };
 
@@ -566,6 +567,7 @@ export default function App() {
     (value) => setDrafts((current) => ({ ...current, [selectedSessionRef.current]: value })),
     composerRef,
     slash.open,
+    session?.worktree ? session.id : undefined,
   );
   // Dictated text goes to the conversation where the recording started, at its caret.
   const dictationTargetRef = useRef('');
@@ -1706,6 +1708,18 @@ export default function App() {
               </div>
             ) : (
               <div className="chat-view">
+                <WorktreePanel
+                  session={session}
+                  running={Boolean(session.activeRunId) || pendingSendForSession}
+                  onSession={(next) => {
+                    setDetail((current) => (current?.session.id === next.id ? { ...current, session: next } : current));
+                    setData((current) =>
+                      current
+                        ? { ...current, sessions: current.sessions.map((s) => (s.id === next.id ? next : s)) }
+                        : current,
+                    );
+                  }}
+                />
                 <section
                   className="conversation"
                   aria-label="Conversa"

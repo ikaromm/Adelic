@@ -12,6 +12,7 @@ import { accessGuard, authRoutes, type RemoteAccess } from './http/auth.js';
 import { diagnosticsRoutes } from './http/diagnostics.js';
 import { memoryRoutes } from './http/memory.js';
 import { projectsRoutes } from './http/projects.js';
+import { plansRoutes } from './http/plans.js';
 import { runsRoutes } from './http/runs.js';
 import { isAttachmentUpload, sessionsRoutes } from './http/sessions.js';
 import { settingsRoutes } from './http/settings.js';
@@ -98,6 +99,7 @@ export function createBackend(
   app.use(projectsRoutes(context));
   app.use(sessionsRoutes(context));
   app.use(runsRoutes(context));
+  app.use(plansRoutes(context));
   app.use(settingsRoutes(context));
   app.use(memoryRoutes(context));
   app.use(diagnosticsRoutes(context));

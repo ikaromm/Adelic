@@ -20,6 +20,7 @@ import {
   Search,
   Download,
   ListPlus,
+  ClipboardList,
 } from 'lucide-react';
 import type {
   AttachmentMeta,
@@ -52,6 +53,8 @@ import { useComposerAttachments } from './hooks/useComposerAttachments';
 import { AttachButton, PendingAttachments } from './components/ComposerAttachments';
 import { composerKeyAction, useMessageQueue } from './hooks/useMessageQueue';
 import { MessageQueue } from './components/MessageQueue';
+import { usePlans } from './hooks/usePlans';
+import { PlanCard } from './components/PlanCard';
 import { projectOrchestration } from '../shared/contracts';
 import { ActivityPage } from './components/ActivityPage';
 import { ConversationSearch } from './components/ConversationSearch';
@@ -121,6 +124,8 @@ export default function App() {
   const taskOutputs = useTaskOutputs(selectedSessionRef, detailSnapshotRef, setNotice);
   const messageQueue = useMessageQueue(selectedSession, setNotice);
   const { apply: applyQueue, reload: reloadQueue } = messageQueue;
+  const plans = usePlans(selectedSession, setNotice);
+  const { apply: applyPlan, reload: reloadPlans } = plans;
   const selectSession = (id: string) => {
     selectedSessionRef.current = id;
     setSelectedSession(id);
@@ -281,9 +286,14 @@ export default function App() {
         applyQueue(event.queue);
         return;
       }
+      if (event.type === 'plan') {
+        applyPlan(event.plan);
+        return;
+      }
       if (event.type === 'refresh') {
         reconcile();
         void reloadQueue();
+        void reloadPlans();
         if (selectedProjectRef.current) void refreshProjectViews(selectedProjectRef.current);
         return;
       }
@@ -387,7 +397,17 @@ export default function App() {
       /* EventSource reconnects; the server sends a fresh snapshot signal. */
     };
     return () => events.close();
-  }, [refreshBootstrap, refreshDetail, refreshProjectViews, selectedSession, notifyRun, applyQueue, reloadQueue]);
+  }, [
+    refreshBootstrap,
+    refreshDetail,
+    refreshProjectViews,
+    selectedSession,
+    notifyRun,
+    applyQueue,
+    reloadQueue,
+    applyPlan,
+    reloadPlans,
+  ]);
 
   // Follow new content only while the reader is at the end; reading history is never interrupted.
   // Approvals, tasks and error rows count as new content too, not only messages and streamed text.
@@ -658,7 +678,9 @@ export default function App() {
   }
 
   async function changeSession(
-    patch: Partial<Pick<Session, 'providerId' | 'mode' | 'projectId' | 'thinking'>> & { model?: string | null },
+    patch: Partial<Pick<Session, 'providerId' | 'mode' | 'projectId' | 'thinking' | 'planFirst'>> & {
+      model?: string | null;
+    },
   ) {
     if (!session || busy || session.activeRunId) return;
     const sessionId = session.id;
@@ -1235,6 +1257,18 @@ export default function App() {
                               data.providers.find((p) => p.id === (message.providerId || session.providerId))?.name ||
                               'Adelic'
                             }
+                            body={(() => {
+                              const plan =
+                                message.role === 'assistant' && plans.plans.find((p) => p.runId === message.runId);
+                              return plan ? (
+                                <PlanCard
+                                  plan={plan}
+                                  api={plans}
+                                  busy={Boolean(session.activeRunId)}
+                                  canSave={session.projectId !== null}
+                                />
+                              ) : undefined;
+                            })()}
                           />
                           {message.role === 'assistant' &&
                             message.status === 'failed' &&
@@ -1404,7 +1438,9 @@ export default function App() {
                       placeholder={
                         session.activeRunId
                           ? 'O agente está trabalhando… Enter coloca na fila, Ctrl+Enter envia agora.'
-                          : 'Escreva uma mensagem…'
+                          : session.planFirst
+                            ? 'Descreva o que quer fazer; o agente planeja antes de executar…'
+                            : 'Escreva uma mensagem…'
                       }
                       aria-label="Mensagem para o agente"
                       rows={1}
@@ -1511,6 +1547,17 @@ export default function App() {
                               : undefined
                           }
                         />
+                        <button
+                          type="button"
+                          className={`composer-pill plan-first-toggle ${session.planFirst ? 'active' : ''}`}
+                          aria-pressed={Boolean(session.planFirst)}
+                          title="Planejar antes: cada mensagem gera primeiro um plano somente leitura para você aprovar. Para uma mensagem só, comece com /plano."
+                          disabled={busy || Boolean(session.activeRunId)}
+                          onClick={() => void changeSession({ planFirst: !session.planFirst })}
+                        >
+                          <ClipboardList size={14} />
+                          <span className="composer-pill-label">Planejar antes</span>
+                        </button>
                       </div>
                       {session.activeRunId && composer.trim() && (
                         <button

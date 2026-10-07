@@ -192,6 +192,10 @@ export function sessionsRoutes({ store, orchestrator, providerList }: BackendCon
       thinking,
       updatedAt: new Date().toISOString(),
     };
+    if (body.planFirst !== undefined) {
+      if (body.planFirst) next.planFirst = true;
+      else delete next.planFirst;
+    }
     if (projectId !== snapshot.projectId || providerChanged || modelChanged) delete next.nativeSessionId;
     store.putSession(next);
     res.json(next);

@@ -30,6 +30,7 @@ import { DiagnosticsCard } from './DiagnosticsCard';
 import { McpCard } from './McpCard';
 import { HooksCard } from './HooksCard';
 import { ProjectTools } from './ProjectTools';
+import { RemoteAccessCard } from './RemoteAccessCard';
 
 export function SettingsPage({
   data,
@@ -87,6 +88,7 @@ export function SettingsPage({
       | 'autoCompactTokens'
       | 'voiceDictation'
       | 'terminalRemote'
+      | 'internetManualApproval'
       | 'automations',
     value: string | boolean | number,
   ) => void;
@@ -392,8 +394,8 @@ export function SettingsPage({
               <div>
                 <strong>Permitir terminal pelo acesso remoto</strong>
                 <span>
-                  Com ADELIC_REMOTE_BIND, deixa o Terminal do projeto funcionar também em outros dispositivos, com as
-                  mesmas permissões dos agentes. Só pode ser alterado neste computador.
+                  Deixa o Terminal do projeto funcionar também em dispositivos da tailnet, com as mesmas permissões dos
+                  agentes. Pela internet (Funnel) ele continua bloqueado. Só pode ser alterado neste computador.
                 </span>
               </div>
               <button
@@ -413,6 +415,10 @@ export function SettingsPage({
               arquivos.
             </p>
           </section>
+          <RemoteAccessCard
+            internetManualApproval={data.settings.internetManualApproval !== false}
+            onInternetManualApproval={(enabled) => onSetting('internetManualApproval', enabled)}
+          />
           <section className="settings-card">
             <div className="settings-card-heading">
               <div className="settings-card-icon blue">

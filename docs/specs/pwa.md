@@ -23,7 +23,7 @@ O cache é a "casca" da interface, listada no build (`vite.config.ts` gera `dist
 - Requisições que não são GET, de outra origem, com `Authorization`, ou com query string.
 - Qualquer arquivo fora da lista do build.
 
-Assim, sem o token do acesso remoto, o cache só tem o mesmo que o servidor já entrega publicamente: a casca e os ícones.
+Assim, sem login no acesso remoto, o cache só tem o mesmo que o servidor já entrega publicamente: a casca e os ícones.
 
 ## Atualizações
 

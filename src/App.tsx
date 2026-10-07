@@ -1217,6 +1217,7 @@ export default function App() {
       | 'autoCompactTokens'
       | 'voiceDictation'
       | 'terminalRemote'
+      | 'internetManualApproval'
       | 'automations',
     value: string | boolean | number,
   ) {

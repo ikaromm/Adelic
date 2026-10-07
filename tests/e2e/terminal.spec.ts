@@ -103,7 +103,10 @@ test('offers the preview for a dev-server URL and validates preview addresses', 
   await expect(frame).toHaveAttribute('src', 'http://127.0.0.1:5198/');
 
   const csp = (await request.get('/api/health')).headers()['content-security-policy'];
-  expect(csp).toBe('frame-src http://127.0.0.1:* http://localhost:* https://127.0.0.1:* https://localhost:*');
+  // frame-src for the preview; frame-ancestors keeps the app itself out of any frame.
+  expect(csp).toBe(
+    "frame-src http://127.0.0.1:* http://localhost:* https://127.0.0.1:* https://localhost:*; frame-ancestors 'none'",
+  );
 });
 
 test('the terminal and preview fit a 360px screen', async ({ page, request }) => {

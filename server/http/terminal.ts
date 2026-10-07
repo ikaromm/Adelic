@@ -8,18 +8,25 @@ import {
 } from '../../shared/terminal.js';
 import type { Store } from '../store.js';
 import type { TerminalService } from '../terminal.js';
-import { isLoopbackRequest } from './auth.js';
+import { requestKind } from './auth.js';
 import { error, errorStatus, message } from './common.js';
 import type { BackendContext } from './context.js';
 
 export const TERMINAL_REMOTE_DISABLED =
   'O terminal está desativado no acesso remoto. Ative "Permitir terminal pelo acesso remoto" em Configurações, neste computador.';
+export const TERMINAL_INTERNET_DISABLED =
+  'O terminal nunca fica disponível pelo acesso pela internet (Tailscale Funnel). Use este computador ou a tailnet.';
 
-/** Remote clients (ADELIC_REMOTE_BIND) may use the terminal only after the opt-in setting. */
+/**
+ * Tailnet clients may use the terminal only after the opt-in setting; internet clients
+ * (Tailscale Funnel) never can (docs/specs/remote-access.md).
+ */
 export function terminalAccess(req: Request, store: Store) {
-  const remote = !isLoopbackRequest(req);
-  const enabled = !remote || store.getSettings()?.terminalRemote === true;
-  return { remote, enabled, ...(enabled ? {} : { reason: TERMINAL_REMOTE_DISABLED }) };
+  const kind = requestKind(req);
+  const remote = kind !== 'local';
+  const enabled = kind === 'local' || (kind === 'tailnet' && store.getSettings()?.terminalRemote === true);
+  const reason = kind === 'internet' ? TERMINAL_INTERNET_DISABLED : TERMINAL_REMOTE_DISABLED;
+  return { remote, enabled, ...(enabled ? {} : { reason }) };
 }
 
 /** Integrated command runner (docs/specs/terminal-preview.md). Commands never reach a model. */
@@ -27,7 +34,7 @@ export function terminalRoutes({ store }: BackendContext, terminal: TerminalServ
   const app = Router();
   const allowed = (req: Request, res: Response) => {
     const access = terminalAccess(req, store);
-    if (!access.enabled) error(res, 403, TERMINAL_REMOTE_DISABLED);
+    if (!access.enabled) error(res, 403, access.reason!);
     return access.enabled;
   };
   const project = (req: Request, res: Response) => {

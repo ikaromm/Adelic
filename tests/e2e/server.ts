@@ -41,6 +41,8 @@ import { COMPACTION_PROMPT_MARKER } from '../../server/compaction.js';
 import { VoiceService, type CommandRunner } from '../../server/voice.js';
 import { TerminalService } from '../../server/terminal.js';
 import { startFakeMemory } from './fake-memory.js';
+import { tagListener } from '../../server/http/auth.js';
+import { FunnelService, type TailscaleRunner } from '../../server/funnel.js';
 
 const port = Number(process.env.E2E_PORT || 4399);
 // Optional simulated ai-memory (E2E_MEMORY_PORT); otherwise ADELIC_MEMORY_URL points nowhere.
@@ -296,6 +298,31 @@ const bwrapWorks =
     },
   ).status === 0;
 const terminal = new TerminalService(bwrapWorks ? {} : { wrap: async (command, args) => ({ command, args }) });
+// Remote login (remote-login.spec.ts): with E2E_FUNNEL_PORT, a second loopback listener plays
+// the Tailscale Funnel role (every request on it is "internet"), and a scripted `tailscale` CLI
+// answers the Settings card. The real tailscale is never called.
+const funnelPort = process.env.E2E_FUNNEL_PORT ? Number(process.env.E2E_FUNNEL_PORT) : undefined;
+let funnelServe: Record<string, unknown> = {};
+const fakeTailscale: TailscaleRunner = async (args) => {
+  const dns = 'adelic-e2e.exemplo.ts.net';
+  if (args[0] === 'version') return { stdout: '1.102.3\n', stderr: '' };
+  if (args[0] === 'status')
+    return {
+      stdout: JSON.stringify({
+        BackendState: 'Running',
+        Self: { DNSName: `${dns}.`, CapMap: { https: null, funnel: null } },
+      }),
+      stderr: '',
+    };
+  if (args.join(' ') === 'funnel status --json') return { stdout: JSON.stringify(funnelServe), stderr: '' };
+  if (args[0] === 'funnel' && args.at(-1) === 'off') funnelServe = {};
+  else if (args[0] === 'funnel')
+    funnelServe = {
+      Web: { [`${dns}:443`]: { Handlers: { '/': { Proxy: args.at(-1) } } } },
+      AllowFunnel: { [`${dns}:443`]: true },
+    };
+  return { stdout: '', stderr: '' };
+};
 // Short retry delays so the retry flows finish quickly.
 const { app } = createBackend(
   store,
@@ -305,6 +332,14 @@ const { app } = createBackend(
   { baseDelayMs: 150, maxDelayMs: 400 },
   voice,
   terminal,
+  undefined,
+  undefined,
+  funnelPort
+    ? {
+        funnelListener: { port: () => funnelPort, listening: () => true, ensure: async () => funnelPort },
+        funnelService: new FunnelService(fakeTailscale),
+      }
+    : {},
 );
 app.get('/e2e/voice', (req, res) => {
   const mode = String(req.query.mode);
@@ -326,6 +361,11 @@ app.get('/sw.js', (_req, res, next) => {
   res.send(`${readFileSync(join(web, 'sw.js'), 'utf8')}\n// e2e ${swBump}\n`);
 });
 app.use(webAssets(web));
-createServer(app).listen(port, '127.0.0.1', () =>
-  console.log(`E2E server on http://127.0.0.1:${port} (data ${dataDir})`),
-);
+const localServer = createServer(app);
+tagListener(localServer, 'local');
+localServer.listen(port, '127.0.0.1', () => console.log(`E2E server on http://127.0.0.1:${port} (data ${dataDir})`));
+if (funnelPort) {
+  const funnelServer = createServer(app);
+  tagListener(funnelServer, 'funnel');
+  funnelServer.listen(funnelPort, '127.0.0.1');
+}

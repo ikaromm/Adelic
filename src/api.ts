@@ -36,6 +36,7 @@ import type { TerminalCommand, TerminalCommandInfo, TerminalState } from '../sha
 import type { Automation, AutomationSchedule } from '../shared/automations';
 import type { CheckResult, ProjectHooks } from '../shared/hooks';
 import type { McpEnvSource, McpServerView, ProjectMcpReport } from '../shared/mcp';
+import type { RemoteAccessState, TailscaleState } from '../shared/remote-access';
 /** Report from /api/diagnostics: versions, paths and status only, without secrets or content. */
 export interface Diagnostics {
   generatedAt: string;
@@ -116,6 +117,8 @@ export type ApiError = Error & {
   exists?: boolean;
   code?: string;
   limit?: SpendLimitStatus;
+  /** A page that explains how to fix the error (Tailscale admin console). */
+  url?: string;
 };
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -130,6 +133,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       exists?: boolean;
       code?: string;
       limit?: SpendLimitStatus;
+      url?: string;
     };
     const error = new Error(body.error || `Falha na solicitação (${response.status})`) as ApiError;
     error.status = response.status;
@@ -137,6 +141,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     if (body.exists === true) error.exists = true;
     if (typeof body.code === 'string') error.code = body.code;
     if (body.limit) error.limit = body.limit;
+    if (typeof body.url === 'string' && body.url.startsWith('https://login.tailscale.com/')) error.url = body.url;
     throw error;
   }
   if (response.status === 204) return undefined as T;
@@ -348,6 +353,29 @@ export const api = {
     request<void>(`/api/approvals/${encodeURIComponent(id)}`, { method: 'POST', body: JSON.stringify({ decision }) }),
   settings: (data: SettingsPatch) =>
     request<Settings>('/api/settings', { method: 'PATCH', body: JSON.stringify(data) }),
+  /** Settings › Acesso remoto (docs/specs/remote-access.md). */
+  remoteAccess: () => request<RemoteAccessState>('/api/remote-access'),
+  setRemoteAccount: (username: string, password: string) =>
+    request<RemoteAccessState>('/api/remote-access/account', {
+      method: 'PUT',
+      body: JSON.stringify({ username, password }),
+    }),
+  deleteRemoteAccount: () =>
+    request<RemoteAccessState>('/api/remote-access/account', { method: 'DELETE', body: JSON.stringify({}) }),
+  revokeRemoteSession: (id: string) =>
+    request<RemoteAccessState>(`/api/remote-access/sessions/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+      body: JSON.stringify({}),
+    }),
+  revokeRemoteSessions: () =>
+    request<RemoteAccessState>('/api/remote-access/sessions/revoke-all', { method: 'POST', body: JSON.stringify({}) }),
+  tailscale: () => request<TailscaleState>('/api/remote-access/tailscale'),
+  setFunnel: (enabled: boolean) =>
+    request<{ tailscale: TailscaleState; state: RemoteAccessState }>('/api/remote-access/funnel', {
+      method: 'PUT',
+      body: JSON.stringify({ enabled }),
+    }),
+  logout: () => request<{ authenticated: false }>('/api/auth/logout', { method: 'POST', body: JSON.stringify({}) }),
   /** Usage today and this month, the limits and those at 80% or more (docs/specs/spend-limits.md). */
   usage: (projectId?: string) =>
     request<UsageReport>(`/api/usage${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ''}`),

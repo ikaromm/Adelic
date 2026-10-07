@@ -9,13 +9,23 @@ import type { Project, ProviderRegistry } from '../shared/contracts.js';
 import { GraphifyService } from './graphify.js';
 import { createBackend } from './index.js';
 import { Store } from './store.js';
-import { remoteAccessFromEnv, type RemoteAccess } from './http/auth.js';
+import { funnelPortFromEnv, remoteAccessFromEnv, tagListener, type RemoteAccess } from './http/auth.js';
+import type { FunnelListener } from './http/remote-access.js';
+import type { FunnelService } from './funnel.js';
 import { webAssets } from './http/web.js';
 
 export interface StartServerOptions {
   port?: number;
   /** Remote access (token-protected). Defaults to ADELIC_REMOTE_BIND/TOKEN/PORT; off when unset. */
   remote?: RemoteAccess | null;
+  /**
+   * Loopback port that receives Tailscale Funnel traffic (always treated as internet).
+   * Defaults to ADELIC_FUNNEL_PORT or 4319; null disables the option. It only listens once
+   * Funnel is requested from this computer (or was, and an account exists).
+   */
+  funnelPort?: number | null;
+  /** Test hook: the Tailscale CLI wrapper (tests never call the real `tailscale`). */
+  funnelService?: FunnelService;
   webDir?: string;
   dataDir?: string;
   development?: boolean;
@@ -27,6 +37,8 @@ export interface RunningServer {
   port: number;
   /** Set only when remote access is enabled. */
   remoteUrl?: string;
+  /** Funnel listener, once it listens. */
+  funnelUrl?(): string | undefined;
   close(): Promise<void>;
 }
 
@@ -106,6 +118,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Run
   let graphifyService: GraphifyService | undefined;
   let http: HttpServer | undefined;
   let remoteHttp: HttpServer | undefined;
+  let funnelHttp: HttpServer | undefined;
   let vite: ViteDevServer | undefined;
   let closePromise: Promise<void> | undefined;
   try {
@@ -115,7 +128,54 @@ export async function startServer(options: StartServerOptions = {}): Promise<Run
     providers = createProviderRegistry(realDataDir);
     graphifyService = new GraphifyService(undefined, realDataDir);
     const remote = options.remote === null ? undefined : (options.remote ?? remoteAccessFromEnv());
-    const backend = createBackend(store, providers, graphifyService, remote);
+    const configuredFunnelPort = options.funnelPort === null ? undefined : (options.funnelPort ?? funnelPortFromEnv());
+    if (configuredFunnelPort && [options.port ?? 4317, remote?.port].includes(configuredFunnelPort))
+      throw new Error('ADELIC_FUNNEL_PORT precisa ser diferente das outras portas do Adelic.');
+    let funnelPort = configuredFunnelPort;
+    let funnelStarting: Promise<number> | undefined;
+    // Filled right below; the listener starts only after createBackend returned.
+    const holder: { app?: ReturnType<typeof createBackend>['app'] } = {};
+    // 127.0.0.1 only; tailscaled connects here. Started lazily so an unused option binds nothing.
+    const funnelListener: FunnelListener | undefined =
+      configuredFunnelPort === undefined
+        ? undefined
+        : {
+            port: () => funnelPort!,
+            listening: () => Boolean(funnelHttp?.listening),
+            ensure: () =>
+              (funnelStarting ??= (async () => {
+                const server = createHttpServer(holder.app!);
+                tagListener(server, 'funnel');
+                try {
+                  await listen(server, { host: '127.0.0.1', port: configuredFunnelPort });
+                } catch (error) {
+                  funnelStarting = undefined;
+                  throw Object.assign(
+                    new Error(
+                      `Não foi possível escutar em 127.0.0.1:${configuredFunnelPort} para o Funnel (${errorCode(error) ?? String(error)}). Defina outra porta em ADELIC_FUNNEL_PORT.`,
+                    ),
+                    { status: 409 },
+                  );
+                }
+                funnelHttp = server;
+                const bound = server.address();
+                if (bound && typeof bound !== 'string') funnelPort = bound.port;
+                return funnelPort!;
+              })()),
+          };
+    const backend = createBackend(
+      store,
+      providers,
+      graphifyService,
+      remote,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { funnelListener, funnelService: options.funnelService },
+    );
+    holder.app = backend.app;
     orchestrator = backend.orchestrator;
     terminal = backend.terminal;
     automations = backend.automations;
@@ -129,6 +189,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Run
     }
 
     http = createHttpServer(backend.app);
+    tagListener(http, 'local');
     await listen(http, { host: '127.0.0.1', port: options.port ?? 4317 });
     const address = http.address();
     if (!address || typeof address === 'string') throw new Error('O servidor iniciou sem uma porta TCP válida.');
@@ -136,10 +197,14 @@ export async function startServer(options: StartServerOptions = {}): Promise<Run
     let remotePort: number | undefined;
     if (remote) {
       remoteHttp = createHttpServer(backend.app);
+      tagListener(remoteHttp, 'tailnet');
       await listen(remoteHttp, { host: remote.bind, port: remote.port });
       const remoteAddress = remoteHttp.address();
       remotePort = remoteAddress && typeof remoteAddress !== 'string' ? remoteAddress.port : remote.port;
     }
+
+    // Re-applies Funnel only when it was requested before and an account still exists.
+    void backend.funnel.restore();
 
     const close = () =>
       (closePromise ??= (async () => {
@@ -153,11 +218,16 @@ export async function startServer(options: StartServerOptions = {}): Promise<Run
         };
         // No automation may start while the server shuts down.
         automations?.stop();
+        backend.access.stop();
         await attempt(async () => {
           await closeServer(http!);
         });
         await attempt(async () => {
           if (remoteHttp) await closeServer(remoteHttp);
+        });
+        await attempt(async () => {
+          await funnelStarting?.catch(() => undefined);
+          if (funnelHttp) await closeServer(funnelHttp);
         });
         await attempt(async () => {
           const results = await Promise.allSettled(
@@ -187,6 +257,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Run
       ...(remote
         ? { remoteUrl: `http://${remote.bind.includes(':') ? `[${remote.bind}]` : remote.bind}:${remotePort}` }
         : {}),
+      funnelUrl: () => (funnelHttp?.listening ? `http://127.0.0.1:${funnelPort}` : undefined),
       close,
     };
   } catch (error) {
@@ -204,6 +275,9 @@ export async function startServer(options: StartServerOptions = {}): Promise<Run
     } catch {}
     try {
       if (remoteHttp) await closeServer(remoteHttp);
+    } catch {}
+    try {
+      if (funnelHttp) await closeServer(funnelHttp);
     } catch {}
     try {
       await vite?.close();

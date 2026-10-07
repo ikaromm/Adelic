@@ -9,7 +9,10 @@ import { error, message, originGuard } from './http/common.js';
 import type { BackendContext } from './http/context.js';
 import type { RetryPolicy } from './retry.js';
 import type { runCheck } from './hooks.js';
-import { accessGuard, authRoutes, type RemoteAccess } from './http/auth.js';
+import { AccessControl, securityHeaders, type RemoteAccess } from './http/auth.js';
+import { FunnelControl, remoteAccessRoutes, type FunnelListener } from './http/remote-access.js';
+import { FunnelService } from './funnel.js';
+import type { LoginLimiter } from './remote-auth.js';
 import { commandsRoutes } from './http/commands.js';
 import { automationsRoutes } from './http/automations.js';
 import { AutomationService, type AutomationClock } from './automations.js';
@@ -45,15 +48,20 @@ export function createBackend(
   automationClock?: AutomationClock,
   // Test hook for the after-edit check runner (production uses bubblewrap; server/hooks.ts).
   checkRunner?: typeof runCheck,
+  // Remote login and Tailscale Funnel (docs/specs/remote-access.md); tests inject the CLI runner.
+  remoteOptions: RemoteOptions = {},
 ) {
   const app = express();
   app.disable('x-powered-by');
-  // The only CSP directive the app needs: the local preview may frame loopback dev servers
-  // (docs/specs/terminal-preview.md). Routes with a stricter policy (attachments) replace it.
-  app.use((_req, res, next) => {
-    res.setHeader('Content-Security-Policy', APP_CSP);
-    next();
+  // Every request is classified (local, tailnet or internet) before anything else.
+  const access = new AccessControl(store, remote, {
+    funnelPort: () => remoteOptions.funnelListener?.port(),
+    limiter: remoteOptions.limiter,
   });
+  app.use(access.classify);
+  // CSP: the local preview may frame loopback dev servers (docs/specs/terminal-preview.md), and
+  // nothing may frame the app. Routes with a stricter policy (attachments) replace it.
+  app.use(securityHeaders(APP_CSP));
   // Attachment and dictation uploads carry base64 data: those routes parse their own larger
   // body, after the access guard, so unauthenticated requests never get the bigger parsers.
   const json = express.json({ limit: '128kb', strict: true });
@@ -121,8 +129,15 @@ export function createBackend(
       },
     ];
   }
-  app.use(authRoutes(remote));
-  app.use(accessGuard(remote, originGuard));
+  app.use(access.routes());
+  app.use(access.guard(originGuard));
+  const funnel = new FunnelControl(
+    store,
+    access,
+    remoteOptions.funnelService ?? new FunnelService(),
+    remoteOptions.funnelListener,
+  );
+  app.use(remoteAccessRoutes(store, access, funnel));
   app.get('/api/bootstrap', async (_req, res) => {
     try {
       const [providersResult] = await Promise.all([providerList(), memoryIntegration()]);
@@ -161,5 +176,12 @@ export function createBackend(
   app.use('/api', (req, res) => error(res, 404, 'Endpoint não encontrado'));
   app.use((e: unknown, _req: Request, res: Response, _next: NextFunction) => error(res, 400, message(e)));
   automations.start();
-  return { app, orchestrator, graphify: graphifyService, terminal, automations };
+  return { app, orchestrator, graphify: graphifyService, terminal, automations, access, funnel };
+}
+
+export interface RemoteOptions {
+  /** Loopback listener for Funnel traffic; requests on its port are always `internet`. */
+  funnelListener?: FunnelListener;
+  funnelService?: FunnelService;
+  limiter?: LoginLimiter;
 }

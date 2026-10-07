@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { CheckpointError, checkpointDiff } from '../checkpoints.js';
 import { RestoreRunSchema, RetryRunSchema, parseBody, text } from '../../shared/schemas.js';
+import { forceManualApproval } from './auth.js';
 import { error, errorStatus, failure, message } from './common.js';
 import type { BackendContext } from './context.js';
 
@@ -50,7 +51,12 @@ export function runsRoutes({ store, orchestrator }: BackendContext) {
     if (!parsed.ok) return error(res, 400, parsed.message);
     const { overrideLimit, ...target } = parsed.data;
     try {
-      res.status(202).json(await orchestrator.retryRun(req.params.id, target, { overrideLimit }));
+      res.status(202).json(
+        await orchestrator.retryRun(req.params.id, target, {
+          overrideLimit,
+          manualApproval: forceManualApproval(req, store),
+        }),
+      );
     } catch (e) {
       failure(res, e);
     }

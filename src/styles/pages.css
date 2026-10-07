@@ -2888,3 +2888,191 @@ label.setting-row > input {
 .hooks-card .form-error {
   margin-top: 10px;
 }
+
+/* Settings › Acesso remoto (src/components/RemoteAccessCard.tsx). */
+.remote-row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.remote-account-form {
+  display: grid;
+  gap: 8px;
+  padding: 4px 0 14px;
+}
+.remote-account-form label {
+  display: grid;
+  gap: 6px;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  font-weight: 500;
+}
+.remote-account-form .remote-row-actions {
+  justify-content: flex-start;
+  margin-top: 4px;
+}
+.remote-hints {
+  display: grid;
+  gap: 2px;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  line-height: 1.45;
+}
+.remote-strength {
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+.remote-strength.s0 {
+  color: var(--danger);
+}
+.remote-strength.s1 {
+  color: var(--warning);
+}
+.remote-strength.s2,
+.remote-strength.s3 {
+  color: var(--success);
+}
+.remote-problem {
+  color: var(--danger);
+  font-size: var(--text-xs);
+  line-height: 1.45;
+}
+.remote-muted {
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+.remote-funnel {
+  display: grid;
+  gap: 10px;
+  padding-bottom: 10px;
+}
+.remote-status {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 6px 14px;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  background: var(--canvas);
+}
+.remote-status > div {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+.remote-status dt {
+  color: var(--text-muted);
+  font-size: var(--text-2xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.remote-status dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: var(--text-sm);
+}
+.remote-requirements {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-left: 18px;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  line-height: 1.45;
+}
+.remote-requirements a {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  white-space: nowrap;
+}
+.remote-list-block {
+  display: grid;
+  gap: 8px;
+  padding: 12px 0 4px;
+  border-top: 1px solid var(--border-soft);
+}
+.remote-list-block > summary {
+  color: var(--text);
+  font-size: var(--text-md);
+  font-weight: 500;
+  cursor: pointer;
+}
+.remote-list-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.remote-list-heading h3 {
+  color: var(--text);
+  font-size: var(--text-md);
+  font-weight: 500;
+}
+.remote-list {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.remote-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+}
+.remote-list li > div {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+.remote-list strong {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  color: var(--text);
+  font-size: var(--text-sm);
+  font-weight: 500;
+}
+.remote-list span {
+  overflow-wrap: anywhere;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+}
+.remote-list.compact li {
+  padding: 6px 10px;
+}
+.remote-list strong.remote-ok {
+  color: var(--success);
+}
+.remote-list strong.remote-fail {
+  color: var(--warning);
+}
+.remote-access-card .modal-card ul {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-left: 18px;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+@container main-area (max-width: 560px) {
+  .remote-row-actions {
+    justify-content: flex-start;
+  }
+  .remote-list li {
+    flex-wrap: wrap;
+  }
+}

@@ -6,6 +6,7 @@ import {
   PlanTaskStatusSchema,
   parseBody,
 } from '../../shared/schemas.js';
+import { forceManualApproval } from './auth.js';
 import { error, errorStatus, message } from './common.js';
 import type { BackendContext } from './context.js';
 import { SPEND_LIMIT_CODE } from '../../shared/spend-limits.js';
@@ -49,7 +50,16 @@ export function plansRoutes({ store, orchestrator }: BackendContext) {
     route(async (req, res) => {
       const parsed = parseBody(PlanApproveSchema, req.body, 'mode deve ser all ou next');
       if (!parsed.ok) return error(res, 400, parsed.message);
-      res.status(202).json(await plans.approve(id(req), parsed.data.mode, parsed.data.overrideLimit === true));
+      res
+        .status(202)
+        .json(
+          await plans.approve(
+            id(req),
+            parsed.data.mode,
+            parsed.data.overrideLimit === true,
+            forceManualApproval(req, store),
+          ),
+        );
     }),
   );
   app.post(

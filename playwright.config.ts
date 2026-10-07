@@ -7,6 +7,8 @@ const port = Number(process.env.E2E_PORT || 4399);
 const executablePath = process.env.PLAYWRIGHT_CHROMIUM || undefined;
 export const memoryAppPort = port + 1;
 export const fakeMemoryPort = port + 2;
+/** Loopback listener in the Tailscale Funnel role (remote-login.spec.ts): always "internet". */
+export const funnelPort = port + 3;
 
 export default defineConfig({
   testDir: 'tests/e2e',
@@ -36,6 +38,7 @@ export default defineConfig({
       timeout: 30_000,
       env: {
         E2E_PORT: String(port),
+        E2E_FUNNEL_PORT: String(funnelPort),
         ADELIC_MEMORY_URL: 'http://127.0.0.1:9',
         ADELIC_MEMORY_TOKEN: '',
         ADELIC_RELEASES_URL: `http://127.0.0.1:${port}/e2e/releases/latest`,

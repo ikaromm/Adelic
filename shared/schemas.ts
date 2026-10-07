@@ -44,6 +44,7 @@ import {
   HOOK_TIMEOUT_MAX,
   HOOK_TIMEOUT_MIN,
 } from './hooks.js';
+import { PASSWORD_MAX, PASSWORD_MIN, USERNAME_MAX, USERNAME_MIN, usernameProblem } from './remote-access.js';
 
 // Request schemas shared by the server routes (and usable by the UI). Each field keeps
 // the exact error message the API returned before zod, so clients see no change.
@@ -268,6 +269,7 @@ export const SettingsPatchSchema = z.object({
     `autoCompactTokens deve ser um inteiro entre ${AUTO_COMPACT_MIN_TOKENS} e ${AUTO_COMPACT_MAX_TOKENS}`,
   ),
   terminalRemote: optional(z.boolean(), 'terminalRemote deve ser booleano'),
+  internetManualApproval: optional(z.boolean(), 'internetManualApproval deve ser booleano'),
   automations: optional(z.boolean(), 'automations deve ser booleano'),
   spendLimits: optional(SpendLimitsPatchSchema, SPEND_LIMITS_MESSAGE),
 });
@@ -587,3 +589,18 @@ export const GitDiffQuerySchema = z.object({
   path: required(z.string().min(1).max(4096), 'path obrigatório'),
   staged: optional(z.enum(['0', '1', 'true', 'false']), 'staged inválido'),
 });
+
+// Remote login (docs/specs/remote-access.md). Only accepted from this computer.
+export const RemoteAccountSchema = z
+  .object({
+    username: required(
+      z.string().refine((value) => !usernameProblem(value)),
+      `username: ${USERNAME_MIN} a ${USERNAME_MAX} caracteres, só letras minúsculas, números, ponto, hífen e sublinhado`,
+    ),
+    password: required(
+      z.string().min(PASSWORD_MIN).max(PASSWORD_MAX),
+      `password: de ${PASSWORD_MIN} a ${PASSWORD_MAX} caracteres`,
+    ),
+  })
+  .strict();
+export const RemoteFunnelSchema = z.object({ enabled: required(z.boolean(), 'enabled deve ser booleano') }).strict();

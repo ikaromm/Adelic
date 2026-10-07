@@ -4,7 +4,7 @@ import { SettingsPatchSchema, SkillPatchSchema, UsageQuerySchema, parseBody } fr
 import { usageReport } from '../usage.js';
 import { mergeLimits } from './validation.js';
 import { checkForUpdate } from '../updates.js';
-import { isLoopbackRequest } from './auth.js';
+import { LOCAL_ONLY, requestKind } from './auth.js';
 import { error } from './common.js';
 import type { BackendContext } from './context.js';
 
@@ -13,9 +13,16 @@ export function settingsRoutes({ store, automations }: BackendContext) {
   app.patch('/api/settings', (req, res) => {
     const parsed = parseBody(SettingsPatchSchema, req.body, 'Configuração inválida');
     if (!parsed.ok) return error(res, 400, parsed.message);
-    // The remote terminal opt-in cannot be granted from the remote side itself.
-    if (parsed.data.terminalRemote !== undefined && !isLoopbackRequest(req))
-      return error(res, 403, 'Esta opção só pode ser alterada neste computador, não pelo acesso remoto');
+    // Remote-access options cannot be changed from the remote side itself; from the internet
+    // the global automations switch is refused too (docs/specs/remote-access.md).
+    const kind = requestKind(req);
+    if (
+      kind !== 'local' &&
+      (parsed.data.terminalRemote !== undefined || parsed.data.internetManualApproval !== undefined)
+    )
+      return error(res, 403, LOCAL_ONLY);
+    if (kind === 'internet' && parsed.data.automations !== undefined)
+      return error(res, 403, 'Automações não podem ser alteradas pelo acesso pela internet.');
     // Unknown keys are ignored, as before; only defined fields change.
     const { spendLimits, ...rest } = parsed.data;
     const patch = Object.fromEntries(Object.entries(rest).filter(([, value]) => value !== undefined));

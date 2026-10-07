@@ -527,7 +527,7 @@ kbd {
   padding: 24px;
   background: var(--app-bg);
 }
-.remote-gate form {
+.remote-gate :is(form, section) {
   display: grid;
   gap: 12px;
   width: min(380px, 100%);

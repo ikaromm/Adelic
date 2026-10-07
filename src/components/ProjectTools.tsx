@@ -9,7 +9,8 @@ import {
   type ProjectCoordination,
   projectOrchestration,
 } from '../../shared/contracts';
-import { graphStatusName, shortDate, taskStatusName } from '../labels';
+import { graphStatusName, taskStatusName } from '../labels';
+import { useI18n } from '../i18n';
 
 export function ProjectTools({
   project,
@@ -42,6 +43,7 @@ export function ProjectTools({
   onIndexGraphify: () => void;
   onRefreshProject: () => void;
 }) {
+  const { t, fmt } = useI18n();
   const config = projectOrchestration(project);
   const [briefExpanded, setBriefExpanded] = useState(false);
   const [briefClipped, setBriefClipped] = useState(false);
@@ -77,27 +79,20 @@ export function ProjectTools({
             <Bot size={17} />
           </div>
           <div>
-            <h2>Orquestração do projeto</h2>
-            <p>
-              {project.name} · as mudanças valem no próximo turno. O agente da conversa coordena; executores usam
-              contexto curto.
-            </p>
+            <h2>{t('projectTools.orchestration.title')}</h2>
+            <p>{t('projectTools.orchestration.detail', { project: project.name })}</p>
           </div>
         </div>
         <div className="setting-row">
           <div>
-            <strong>Delegar tarefas</strong>
-            <span>
-              {config.enabled
-                ? 'Agente da conversa coordena os executores'
-                : 'Mensagens seguem direto para o agente da conversa'}
-            </span>
+            <strong>{t('projectTools.delegate.title')}</strong>
+            <span>{config.enabled ? t('projectTools.delegate.on') : t('projectTools.delegate.off')}</span>
           </div>
           <button
             className={`toggle ${config.enabled ? 'on' : ''}`}
             role="switch"
             aria-checked={config.enabled}
-            aria-label="Ativar orquestração do projeto"
+            aria-label={t('projectTools.delegate.label')}
             onClick={() => onOrchestration({ enabled: !config.enabled })}
           >
             <span />
@@ -107,8 +102,8 @@ export function ProjectTools({
           <>
             <div className="setting-row">
               <div>
-                <strong>Executores simultâneos</strong>
-                <span>Limite de tarefas em paralelo</span>
+                <strong>{t('projectTools.workers.title')}</strong>
+                <span>{t('projectTools.workers.detail')}</span>
               </div>
               <select
                 value={config.maxWorkers}
@@ -116,21 +111,23 @@ export function ProjectTools({
                   onOrchestration({ maxWorkers: Number(event.target.value) as OrchestrationConfig['maxWorkers'] })
                 }
               >
-                <option value="1">1 executor</option>
-                <option value="2">2 executores</option>
-                <option value="3">3 executores</option>
+                {[1, 2, 3].map((count) => (
+                  <option key={count} value={count}>
+                    {t('projectTools.workers', { count })}
+                  </option>
+                ))}
               </select>
             </div>
             <div className="setting-row">
               <div>
-                <strong>Revisão independente</strong>
-                <span>Solicitar revisão quando o trabalho exigir</span>
+                <strong>{t('projectTools.review.title')}</strong>
+                <span>{t('projectTools.review.detail')}</span>
               </div>
               <button
                 className={`toggle ${config.review ? 'on' : ''}`}
                 role="switch"
                 aria-checked={config.review}
-                aria-label="Ativar revisão independente"
+                aria-label={t('projectTools.review.label')}
                 onClick={() => onOrchestration({ review: !config.review })}
               >
                 <span />
@@ -142,7 +139,7 @@ export function ProjectTools({
                 const selectedProvider = isWorker ? config.workerProviderId : config.reviewerProviderId;
                 const selectedModel = isWorker ? config.workerModel : config.reviewerModel;
                 const models = modelOptions(selectedProvider);
-                const title = isWorker ? 'Executor' : 'Revisor';
+                const title = isWorker ? t('projectTools.role.worker') : t('projectTools.role.reviewer');
                 return (
                   <div className="project-agent-card" key={role}>
                     <strong>{title}</strong>
@@ -166,17 +163,18 @@ export function ProjectTools({
                           )
                         }
                       >
-                        <option value="">Herdar agente da conversa</option>
+                        <option value="">{t('projectTools.inheritAgent')}</option>
                         {data.providers.map((provider) => (
                           <option key={provider.id} value={provider.id}>
-                            {provider.name}
-                            {provider.available ? '' : ' · indisponível'}
+                            {provider.available
+                              ? provider.name
+                              : t('projectTools.providerUnavailable', { provider: provider.name })}
                           </option>
                         ))}
                       </select>
                     </label>
                     <label>
-                      Modelo
+                      {t('projectTools.model')}
                       <select
                         value={selectedModel || ''}
                         onChange={(event) =>
@@ -187,7 +185,7 @@ export function ProjectTools({
                           )
                         }
                       >
-                        <option value="">Padrão do agente</option>
+                        <option value="">{t('projectTools.defaultModel')}</option>
                         {models.map((model) => (
                           <option key={model.id} value={model.id}>
                             {model.name}
@@ -198,9 +196,9 @@ export function ProjectTools({
                     <small>
                       {selectedProvider
                         ? providerFor(selectedProvider)?.available
-                          ? 'Catálogo descoberto neste computador'
-                          : 'Agente indisponível neste computador'
-                        : `Herdado da conversa (${providerFor()?.name || coordinatorProviderId})`}
+                          ? t('projectTools.catalogFound')
+                          : t('projectTools.agentUnavailable')
+                        : t('projectTools.inherited', { provider: providerFor()?.name || coordinatorProviderId })}
                     </small>
                   </div>
                 );
@@ -210,11 +208,11 @@ export function ProjectTools({
         )}
         <div className="project-overview">
           <div className="project-overview-heading">
-            <strong>Contexto do coordenador</strong>
+            <strong>{t('projectTools.context.title')}</strong>
             <button
               className="icon-button"
-              title="Atualizar visão do projeto"
-              aria-label="Atualizar visão do projeto"
+              title={t('projectTools.context.refresh')}
+              aria-label={t('projectTools.context.refresh')}
               onClick={onRefreshProject}
             >
               <RefreshCw size={14} />
@@ -223,10 +221,10 @@ export function ProjectTools({
           {coordination?.brief ? (
             <>
               <p ref={objectiveRef} className={`brief-objective ${briefExpanded ? 'expanded' : ''}`}>
-                {coordination.brief.objective || 'Objetivo ainda não registrado.'}
+                {coordination.brief.objective || t('projectTools.context.noObjective')}
               </p>
               <p ref={summaryRef} className={`brief-summary ${briefExpanded ? 'expanded' : ''}`}>
-                {coordination.brief.summary || 'Sem resumo disponível.'}
+                {coordination.brief.summary || t('projectTools.context.noSummary')}
               </p>
               {(briefExpanded || briefClipped) && (
                 <button
@@ -235,23 +233,25 @@ export function ProjectTools({
                   aria-expanded={briefExpanded}
                   onClick={() => setBriefExpanded((value) => !value)}
                 >
-                  {briefExpanded ? 'Mostrar menos' : 'Mostrar resumo completo'}
+                  {briefExpanded ? t('projectTools.context.showLess') : t('projectTools.context.showMore')}
                 </button>
               )}
               <div className="brief-paths">
                 {coordination.brief.paths.slice(0, 8).map((path) => (
                   <code key={path}>{path}</code>
                 ))}
-                {coordination.brief.paths.length > 8 && <span>+{coordination.brief.paths.length - 8} caminhos</span>}
+                {coordination.brief.paths.length > 8 && (
+                  <span>{t('projectTools.context.morePaths', { count: coordination.brief.paths.length - 8 })}</span>
+                )}
               </div>
-              {coordination.brief.truncated && <small>Mapa limitado ao contexto relevante.</small>}
+              {coordination.brief.truncated && <small>{t('projectTools.context.truncated')}</small>}
             </>
           ) : (
-            <p className="muted-empty">Ainda não há mapa ou resumo do projeto.</p>
+            <p className="muted-empty">{t('projectTools.context.empty')}</p>
           )}
           {coordination?.tasks.length ? (
             <div className="recent-project-tasks">
-              <strong>Tarefas recentes</strong>
+              <strong>{t('projectTools.context.recentTasks')}</strong>
               {coordination.tasks.slice(0, 4).map((task) => (
                 <div key={task.id}>
                   <span className={`run-status-dot ${task.status}`} />
@@ -270,20 +270,20 @@ export function ProjectTools({
             <GitBranch size={17} />
           </div>
           <div>
-            <h2>Mapa de código (Graphify)</h2>
-            <p>Índice local usado como mapa inicial pelo coordenador e pelos executores.</p>
+            <h2>{t('projectTools.graph.title')}</h2>
+            <p>{t('projectTools.graph.detail')}</p>
           </div>
         </div>
         <div className="setting-row">
           <div>
-            <strong>Usar mapa do projeto</strong>
-            <span>O índice contém estrutura de código, sem enviar arquivos para fora.</span>
+            <strong>{t('projectTools.graph.use')}</strong>
+            <span>{t('projectTools.graph.useDetail')}</span>
           </div>
           <button
             className={`toggle ${graphEnabled ? 'on' : ''}`}
             role="switch"
             aria-checked={graphEnabled}
-            aria-label="Ativar mapa do projeto"
+            aria-label={t('projectTools.graph.label')}
             onClick={() => onGraphifyEnabled(!graphEnabled)}
             disabled={projectBusy}
           >
@@ -297,10 +297,16 @@ export function ProjectTools({
           <strong>{graphStatusName(status)}</strong>
           <span>
             {graphifyStatus?.nodes != null && graphifyStatus.edges != null
-              ? `${graphifyStatus.nodes} nós · ${graphifyStatus.edges} relações`
-              : graphifyStatus?.detail || (graphEnabled ? 'Aguardando estado do índice.' : 'Desativado')}
+              ? t('projectTools.graph.counts', {
+                  nodes: graphifyStatus.nodes,
+                  edges: graphifyStatus.edges,
+                })
+              : graphifyStatus?.detail ||
+                (graphEnabled ? t('projectTools.graph.waiting') : t('projectTools.graph.disabled'))}
           </span>
-          {graphifyStatus?.updatedAt && <small>Atualizado {shortDate(graphifyStatus.updatedAt)}</small>}
+          {graphifyStatus?.updatedAt && (
+            <small>{t('projectTools.graph.updated', { date: fmt.shortDate(graphifyStatus.updatedAt) })}</small>
+          )}
         </div>
         {graphifyStatus?.detail && graphifyStatus.status !== 'ready' && (
           <p className="graph-detail">{graphifyStatus.detail}</p>
@@ -312,39 +318,40 @@ export function ProjectTools({
             disabled={!graphEnabled || projectBusy || status === 'indexing'}
           >
             {projectBusy ? <LoaderCircle className="spin" size={13} /> : <RefreshCw size={13} />}
-            {status === 'ready' || status === 'stale' ? 'Indexar novamente' : 'Criar índice'}
+            {status === 'ready' || status === 'stale' ? t('projectTools.graph.reindex') : t('projectTools.graph.index')}
           </button>
         </div>
         {graphEnabled && (
           <form className="graph-query" onSubmit={onProjectQuery}>
-            <label htmlFor="graph-query-input">Consultar mapa</label>
+            <label htmlFor="graph-query-input">{t('projectTools.graph.query')}</label>
             <div>
               <input
                 id="graph-query-input"
                 value={projectQuery}
                 onChange={(event) => onProjectQueryChange(event.target.value)}
-                placeholder="Ex.: onde ficam as rotas da API?"
+                placeholder={t('projectTools.graph.queryPlaceholder')}
               />
               <button
                 type="submit"
                 className="secondary-button"
                 disabled={projectBusy || !projectQuery.trim() || status !== 'ready'}
               >
-                {projectBusy ? <LoaderCircle className="spin" size={13} /> : <Search size={13} />}Consultar
+                {projectBusy ? <LoaderCircle className="spin" size={13} /> : <Search size={13} />}
+                {t('projectTools.graph.querySubmit')}
               </button>
             </div>
           </form>
         )}
         {graphQueryResult && (
           <div className="graph-query-result">
-            <strong>Resultado para “{graphQueryResult.query}”</strong>
+            <strong>{t('projectTools.graph.result', { query: graphQueryResult.query })}</strong>
             {graphQueryResult.context ? (
               <pre>
                 {graphQueryResult.context.slice(0, 1800)}
                 {graphQueryResult.context.length > 1800 ? '\n…' : ''}
               </pre>
             ) : (
-              <p>O Graphify não retornou contexto para esta consulta.</p>
+              <p>{t('projectTools.graph.noContext')}</p>
             )}
           </div>
         )}

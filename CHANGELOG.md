@@ -2,6 +2,7 @@
 
 ## Não publicado
 
+- Fila de mensagens enquanto o agente trabalha: Enter coloca na fila (editável, salva no servidor) e a próxima começa quando a resposta termina; cancelamento ou falha pausam a fila até **Retomar fila**. Ctrl+Enter envia agora, interrompendo após confirmação, e no Codex é possível orientar o turno em andamento. Veja [fila de mensagens](docs/specs/message-queue.md).
 - Repetição automática de falhas temporárias (tempo esgotado, conexão interrompida, modelo sobrecarregado), com espera crescente e até 2 novas tentativas, só quando a tentativa não exibiu texto, não executou ferramenta nem pediu aprovação. Falhas mostram o motivo e um botão **Tentar de novo**; configurável em Configurações. Veja [repetição automática](docs/specs/retries.md).
 - Busca em todas as conversas (títulos e mensagens, sem diferenciar acentos) com Ctrl+Shift+F, e exportação da conversa aberta em Markdown ou JSON.
 - Tokens por execução, quando o provedor informa (Codex informa; custo continua "não informado", nunca zero).

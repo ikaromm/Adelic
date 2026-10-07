@@ -27,7 +27,7 @@ export class ClaudeProvider {
         status: hasProviderBinaryOverride('claude') ? 'error' : 'missing',
         detail: providerBinaryMissingDetail('claude'),
         models: [],
-        capabilities: { fast: true, tools: true, approvals: false, cancel: true, reasoning: true },
+        capabilities: { fast: true, tools: true, approvals: false, cancel: true, reasoning: true, steer: false },
       });
     const result = await this.commands.run(this.binary, ['auth', 'status', '--json'], 4000);
     if (this.shuttingDown) return this.shutdownInfo();
@@ -47,7 +47,7 @@ export class ClaudeProvider {
         ? 'Claude Code instalado; autenticação verificada.'
         : 'Claude Code instalado, mas não autenticado no runtime.',
       models: [],
-      capabilities: { fast: true, tools: true, approvals: false, cancel: true, reasoning: true },
+      capabilities: { fast: true, tools: true, approvals: false, cancel: true, reasoning: true, steer: false },
     });
   }
   private cache(value: ProviderInfo) {
@@ -63,7 +63,7 @@ export class ClaudeProvider {
       status: 'error',
       detail: 'Claude Code provider is shutting down.',
       models: [],
-      capabilities: { fast: true, tools: true, approvals: false, cancel: true, reasoning: true },
+      capabilities: { fast: true, tools: true, approvals: false, cancel: true, reasoning: true, steer: false },
     };
   }
 

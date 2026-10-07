@@ -5,7 +5,9 @@ import type {
   Approval,
   DelegatedTask,
   Message,
+  MessageQueue,
   Project,
+  QueuedMessage,
   ProviderEvent,
   ProviderInfo,
   ProviderRegistry,
@@ -40,6 +42,9 @@ import {
   type RetryProgress,
 } from './retry.js';
 
+type Started = { runId: string; messageId: string };
+const cancelledError = (message: string) => Object.assign(new Error(message), { status: 409, cancelled: true });
+
 interface StartingRun {
   clientMessageId?: string;
   controller: AbortController;
@@ -58,6 +63,10 @@ export class Orchestrator {
   private writingProjects = new Set<string>();
   private writeQueues = new Map<string, Promise<void>>();
   private reservedProjectWrites = new Map<string, string>();
+  /** Queue drains in progress, per session (at most one at a time). */
+  private drains = new Map<string, Promise<{ itemId: string; result: Started } | undefined>>();
+  /** "Enviar agora": the queued item that replaces the run being cancelled. */
+  private interrupting = new Map<string, string>();
   constructor(
     readonly store: Store,
     private readonly providers: ProviderRegistry,
@@ -106,12 +115,7 @@ export class Orchestrator {
     if (this.shuttingDown) throw Object.assign(new Error('Orquestrador está encerrando'), { status: 503 });
     if (clientMessageId) {
       const existing = this.store.findClientMessage(session.id, clientMessageId);
-      if (existing)
-        return {
-          runId: existing,
-          messageId:
-            this.store.listMessages(session.id).find((m) => m.runId === existing && m.role === 'user')?.id ?? '',
-        };
+      if (existing) return this.startedResult(session.id, existing);
     }
     const pending = this.starting.get(session.id);
     if (pending) {
@@ -136,13 +140,11 @@ export class Orchestrator {
     this.starting.set(session.id, reservation);
     try {
       const startingSettings = structuredClone(this.store.getSettings()!);
-      if (controller.signal.aborted)
-        throw Object.assign(new Error('Execução cancelada antes de iniciar'), { status: 409 });
+      if (controller.signal.aborted) throw cancelledError('Execução cancelada antes de iniciar');
       const initialThinking = session.thinking;
       const catalog = initialThinking && initialThinking !== 'auto' ? await this.providerList() : undefined;
       if (this.shuttingDown) throw Object.assign(new Error('Orquestrador está encerrando'), { status: 503 });
-      if (controller.signal.aborted)
-        throw Object.assign(new Error('Execução cancelada antes de iniciar'), { status: 409 });
+      if (controller.signal.aborted) throw cancelledError('Execução cancelada antes de iniciar');
       // Re-read after discovery. PATCH is blocked by this reservation, and using the
       // stored snapshot here prevents an older request object from overwriting it.
       const latest = this.store.getSession(session.id);
@@ -229,6 +231,12 @@ export class Orchestrator {
       if (this.starting.get(session.id) === reservation) this.starting.delete(session.id);
       reservation.finish();
     }
+  }
+  private startedResult(sessionId: string, runId: string): Started {
+    return {
+      runId,
+      messageId: this.store.listMessages(sessionId).find((m) => m.runId === runId && m.role === 'user')?.id ?? '',
+    };
   }
   isActive(sessionId: string) {
     return this.active.has(sessionId) || this.starting.has(sessionId);
@@ -466,6 +474,7 @@ export class Orchestrator {
       this.active.delete(session.id);
       this.emit({ type: 'message', message: assistant });
       this.emit({ type: 'run', run });
+      this.afterRun(session.id, run);
     }
   }
   private async executeCoordinated(
@@ -1112,6 +1121,194 @@ export class Orchestrator {
     } finally {
       this.deciding.delete(approvalId);
     }
+  }
+  // ---- Message queue (docs/specs/message-queue.md) ----
+  queue(sessionId: string): MessageQueue {
+    return this.store.getQueue(sessionId);
+  }
+  private emitQueue(sessionId: string) {
+    this.emit({ type: 'queue', queue: this.store.getQueue(sessionId) });
+  }
+  private requireSession(sessionId: string) {
+    const session = this.store.getSession(sessionId);
+    if (!session) throw Object.assign(new Error('Conversa não encontrada'), { status: 404 });
+    return session;
+  }
+  /** A pause only means something while items wait; an empty queue never stays paused. */
+  private clearPauseIfEmpty(sessionId: string) {
+    const queue = this.store.getQueue(sessionId);
+    if (queue.paused && !queue.items.length) this.store.setQueuePause(sessionId, null);
+  }
+  /**
+   * Adds a message to the queue. When the conversation is idle and the queue is not
+   * paused it starts right away, so a run that ends just before the request loses nothing.
+   */
+  async enqueue(sessionId: string, content: string, clientId?: string) {
+    this.requireSession(sessionId);
+    // A retried request whose item already left the queue and started.
+    const startedRun = clientId ? this.store.findClientMessage(sessionId, clientId) : undefined;
+    if (startedRun) return { item: undefined, started: this.startedResult(sessionId, startedRun) };
+    const item = this.store.enqueue({
+      id: randomUUID(),
+      sessionId,
+      content,
+      ...(clientId ? { clientId } : {}),
+      createdAt: new Date().toISOString(),
+    });
+    this.emitQueue(sessionId);
+    const started = await this.drain(sessionId);
+    return { item, started: started && started.itemId === item.id ? started.result : undefined };
+  }
+  editQueued(sessionId: string, itemId: string, content: string) {
+    this.requireSession(sessionId);
+    const item = this.store.updateQueued(sessionId, itemId, content);
+    if (!item) throw Object.assign(new Error('Mensagem não está mais na fila'), { status: 404 });
+    this.emitQueue(sessionId);
+    return item;
+  }
+  removeQueued(sessionId: string, itemId: string) {
+    this.requireSession(sessionId);
+    if (!this.store.removeQueued(sessionId, itemId))
+      throw Object.assign(new Error('Mensagem não está mais na fila'), { status: 404 });
+    this.clearPauseIfEmpty(sessionId);
+    this.emitQueue(sessionId);
+  }
+  /** "Retomar fila": clears the pause and starts the next item when nothing is running. */
+  async resumeQueue(sessionId: string) {
+    this.requireSession(sessionId);
+    this.store.setQueuePause(sessionId, null);
+    this.emitQueue(sessionId);
+    const started = await this.drain(sessionId);
+    return { queue: this.store.getQueue(sessionId), started: started?.result };
+  }
+  /**
+   * "Enviar agora (interrompe)": runs `content` (or the queued `itemId`) next. With a run
+   * active it is cancelled first; the rest of the queue keeps its order and pause state.
+   */
+  async sendNow(sessionId: string, input: { content: string; clientId?: string } | { itemId: string }) {
+    this.requireSession(sessionId);
+    let itemId: string;
+    if ('itemId' in input) {
+      if (!this.store.listQueue(sessionId).some((i) => i.id === input.itemId))
+        throw Object.assign(new Error('Mensagem não está mais na fila'), { status: 404 });
+      itemId = input.itemId;
+    } else {
+      itemId = this.store.enqueue(
+        {
+          id: randomUUID(),
+          sessionId,
+          content: input.content,
+          ...(input.clientId ? { clientId: input.clientId } : {}),
+          createdAt: new Date().toISOString(),
+        },
+        { front: true, ignoreLimit: true },
+      ).id;
+      this.emitQueue(sessionId);
+    }
+    if (!this.isActive(sessionId)) return { started: (await this.drain(sessionId, itemId))?.result };
+    this.interrupting.set(sessionId, itemId);
+    const starting = this.starting.get(sessionId);
+    await this.cancel(sessionId).catch(() => undefined);
+    if (starting) {
+      // Cancelled before it became a run: no execute() will finish it, so start here.
+      await starting.done;
+      await this.drains.get(sessionId);
+      if (!this.isActive(sessionId) && this.interrupting.get(sessionId) === itemId) {
+        this.interrupting.delete(sessionId);
+        return { started: (await this.drain(sessionId, itemId))?.result };
+      }
+    }
+    return { started: undefined };
+  }
+  /**
+   * "Orientar": sends a queued message into the active turn (Codex `turn/steer`) and
+   * removes it from the queue; the run keeps going. Fails with 409 when nothing can steer.
+   */
+  async steerQueued(sessionId: string, itemId: string) {
+    this.requireSession(sessionId);
+    const item = this.store.listQueue(sessionId).find((i) => i.id === itemId);
+    if (!item) throw Object.assign(new Error('Mensagem não está mais na fila'), { status: 404 });
+    const active = this.active.get(sessionId);
+    if (!active) throw Object.assign(new Error('Não há execução ativa'), { status: 409 });
+    if (!this.providers.steer)
+      throw Object.assign(new Error('Nenhum agente aceita orientação durante a execução'), { status: 409 });
+    try {
+      await this.providers.steer(active.runId, item.content);
+    } catch (e) {
+      throw Object.assign(new Error(errorText(e)), { status: 409 });
+    }
+    this.store.removeQueued(sessionId, itemId);
+    this.clearPauseIfEmpty(sessionId);
+    this.emitQueue(sessionId);
+    this.publishEvent(sessionId, active.runId, 'status', `Orientação enviada ao agente: ${item.content.slice(0, 200)}`);
+  }
+  /** Called once a run has fully finished: continue, or pause the queue for the user. */
+  private afterRun(sessionId: string, run: Run) {
+    try {
+      const itemId = this.interrupting.get(sessionId);
+      this.interrupting.delete(sessionId);
+      if (this.shuttingDown) return;
+      if (itemId) {
+        void this.drain(sessionId, itemId);
+        return;
+      }
+      const queue = this.store.getQueue(sessionId);
+      if (!queue.items.length) return;
+      if (run.status === 'completed') {
+        void this.drain(sessionId);
+        return;
+      }
+      if (!queue.paused) {
+        this.store.setQueuePause(sessionId, {
+          reason: run.status === 'cancelled' ? 'cancelled' : run.status === 'interrupted' ? 'interrupted' : 'failed',
+          at: new Date().toISOString(),
+          ...(run.error ? { error: run.error.slice(0, 500) } : {}),
+        });
+        this.emitQueue(sessionId);
+      }
+    } catch {
+      /* The queue must never break the end of a run; the user can resume by hand. */
+    }
+  }
+  /**
+   * Starts the next queued message (or `itemId`, ignoring a pause) when the session is idle.
+   * A start that fails puts the item back at the front and pauses the queue.
+   */
+  private drain(sessionId: string, itemId?: string): Promise<{ itemId: string; result: Started } | undefined> {
+    const running = this.drains.get(sessionId);
+    if (running) return running.then(() => (this.isActive(sessionId) ? undefined : this.drain(sessionId, itemId)));
+    const work = (async () => {
+      if (this.shuttingDown || this.isActive(sessionId)) return undefined;
+      const session = this.store.getSession(sessionId);
+      if (!session || session.activeRunId) return undefined;
+      if (!itemId && this.store.getQueue(sessionId).paused) return undefined;
+      const item: QueuedMessage | undefined = this.store.takeQueued(sessionId, itemId);
+      if (!item) return undefined;
+      this.clearPauseIfEmpty(sessionId);
+      this.emitQueue(sessionId);
+      try {
+        const result = await this.start(session, item.content, item.clientId ?? item.id);
+        return { itemId: item.id, result };
+      } catch (e) {
+        // Put the message back where it was, unless the conversation is gone.
+        if (!this.store.getSession(sessionId)) return undefined;
+        this.store.enqueue(item, { front: true, ignoreLimit: true });
+        const cancelled = (e as { cancelled?: boolean }).cancelled === true;
+        if (!this.interrupting.has(sessionId))
+          this.store.setQueuePause(sessionId, {
+            reason: cancelled ? 'cancelled' : 'failed',
+            at: new Date().toISOString(),
+            error: errorText(e).slice(0, 500),
+          });
+        this.emitQueue(sessionId);
+        return undefined;
+      }
+    })();
+    const tracked = work.finally(() => {
+      if (this.drains.get(sessionId) === tracked) this.drains.delete(sessionId);
+    });
+    this.drains.set(sessionId, tracked);
+    return tracked;
   }
   private retryPolicy(settings: Settings): RetryPolicy {
     const retries = settings.autoRetry === false ? 0 : DEFAULT_RETRY.retries;

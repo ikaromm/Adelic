@@ -9,7 +9,9 @@ import type {
   MemoryListing,
   MemoryPage,
   MemoryScope,
+  MessageQueue,
   Project,
+  QueuedMessage,
   ProjectCoordination,
   Session,
   SessionDetail,
@@ -130,6 +132,38 @@ export const api = {
     request<{ runId: string; messageId: string }>(`/api/sessions/${encodeURIComponent(id)}/messages`, {
       method: 'POST',
       body: JSON.stringify({ content, clientMessageId }),
+    }),
+  queue: (id: string) => request<MessageQueue>(`/api/sessions/${encodeURIComponent(id)}/queue`),
+  enqueue: (id: string, content: string, clientId: string) =>
+    request<{ item?: QueuedMessage; started?: { runId: string; messageId: string }; queue: MessageQueue }>(
+      `/api/sessions/${encodeURIComponent(id)}/queue`,
+      { method: 'POST', body: JSON.stringify({ content, clientId }) },
+    ),
+  editQueued: (id: string, itemId: string, content: string) =>
+    request<QueuedMessage>(`/api/sessions/${encodeURIComponent(id)}/queue/${encodeURIComponent(itemId)}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ content }),
+    }),
+  removeQueued: (id: string, itemId: string) =>
+    // The origin guard requires a JSON body on every mutation, DELETE included.
+    request<void>(`/api/sessions/${encodeURIComponent(id)}/queue/${encodeURIComponent(itemId)}`, {
+      method: 'DELETE',
+      body: JSON.stringify({}),
+    }),
+  resumeQueue: (id: string) =>
+    request<{ queue: MessageQueue }>(`/api/sessions/${encodeURIComponent(id)}/queue/resume`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    }),
+  steerQueued: (id: string, itemId: string) =>
+    request<{ queue: MessageQueue }>(
+      `/api/sessions/${encodeURIComponent(id)}/queue/${encodeURIComponent(itemId)}/steer`,
+      { method: 'POST', body: JSON.stringify({}) },
+    ),
+  sendNow: (id: string, body: { content: string; clientId: string } | { itemId: string }) =>
+    request<{ queue: MessageQueue }>(`/api/sessions/${encodeURIComponent(id)}/send-now`, {
+      method: 'POST',
+      body: JSON.stringify(body),
     }),
   cancel: (id: string) => request<void>(`/api/sessions/${encodeURIComponent(id)}/cancel`, { method: 'POST' }),
   approve: (id: string, decision: 'approve' | 'deny') =>

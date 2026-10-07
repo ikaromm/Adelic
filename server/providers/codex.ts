@@ -204,7 +204,7 @@ export class CodexProvider {
         status: hasProviderBinaryOverride('codex') ? 'error' : 'missing',
         detail: providerBinaryMissingDetail('codex'),
         models: [],
-        capabilities: { fast: true, tools: true, approvals: true, cancel: true, reasoning: true },
+        capabilities: { fast: true, tools: true, approvals: true, cancel: true, reasoning: true, steer: true },
       });
     const result = await this.commands.run(this.binary, ['login', 'status'], 3000);
     if (this.shuttingDown) return this.shutdownInfo();
@@ -233,7 +233,7 @@ export class CodexProvider {
       detail: `${authDetail}${available ? modelNote : ''}`,
       models,
       defaultModel: models.find((model) => model.isDefault)?.id,
-      capabilities: { fast: true, tools: true, approvals: true, cancel: true, reasoning: true },
+      capabilities: { fast: true, tools: true, approvals: true, cancel: true, reasoning: true, steer: true },
     };
     return this.cacheInfo(value);
   }
@@ -302,7 +302,7 @@ export class CodexProvider {
       status: 'error',
       detail: 'Codex provider is shutting down.',
       models: [],
-      capabilities: { fast: true, tools: true, approvals: true, cancel: true, reasoning: true },
+      capabilities: { fast: true, tools: true, approvals: true, cancel: true, reasoning: true, steer: true },
     };
   }
   private async serverArgs(cwd: string, profile: CodexToolProfile) {
@@ -884,6 +884,33 @@ export class CodexProvider {
     } finally {
       if (ownedServer) await this.cleanupServer(ownedServer);
     }
+  }
+  /**
+   * Adds user input to the running turn with app-server `turn/steer` (verified in
+   * codex-cli 0.160.0's protocol: threadId, input, expectedTurnId). Coordinated runs
+   * use `<runId>:<taskId>`; only a single unambiguous turn is steered.
+   */
+  async steer(runId: string, content: string): Promise<boolean> {
+    const turns = [...this.turns.values()].filter(
+      (turn) => (turn.input.runId === runId || turn.input.runId.startsWith(`${runId}:`)) && !turn.signal.aborted,
+    );
+    if (!turns.length) return false;
+    if (turns.length > 1)
+      throw new Error('Há mais de uma tarefa do Codex em andamento; não é possível orientar uma só.');
+    const turn = turns[0];
+    if (!turn.threadId || !turn.turnId) throw new Error('O Codex ainda não iniciou este turno; tente em instantes.');
+    const rpc = turn.server.rpc;
+    if (!rpc) throw new Error('Codex app-server não está disponível.');
+    await rpc.request(
+      'turn/steer',
+      {
+        threadId: turn.threadId,
+        expectedTurnId: turn.turnId,
+        input: [{ type: 'text', text: content, text_elements: [] }],
+      },
+      10_000,
+    );
+    return true;
   }
   async approve(approvalId: string, decision: 'approve' | 'deny') {
     const pending = this.approvals.get(approvalId);

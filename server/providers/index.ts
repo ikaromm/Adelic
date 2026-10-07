@@ -4,7 +4,11 @@ import { ClaudeProvider } from './claude';
 import { KiroProvider } from './kiro';
 import { OpenCodeProvider } from './opencode';
 
-type Provider = Pick<ProviderRegistry, 'run' | 'approve' | 'shutdown'> & { info(): Promise<ProviderInfo> };
+type Provider = Pick<ProviderRegistry, 'run' | 'approve' | 'shutdown'> & {
+  info(): Promise<ProviderInfo>;
+  /** Returns false when this provider has no steerable turn for the run. */
+  steer?(runId: string, content: string): Promise<boolean>;
+};
 
 export function createProviderRegistry(
   dataDir?: string,
@@ -56,6 +60,12 @@ export function createProviderRegistry(
       if (!owner) throw new Error('Aprovação não está mais pendente.');
       await providers[owner].approve(approvalId, decision);
       approvalOwners.delete(approvalId);
+    },
+    async steer(runId, content) {
+      // A run may span several providers (coordinator and workers); ask the ones that can steer.
+      for (const provider of Object.values(providers))
+        if (provider.steer && (await provider.steer(runId, content))) return;
+      throw new Error('A etapa atual desta execução não aceita orientação; use Enviar agora.');
     },
     async shutdown() {
       await Promise.all([

@@ -593,6 +593,11 @@ rl.on('line', (line) => {
     if (message.params.input[0].text.includes('wait for cancellation')) return;
     send({ jsonrpc: '2.0', method: 'item/agentMessage/delta', params: { threadId: 'thread-1', delta: 'fake streamed answer' } });
     send({ jsonrpc: '2.0', method: 'turn/completed', params: { threadId: 'thread-1', turn: { id: turnId, status: 'completed' } } });
+  } else if (message.method === 'turn/steer') {
+    if (message.params.expectedTurnId !== turnId) { send({ jsonrpc: '2.0', id: message.id, error: { code: -32600, message: 'expected turn mismatch' } }); return; }
+    send({ jsonrpc: '2.0', id: message.id, result: { turnId } });
+    send({ jsonrpc: '2.0', method: 'item/agentMessage/delta', params: { threadId: 'thread-1', delta: 'steered: ' + message.params.input[0].text } });
+    send({ jsonrpc: '2.0', method: 'turn/completed', params: { threadId: 'thread-1', turn: { id: turnId, status: 'completed' } } });
   } else if (message.method === 'turn/interrupt') {
     send({ jsonrpc: '2.0', id: message.id, result: {} });
     send({ jsonrpc: '2.0', method: 'turn/completed', params: { threadId: 'thread-1', turn: { id: turnId, status: 'interrupted' } } });
@@ -1234,6 +1239,25 @@ rl.on('line', (line) => {
     await new Promise((resolve) => setTimeout(resolve, 40));
     controller.abort();
     await expect(running).resolves.toMatchObject({ stopReason: 'cancelled' });
+    await provider.shutdown();
+  });
+
+  it('steers the active turn with turn/steer and the native turn id', async () => {
+    const binary = await fakeServer();
+    const provider = fixtureCodex(binary);
+    expect(await provider.steer('run-1', 'nada ativo')).toBe(false);
+    const running = provider.run(runInput('wait for cancellation'), () => undefined, new AbortController().signal);
+    // Wait until the turn has its native id (turn/start answered).
+    for (let i = 0; i < 100; i++) {
+      try {
+        if (await provider.steer('run-1', 'mude o foco')) break;
+      } catch (error) {
+        if (!/ainda não iniciou/.test((error as Error).message)) throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    await expect(running).resolves.toMatchObject({ stopReason: 'completed', text: 'steered: mude o foco' });
+    expect(await provider.steer('run-2', 'outra execução')).toBe(false);
     await provider.shutdown();
   });
 

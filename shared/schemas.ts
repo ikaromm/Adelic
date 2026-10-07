@@ -92,6 +92,19 @@ export const SendMessageSchema = z.object({
   content: required(text(32000), 'content obrigatório (máximo 32000 caracteres)'),
   clientMessageId: optional(text(128), 'clientMessageId inválido'),
 });
+export const QueueMessageSchema = z.object({
+  content: required(text(32000), 'content obrigatório (máximo 32000 caracteres)'),
+  clientId: optional(text(128), 'clientId inválido'),
+});
+export const QueueEditSchema = z.object({
+  content: required(text(32000), 'content obrigatório (máximo 32000 caracteres)'),
+});
+/** "Enviar agora": new text (`content`) or a queued item (`itemId`); the route requires exactly one. */
+export const SendNowSchema = z.object({
+  content: optional(text(32000), 'content obrigatório (máximo 32000 caracteres)'),
+  clientId: optional(text(128), 'clientId inválido'),
+  itemId: optional(text(128), 'itemId inválido'),
+});
 export const ApprovalDecisionSchema = z.object({
   decision: required(z.enum(['approve', 'deny']), 'decision deve ser approve ou deny'),
 });

@@ -20,7 +20,7 @@ export class OpenCodeProvider {
         status: hasProviderBinaryOverride('opencode') ? 'error' : 'missing',
         detail: providerBinaryMissingDetail('opencode'),
         models: [],
-        capabilities: { fast: false, tools: false, approvals: false, cancel: false, reasoning: false },
+        capabilities: { fast: false, tools: false, approvals: false, cancel: false, reasoning: false, steer: false },
       });
 
     const providers = await this.commands.run(this.binary, ['providers', 'list', '--pure'], 4000);
@@ -53,7 +53,7 @@ export class OpenCodeProvider {
       status: 'unknown',
       detail,
       models,
-      capabilities: { fast: false, tools: false, approvals: false, cancel: false, reasoning: false },
+      capabilities: { fast: false, tools: false, approvals: false, cancel: false, reasoning: false, steer: false },
     });
   }
   private save(value: ProviderInfo) {
@@ -69,7 +69,7 @@ export class OpenCodeProvider {
       status: 'error',
       detail: 'OpenCode provider is shutting down.',
       models: [],
-      capabilities: { fast: false, tools: false, approvals: false, cancel: false, reasoning: false },
+      capabilities: { fast: false, tools: false, approvals: false, cancel: false, reasoning: false, steer: false },
     };
   }
   async run(_input: RunInput, _emit: (event: ProviderEvent) => void, _signal: AbortSignal): Promise<RunResult> {

@@ -96,7 +96,15 @@ export interface ProviderInfo {
     isDefault?: boolean;
   }[];
   defaultModel?: string;
-  capabilities: { fast: boolean; tools: boolean; approvals: boolean; cancel: boolean; reasoning?: boolean };
+  capabilities: {
+    fast: boolean;
+    tools: boolean;
+    approvals: boolean;
+    cancel: boolean;
+    reasoning?: boolean;
+    /** Accepts extra user input during an active turn (Codex `turn/steer`). Absent means no. */
+    steer?: boolean;
+  };
 }
 export interface Session {
   id: string;
@@ -169,6 +177,28 @@ export interface Approval {
   kind: 'command' | 'file' | 'tool';
   status: 'pending' | 'approved' | 'denied';
 }
+/** A message waiting for the active run of its conversation to finish. */
+export interface QueuedMessage {
+  id: string;
+  sessionId: string;
+  content: string;
+  /** Idempotency key from the client; reused as the message's clientMessageId when it starts. */
+  clientId?: string;
+  createdAt: string;
+  updatedAt?: string;
+}
+/** Why the queue stopped starting messages on its own; cleared by "Retomar fila". */
+export interface QueuePause {
+  reason: 'cancelled' | 'failed' | 'interrupted';
+  at: string;
+  error?: string;
+}
+export interface MessageQueue {
+  sessionId: string;
+  items: QueuedMessage[];
+  paused?: QueuePause;
+}
+export const QUEUE_LIMIT = 20;
 export interface RunEvent {
   id: string;
   runId: string;
@@ -266,6 +296,7 @@ export type StreamEvent =
   | { type: 'run'; run: Run }
   | { type: 'session'; session: Session }
   | { type: 'task'; task: DelegatedTask }
+  | { type: 'queue'; queue: MessageQueue }
   | { type: 'refresh' };
 
 // Server-side provider contract. Each adapter owns its subprocess and pending approvals.
@@ -302,5 +333,7 @@ export interface ProviderRegistry {
   list(): Promise<ProviderInfo[]>;
   run(input: RunInput, emit: (event: ProviderEvent) => void, signal: AbortSignal): Promise<RunResult>;
   approve(approvalId: string, decision: 'approve' | 'deny'): Promise<void>;
+  /** Sends extra input to the single active turn of `runId`; absent when no provider supports it. */
+  steer?(runId: string, content: string): Promise<void>;
   shutdown(): Promise<void>;
 }

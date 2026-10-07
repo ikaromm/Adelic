@@ -93,6 +93,21 @@ export const migrations: Migration[] = [
         END;`);
     },
   },
+  // Version 3 is reserved by a parallel branch; gaps are fine, pending versions run in order.
+  {
+    version: 4,
+    description: 'Fila de mensagens por conversa e estado de pausa da fila',
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS message_queue(
+          id TEXT PRIMARY KEY, session_id TEXT NOT NULL, position INTEGER NOT NULL, data TEXT NOT NULL,
+          FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE);
+        CREATE INDEX IF NOT EXISTS message_queue_session ON message_queue(session_id, position);
+        CREATE TABLE IF NOT EXISTS message_queue_state(
+          session_id TEXT PRIMARY KEY, data TEXT NOT NULL,
+          FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE);`);
+    },
+  },
 ];
 
 export const schemaVersion = migrations.at(-1)!.version;

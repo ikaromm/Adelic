@@ -133,7 +133,7 @@ export class KiroProvider {
         status: hasProviderBinaryOverride('kiro') ? 'error' : 'missing',
         detail: providerBinaryMissingDetail('kiro'),
         models: [],
-        capabilities: { fast: true, tools: true, approvals: true, cancel: true, reasoning: true },
+        capabilities: { fast: true, tools: true, approvals: true, cancel: true, reasoning: true, steer: false },
       });
     const [result, authResult] = await Promise.all([
       this.commands.run(this.binary, ['chat', '--list-models', '--format', 'json'], 6000),
@@ -157,7 +157,7 @@ export class KiroProvider {
       detail,
       models,
       defaultModel,
-      capabilities: { fast: true, tools: true, approvals: true, cancel: true, reasoning: true },
+      capabilities: { fast: true, tools: true, approvals: true, cancel: true, reasoning: true, steer: false },
     });
   }
   private cache(value: ProviderInfo) {
@@ -173,7 +173,7 @@ export class KiroProvider {
       status: 'error',
       detail: 'Kiro provider is shutting down.',
       models: [],
-      capabilities: { fast: true, tools: true, approvals: true, cancel: true, reasoning: true },
+      capabilities: { fast: true, tools: true, approvals: true, cancel: true, reasoning: true, steer: false },
     };
   }
 

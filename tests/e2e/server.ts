@@ -4,6 +4,7 @@
 // The fake provider reacts to a marker in the current message:
 //   [aprovar] → asks for approval, then answers with the decision
 //   [lento]   → streams slowly until cancelled
+//   [medio]   → streams for about two seconds, then completes (message queue flows)
 //   [normal] or no marker → streams a short Markdown answer with a code block
 import { createServer } from 'node:http';
 import { mkdtempSync } from 'node:fs';
@@ -58,8 +59,9 @@ const providers: ProviderRegistry = {
     }
     const current = (input.prompt.split('Pedido atual:').at(-1) ?? input.prompt).split('\n\nMensagens recentes')[0];
     const marker =
-      ['[aprovar]', '[lento]', '[normal]', '[instavel]', '[quebra]'].find((m) => current.toLowerCase().includes(m)) ??
-      '';
+      ['[aprovar]', '[lento]', '[medio]', '[normal]', '[instavel]', '[quebra]'].find((m) =>
+        current.toLowerCase().includes(m),
+      ) ?? '';
     try {
       // Fails once with a timeout before any output, then answers: retried automatically.
       if (marker === '[instavel]') {
@@ -91,6 +93,14 @@ const providers: ProviderRegistry = {
           emit({ type: 'delta', text: '.' });
         }
         return { text, stopReason: 'completed' };
+      }
+      if (marker === '[medio]') {
+        for (let i = 0; i < 20; i++) {
+          await sleep(100, signal);
+          emit({ type: 'delta', text: '-' });
+        }
+        emit({ type: 'delta', text: ' Resposta média concluída.' });
+        return { text: '-'.repeat(20) + ' Resposta média concluída.', stopReason: 'completed' };
       }
       const chunks = ['Resposta **E2E** pronta.\n\n', '```ts\n', 'const soma = 2 + 2;\n', '```\n'];
       for (const chunk of chunks) {

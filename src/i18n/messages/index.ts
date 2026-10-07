@@ -1,8 +1,25 @@
 // UI catalog areas (docs/i18n.md): exactly one line per area, kept alphabetical.
+export { default as activity } from './activity';
+export { default as app } from './app';
+export { default as attachments } from './attachments';
 export { default as auth } from './auth';
+export { default as branch } from './branch';
+export { default as changes } from './changes';
+export { default as chat } from './chat';
 export { default as common } from './common';
+export { default as compaction } from './compaction';
 export { default as composer } from './composer';
+export { default as handoff } from './handoff';
+export { default as labels } from './labels';
 export { default as memorysettings } from './memorySettings';
+export { default as mentions } from './mentions';
+export { default as notifications } from './notifications';
+export { default as palette } from './palette';
+export { default as plans } from './plans';
+export { default as queue } from './queue';
+export { default as search } from './search';
 export { default as settings } from './settings';
 export { default as shell } from './shell';
 export { default as sidebar } from './sidebar';
+export { default as slash } from './slash';
+export { default as voice } from './voice';

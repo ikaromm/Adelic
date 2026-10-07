@@ -3,6 +3,7 @@ import { Check, FileText, GitBranch, Pencil, X } from 'lucide-react';
 import type { AttachmentMeta, Message, Session } from '../../shared/contracts';
 import { formatBytes } from '../../shared/attachments';
 import { api } from '../api';
+import { useI18n } from '../i18n';
 
 // Edit and resend a user message, and branch a conversation (docs/specs/edit-branch.md).
 
@@ -19,6 +20,7 @@ export function MessageEditActions({
   onEdit: () => void;
   onBranch: () => void;
 }) {
+  const { t } = useI18n();
   const branchBusy = message.status === 'running';
   return (
     <>
@@ -26,8 +28,8 @@ export function MessageEditActions({
         <button
           type="button"
           className="copy-button message-action"
-          aria-label="Editar"
-          title={disabledReason ?? 'Editar e reenviar'}
+          aria-label={t('branch.edit')}
+          title={disabledReason ?? t('branch.editTitle')}
           disabled={Boolean(disabledReason)}
           onClick={onEdit}
         >
@@ -37,8 +39,8 @@ export function MessageEditActions({
       <button
         type="button"
         className="copy-button message-action"
-        aria-label="Ramificar daqui"
-        title={branchBusy ? 'Aguarde a resposta terminar' : 'Ramificar daqui: nova conversa até esta mensagem'}
+        aria-label={t('branch.branch')}
+        title={branchBusy ? t('branch.branchBusy') : t('branch.branchTitle')}
         disabled={branchBusy}
         onClick={onBranch}
       >
@@ -67,6 +69,7 @@ export function MessageEditor({
   /** Resolves true when the server accepted the edit. */
   onSave: (content: string, attachments: AttachmentMeta[]) => Promise<boolean>;
 }) {
+  const { t, locale } = useI18n();
   const [draft, setDraft] = useState(message.content);
   const [kept, setKept] = useState<AttachmentMeta[]>(message.attachments ?? []);
   const [confirming, setConfirming] = useState(false);
@@ -85,13 +88,12 @@ export function MessageEditor({
     if (laterCount > 0) setConfirming(true);
     else void save();
   };
-  const plural = laterCount === 1 ? 'a mensagem seguinte' : `as ${laterCount} mensagens seguintes`;
   return (
     <div className="message-editor">
       <textarea
         className="message-editor-input"
         value={draft}
-        aria-label="Editar mensagem"
+        aria-label={t('branch.input')}
         autoFocus
         rows={Math.min(8, Math.max(2, draft.split('\n').length))}
         maxLength={32000}
@@ -111,7 +113,7 @@ export function MessageEditor({
         }}
       />
       {kept.length > 0 && (
-        <ul className="attachment-chips message-editor-attachments" aria-label="Anexos da mensagem">
+        <ul className="attachment-chips message-editor-attachments" aria-label={t('branch.attachments')}>
           {kept.map((attachment) => (
             <li key={attachment.id} className="attachment-chip">
               {attachment.mime.startsWith('image/') ? (
@@ -123,13 +125,13 @@ export function MessageEditor({
                 <span className="attachment-name" title={attachment.name}>
                   {attachment.name}
                 </span>
-                <small>{formatBytes(attachment.size)}</small>
+                <small>{formatBytes(attachment.size, locale)}</small>
               </span>
               <button
                 type="button"
                 className="icon-button attachment-remove"
-                aria-label={`Remover anexo ${attachment.name}`}
-                title="Remover"
+                aria-label={t('branch.removeAttachment', { name: attachment.name })}
+                title={t('branch.remove')}
                 disabled={saving}
                 onClick={() => setKept((list) => list.filter((item) => item.id !== attachment.id))}
               >
@@ -140,16 +142,14 @@ export function MessageEditor({
         </ul>
       )}
       {confirming ? (
-        <div className="message-editor-confirm" role="alertdialog" aria-label="Confirmar edição">
-          <span>
-            Reenviar descarta {plural} desta conversa. O agente recomeça com o histórico anterior a esta mensagem.
-          </span>
+        <div className="message-editor-confirm" role="alertdialog" aria-label={t('branch.confirm')}>
+          <span>{t('branch.confirmText', { count: laterCount })}</span>
           <div className="message-editor-actions">
             <button type="button" className="secondary-button" onClick={() => setConfirming(false)} disabled={saving}>
-              Voltar
+              {t('branch.back')}
             </button>
             <button type="button" className="danger-button" onClick={() => void save()} disabled={blocked}>
-              <Check size={14} /> Descartar e reenviar
+              <Check size={14} /> {t('branch.discardResend')}
             </button>
           </div>
         </div>
@@ -157,10 +157,10 @@ export function MessageEditor({
         <div className="message-editor-actions">
           {disabledReason && <small className="message-editor-hint">{disabledReason}</small>}
           <button type="button" className="ghost-button" onClick={onCancel} disabled={saving}>
-            Cancelar
+            {t('branch.cancel')}
           </button>
           <button type="button" className="primary-button" onClick={request} disabled={blocked}>
-            <Check size={14} /> Salvar e reenviar
+            <Check size={14} /> {t('branch.saveResend')}
           </button>
         </div>
       )}
@@ -178,17 +178,18 @@ export function BranchOrigin({
   sessions: Session[];
   onOpen: (id: string) => void;
 }) {
+  const { t } = useI18n();
   const origin = session.branchedFrom && sessions.find((item) => item.id === session.branchedFrom?.sessionId);
   if (!origin) return null;
   return (
     <button
       type="button"
       className="link-button branch-origin"
-      title={`Abrir a conversa original: ${origin.title}`}
+      title={t('branch.originTitle', { title: origin.title })}
       onClick={() => onOpen(origin.id)}
     >
       <GitBranch size={13} aria-hidden="true" />
-      <span>Ramo de {origin.title}</span>
+      <span>{t('branch.origin', { title: origin.title })}</span>
     </button>
   );
 }

@@ -1,12 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import {
-  MAX_VOICE_SECONDS,
-  VOICE_INSECURE_CONTEXT,
-  VOICE_MIMES,
-  voiceMime,
-  type VoiceStatus,
-} from '../../shared/voice';
+import { MAX_VOICE_SECONDS, VOICE_MIMES, voiceMime, type VoiceStatus } from '../../shared/voice';
 import { api } from '../api';
+import { t } from '../i18n';
 
 export type DictationState = 'idle' | 'recording' | 'transcribing';
 
@@ -15,10 +10,10 @@ export function dictationBlocker(
   status: VoiceStatus | undefined,
   env: { secure: boolean; media: boolean; recorder: boolean },
 ): string | undefined {
-  if (!status) return 'Verificando o ditado por voz…';
-  if (!status.available) return status.reason || 'Ditado indisponível';
-  if (!env.secure) return VOICE_INSECURE_CONTEXT;
-  if (!env.media || !env.recorder) return 'Este navegador não permite gravar áudio';
+  if (!status) return t('voice.checking');
+  if (!status.available) return status.reason || t('voice.unavailable');
+  if (!env.secure) return t('voice.insecure');
+  if (!env.media || !env.recorder) return t('voice.noRecorder');
   return undefined;
 }
 
@@ -41,17 +36,16 @@ function blobBase64(blob: Blob) {
   return new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(String(reader.result).replace(/^data:[^,]*,/, ''));
-    reader.onerror = () => reject(new Error('Não foi possível ler o áudio gravado.'));
+    reader.onerror = () => reject(new Error(t('voice.readFailed')));
     reader.readAsDataURL(blob);
   });
 }
 
 function micError(e: unknown) {
   const name = (e as { name?: string } | null)?.name;
-  if (name === 'NotAllowedError' || name === 'SecurityError')
-    return 'O acesso ao microfone foi negado. Libere-o nas permissões e tente de novo.';
-  if (name === 'NotFoundError') return 'Nenhum microfone encontrado.';
-  return `Não foi possível usar o microfone: ${(e as Error)?.message || 'erro desconhecido'}`;
+  if (name === 'NotAllowedError' || name === 'SecurityError') return t('voice.micDenied');
+  if (name === 'NotFoundError') return t('voice.noMic');
+  return t('voice.micFailed', { reason: (e as Error)?.message || t('voice.unknownError') });
 }
 
 interface Recording {
@@ -90,7 +84,9 @@ export function useVoiceDictation({
     api
       .voiceStatus()
       .then(setStatus)
-      .catch((e: Error) => setStatus({ available: false, reason: `Ditado indisponível: ${e.message}` }));
+      .catch((e: Error) =>
+        setStatus({ available: false, reason: t('voice.unavailableReason', { reason: e.message }) }),
+      );
   }, []);
   useEffect(() => {
     if (enabled) refreshStatus();
@@ -114,7 +110,7 @@ export function useVoiceDictation({
     const blocked = dictationBlocker(status, browserEnv());
     if (blocked) return callbacks.current.onError(blocked);
     const mime = recorderMime((m) => MediaRecorder.isTypeSupported(m));
-    if (!mime) return callbacks.current.onError('Este navegador não grava áudio em um formato aceito.');
+    if (!mime) return callbacks.current.onError(t('voice.noFormat'));
     let stream: MediaStream;
     try {
       stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
@@ -151,7 +147,7 @@ export function useVoiceDictation({
       const blob = new Blob(rec.chunks, { type });
       if (!blob.size) {
         setState('idle');
-        return callbacks.current.onError('Nenhum áudio foi gravado.');
+        return callbacks.current.onError(t('voice.noAudio'));
       }
       setState('transcribing');
       const controller = new AbortController();
@@ -160,7 +156,7 @@ export function useVoiceDictation({
         .then((data) => api.transcribe({ mime: type, data }, controller.signal))
         .then(({ text }) => {
           if (text.trim()) callbacks.current.onText(text.trim());
-          else callbacks.current.onError('Nenhuma fala reconhecida no áudio.');
+          else callbacks.current.onError(t('voice.noSpeech'));
         })
         .catch((e: Error) => {
           if (!controller.signal.aborted) callbacks.current.onError(e.message);

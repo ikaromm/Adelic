@@ -19,22 +19,23 @@ import {
 import type { Plan, PlanTask } from '../../shared/contracts';
 import { Markdown } from '../Markdown';
 import type { usePlans } from '../hooks/usePlans';
+import { t, useI18n, type MessageKey } from '../i18n';
 
 type PlansApi = ReturnType<typeof usePlans>;
 
-const planStatusLabel: Record<Plan['status'], string> = {
-  draft: 'Rascunho',
-  approved: 'Aprovado',
-  executing: 'Executando',
-  done: 'Concluído',
-  rejected: 'Descartado',
+const planStatusLabel: Record<Plan['status'], MessageKey> = {
+  draft: 'plans.status.draft',
+  approved: 'plans.status.approved',
+  executing: 'plans.status.executing',
+  done: 'plans.status.done',
+  rejected: 'plans.status.rejected',
 };
-export const planTaskStatusLabel: Record<PlanTask['status'], string> = {
-  pending: 'Pendente',
-  running: 'Em execução',
-  done: 'Concluída',
-  failed: 'Falhou',
-  skipped: 'Pulada',
+const planTaskStatusLabel: Record<PlanTask['status'], MessageKey> = {
+  pending: 'plans.task.pending',
+  running: 'plans.task.running',
+  done: 'plans.task.done',
+  failed: 'plans.task.failed',
+  skipped: 'plans.task.skipped',
 };
 const taskIcon: Record<PlanTask['status'], typeof Square> = {
   pending: Square,
@@ -46,10 +47,8 @@ const taskIcon: Record<PlanTask['status'], typeof Square> = {
 
 /** Counts for the card header ("1 de 2 tarefas concluídas"). */
 export function planProgress(plan: Plan) {
-  const finished = plan.tasks.filter((t) => t.status === 'done' || t.status === 'skipped').length;
-  return plan.tasks.length
-    ? `${finished} de ${plan.tasks.length} ${plan.tasks.length === 1 ? 'tarefa concluída' : 'tarefas concluídas'}`
-    : '';
+  const finished = plan.tasks.filter((task) => task.status === 'done' || task.status === 'skipped').length;
+  return plan.tasks.length ? t('plans.progress', { finished, count: plan.tasks.length }) : '';
 }
 
 /**
@@ -69,6 +68,7 @@ export function PlanCard({
   /** The conversation is linked to a project (saving needs a project folder). */
   canSave: boolean;
 }) {
+  const { t, tRich } = useI18n();
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(plan.markdown);
   const [pending, setPending] = useState('');
@@ -77,7 +77,7 @@ export function PlanCard({
   const closed = plan.status === 'rejected';
   const executing = plan.status === 'executing';
   const locked = busy || executing || Boolean(pending);
-  const runnable = plan.tasks.some((t) => t.status === 'pending' || t.status === 'failed');
+  const runnable = plan.tasks.some((task) => task.status === 'pending' || task.status === 'failed');
   const titleId = `plan-${plan.id}-title`;
   const run = async (key: string, work: () => Promise<unknown>) => {
     setPending(key);
@@ -92,7 +92,7 @@ export function PlanCard({
       const result = await api.save(plan.id, overwrite);
       if (result === 'exists') return setConfirmOverwrite(true);
       setConfirmOverwrite(false);
-      if (result) setSavedNote(`Salvo em ${result.path}`);
+      if (result) setSavedNote(t('plans.savedAt', { path: result.path }));
     });
   return (
     <section className={`plan-card ${plan.status}`} aria-labelledby={titleId}>
@@ -103,7 +103,7 @@ export function PlanCard({
         <div className="plan-card-heading">
           <strong id={titleId}>{plan.title}</strong>
           <span className="plan-card-meta">
-            <span className={`plan-status-badge ${plan.status}`}>{planStatusLabel[plan.status]}</span>
+            <span className={`plan-status-badge ${plan.status}`}>{t(planStatusLabel[plan.status])}</span>
             {planProgress(plan) && <span>{planProgress(plan)}</span>}
           </span>
         </div>
@@ -111,8 +111,8 @@ export function PlanCard({
           <button
             type="button"
             className="icon-button"
-            aria-label="Editar plano"
-            title="Editar o Markdown do plano"
+            aria-label={t('plans.edit')}
+            title={t('plans.editTitle')}
             disabled={locked}
             onClick={() => {
               setDraft(plan.markdown);
@@ -127,7 +127,7 @@ export function PlanCard({
       {editing ? (
         <div className="plan-editor">
           <label className="visually-hidden" htmlFor={`plan-${plan.id}-markdown`}>
-            Markdown do plano
+            {t('plans.markdown')}
           </label>
           <textarea
             id={`plan-${plan.id}-markdown`}
@@ -144,13 +144,10 @@ export function PlanCard({
               }
             }}
           />
-          <p className="plan-hint">
-            Use as seções “## Requisitos”, “## Design” e “## Tarefas”, com tarefas no formato <code>- [ ] …</code>.
-            Tarefas que não mudarem mantêm o estado.
-          </p>
+          <p className="plan-hint">{tRich('plans.editorHint', { format: <code>- [ ] …</code> })}</p>
           <div className="plan-actions">
             <button type="button" className="secondary-button" onClick={() => setEditing(false)}>
-              <X size={14} /> Cancelar
+              <X size={14} /> {t('plans.cancel')}
             </button>
             <button
               type="button"
@@ -162,7 +159,7 @@ export function PlanCard({
                 })
               }
             >
-              {pending === 'edit' ? <LoaderCircle className="spin" size={14} /> : <Check size={14} />} Salvar plano
+              {pending === 'edit' ? <LoaderCircle className="spin" size={14} /> : <Check size={14} />} {t('plans.save')}
             </button>
           </div>
         </div>
@@ -170,20 +167,20 @@ export function PlanCard({
         <div className="plan-body">
           {plan.requirements && (
             <details className="plan-section" open={plan.status === 'draft'}>
-              <summary>Requisitos</summary>
+              <summary>{t('plans.requirements')}</summary>
               <Markdown>{plan.requirements}</Markdown>
             </details>
           )}
           {plan.design && (
             <details className="plan-section" open={plan.status === 'draft'}>
-              <summary>Design</summary>
+              <summary>{t('plans.design')}</summary>
               <Markdown>{plan.design}</Markdown>
             </details>
           )}
           <div className="plan-section plan-tasks-section">
-            <h3 className="plan-section-title">Tarefas</h3>
+            <h3 className="plan-section-title">{t('plans.tasks')}</h3>
             {plan.tasks.length ? (
-              <ol className="plan-tasks" aria-label="Tarefas do plano">
+              <ol className="plan-tasks" aria-label={t('plans.tasksList')}>
                 {plan.tasks.map((task, index) => (
                   <PlanTaskRow
                     key={task.id}
@@ -196,7 +193,7 @@ export function PlanCard({
               </ol>
             ) : (
               <p className="plan-empty" role="status">
-                Não encontrei tarefas; edite o plano.
+                {t('plans.noTasks')}
               </p>
             )}
           </div>
@@ -214,7 +211,7 @@ export function PlanCard({
           {executing ? (
             plan.stopRequested ? (
               <span className="plan-hint" role="status">
-                Para depois da tarefa atual.
+                {t('plans.stopping')}
               </span>
             ) : (
               <button
@@ -223,7 +220,7 @@ export function PlanCard({
                 disabled={Boolean(pending)}
                 onClick={() => void run('stop', () => api.stop(plan.id))}
               >
-                <CircleStop size={14} /> Parar após a tarefa atual
+                <CircleStop size={14} /> {t('plans.stop')}
               </button>
             )
           ) : (
@@ -237,7 +234,7 @@ export function PlanCard({
                     onClick={() => void run('all', () => api.approve(plan.id, 'all'))}
                   >
                     {pending === 'all' ? <LoaderCircle className="spin" size={14} /> : <Play size={14} />}{' '}
-                    {plan.status === 'draft' ? 'Aprovar e executar' : 'Continuar execução'}
+                    {plan.status === 'draft' ? t('plans.approve') : t('plans.continue')}
                   </button>
                   <button
                     type="button"
@@ -245,7 +242,7 @@ export function PlanCard({
                     disabled={locked}
                     onClick={() => void run('next', () => api.approve(plan.id, 'next'))}
                   >
-                    <StepForward size={14} /> Executar só a próxima tarefa
+                    <StepForward size={14} /> {t('plans.next')}
                   </button>
                 </>
               )}
@@ -256,7 +253,7 @@ export function PlanCard({
                   disabled={Boolean(pending)}
                   onClick={() => void save(false)}
                 >
-                  <FileDown size={14} /> Salvar no projeto
+                  <FileDown size={14} /> {t('plans.saveToProject')}
                 </button>
               )}
               {plan.status !== 'done' && (
@@ -266,7 +263,7 @@ export function PlanCard({
                   disabled={locked}
                   onClick={() => void run('discard', () => api.discard(plan.id))}
                 >
-                  <Trash2 size={14} /> Descartar
+                  <Trash2 size={14} /> {t('plans.discard')}
                 </button>
               )}
             </>
@@ -274,17 +271,17 @@ export function PlanCard({
         </div>
       )}
       {confirmOverwrite && (
-        <div className="plan-confirm" role="alertdialog" aria-label="Substituir arquivo do plano?">
+        <div className="plan-confirm" role="alertdialog" aria-label={t('plans.overwrite')}>
           <span>
-            <strong>O arquivo já existe no projeto.</strong>
-            <small>Substituir apaga o conteúdo atual dele.</small>
+            <strong>{t('plans.overwriteTitle')}</strong>
+            <small>{t('plans.overwriteHint')}</small>
           </span>
           <div className="plan-actions">
             <button type="button" className="secondary-button" onClick={() => setConfirmOverwrite(false)}>
-              Manter o arquivo
+              {t('plans.keepFile')}
             </button>
             <button type="button" className="danger-button" disabled={Boolean(pending)} onClick={() => void save(true)}>
-              Substituir
+              {t('plans.replace')}
             </button>
           </div>
         </div>
@@ -309,6 +306,7 @@ function PlanTaskRow({
   disabled: boolean;
   onStatus: (status: 'skipped' | 'pending') => void;
 }) {
+  const { t } = useI18n();
   const Icon = taskIcon[task.status];
   return (
     <li className={`plan-task ${task.status}`}>
@@ -316,11 +314,11 @@ function PlanTaskRow({
         className={`plan-task-icon ${task.status === 'running' ? 'spin' : ''}`}
         size={15}
         role="img"
-        aria-label={planTaskStatusLabel[task.status]}
+        aria-label={t(planTaskStatusLabel[task.status])}
       />
       <div className="plan-task-text">
         <span>
-          <span className="visually-hidden">Tarefa {position}: </span>
+          <span className="visually-hidden">{t('plans.taskPosition', { position })}</span>
           {task.text}
         </span>
         {task.details && <small className="plan-task-details">{task.details}</small>}
@@ -330,8 +328,8 @@ function PlanTaskRow({
         <button
           type="button"
           className="icon-button"
-          aria-label={`Pular tarefa ${position}`}
-          title="Pular esta tarefa"
+          aria-label={t('plans.skip', { position })}
+          title={t('plans.skipTitle')}
           disabled={disabled}
           onClick={() => onStatus('skipped')}
         >
@@ -342,8 +340,8 @@ function PlanTaskRow({
         <button
           type="button"
           className="icon-button"
-          aria-label={`Voltar a tarefa ${position} para pendente`}
-          title="Voltar para pendente"
+          aria-label={t('plans.unskip', { position })}
+          title={t('plans.unskipTitle')}
           disabled={disabled}
           onClick={() => onStatus('pending')}
         >

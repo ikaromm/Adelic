@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { ArrowRightLeft, History, LoaderCircle, Sparkles, X } from 'lucide-react';
 import type { HandoffSummaryMode, ProviderInfo } from '../../shared/contracts';
+import { useI18n } from '../i18n';
 
 export interface HandoffTarget {
   providerId: ProviderInfo['id'];
@@ -35,6 +36,7 @@ export function HandoffDialog({
   onCancelRunning: () => void;
   onClose: () => void;
 }) {
+  const { t } = useI18n();
   const choices = providers.filter((p) => p.id !== currentProviderId);
   const firstAvailable = choices.find((p) => p.available) ?? choices[0];
   const [providerId, setProviderId] = useState(fixedTarget?.providerId ?? firstAvailable?.id);
@@ -48,6 +50,7 @@ export function HandoffDialog({
     setRunning(summary);
     onConfirm({ providerId: target.id, ...(model ? { model } : {}) }, summary);
   };
+  const currentName = current?.name ?? t('handoff.currentFallback');
   const close = () => (busy ? onCancelRunning() : onClose());
   return (
     <div
@@ -66,21 +69,21 @@ export function HandoffDialog({
             <ArrowRightLeft size={17} />
           </div>
           <div>
-            <h2 id="handoff-title">{fixedTarget ? 'Levar um resumo da conversa?' : 'Continuar com outro agente'}</h2>
+            <h2 id="handoff-title">{fixedTarget ? t('handoff.titleFixed') : t('handoff.title')}</h2>
             <p>
               {fixedTarget && target
-                ? `A conversa continua com ${target.name}. ${current?.name ?? 'O agente atual'} pode escrever um resumo para ele.`
-                : 'A conversa continua com o agente escolhido; o histórico fica visível aqui.'}
+                ? t('handoff.introFixed', { target: target.name, current: currentName })
+                : t('handoff.intro')}
             </p>
           </div>
-          <button type="button" className="icon-button" aria-label="Fechar" onClick={close}>
+          <button type="button" className="icon-button" aria-label={t('handoff.close')} onClick={close}>
             <X size={17} />
           </button>
         </div>
         {!fixedTarget && (
           <>
             <label>
-              Agente
+              {t('handoff.agent')}
               <select
                 value={providerId ?? ''}
                 disabled={busy}
@@ -91,16 +94,19 @@ export function HandoffDialog({
               >
                 {choices.map((p) => (
                   <option key={p.id} value={p.id} disabled={!p.available}>
-                    {p.name}
-                    {p.available ? '' : ' (indisponível)'}
+                    {p.available ? p.name : t('handoff.unavailable', { name: p.name })}
                   </option>
                 ))}
               </select>
             </label>
             <label>
-              Modelo
+              {t('handoff.model')}
               <select value={model} disabled={busy || !target} onChange={(event) => setModel(event.target.value)}>
-                <option value="">Modelo padrão{target?.defaultModel ? ` (${target.defaultModel})` : ''}</option>
+                <option value="">
+                  {target?.defaultModel
+                    ? t('handoff.defaultModelNamed', { model: target.defaultModel })
+                    : t('handoff.defaultModel')}
+                </option>
                 {target?.models.map((m) => (
                   <option key={m.id} value={m.id}>
                     {m.name}
@@ -110,7 +116,7 @@ export function HandoffDialog({
             </label>
           </>
         )}
-        <div className="handoff-options" role="group" aria-label="O que levar para o novo agente">
+        <div className="handoff-options" role="group" aria-label={t('handoff.options')}>
           <button
             type="button"
             className="choice-option"
@@ -120,11 +126,11 @@ export function HandoffDialog({
           >
             <Sparkles size={15} aria-hidden="true" />
             <span>
-              <b>Com resumo</b>
+              <b>{t('handoff.withSummary')}</b>
               <small>
                 {current?.available
-                  ? `${current.name} resume objetivo, estado, decisões e pendências, sem ferramentas.`
-                  : `${current?.name ?? 'O agente atual'} está indisponível; o Adelic monta um resumo local.`}
+                  ? t('handoff.summaryBy', { name: current.name })
+                  : t('handoff.summaryLocal', { name: currentName })}
               </small>
             </span>
             {busy && running === 'model' && <LoaderCircle className="spin" size={15} aria-hidden="true" />}
@@ -132,14 +138,14 @@ export function HandoffDialog({
           <button type="button" className="choice-option" disabled={!canConfirm} onClick={() => confirm('none')}>
             <History size={15} aria-hidden="true" />
             <span>
-              <b>Só o histórico recente</b>
-              <small>Sem chamada extra; o novo agente recebe as mensagens mais recentes.</small>
+              <b>{t('handoff.historyOnly')}</b>
+              <small>{t('handoff.historyHint')}</small>
             </span>
           </button>
         </div>
         {busy && running === 'model' && (
           <div className="modal-note" role="status">
-            <LoaderCircle className="spin" size={14} /> Escrevendo o resumo da conversa…
+            <LoaderCircle className="spin" size={14} /> {t('handoff.writing')}
           </div>
         )}
         {error && (
@@ -157,12 +163,12 @@ export function HandoffDialog({
               onConfirm({ providerId: target.id, ...(model ? { model } : {}) }, 'model', true);
             }}
           >
-            Continuar mesmo assim
+            {t('handoff.continueAnyway')}
           </button>
         )}
         <div className="modal-actions">
           <button type="button" className="secondary-button" onClick={close}>
-            Cancelar
+            {t('handoff.cancel')}
           </button>
         </div>
       </div>

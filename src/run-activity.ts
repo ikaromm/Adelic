@@ -1,4 +1,5 @@
 import type { DelegatedTask, FileChange, RunEvent, RunStatus } from '../shared/contracts';
+import { t } from './i18n';
 
 export interface RunActivity {
   tasks: DelegatedTask[];
@@ -82,10 +83,10 @@ export function activityIsVisible(activity: RunActivity): boolean {
 }
 
 export function commandTitle(toolName?: string): string {
-  if (toolName === 'commandExecution') return 'Execução de comando';
-  if (toolName === 'fileChange') return 'Alteração de arquivo';
-  if (toolName === 'mcpToolCall') return 'Uso de ferramenta';
-  return 'Ação do agente';
+  if (toolName === 'commandExecution') return t('activity.tool.command');
+  if (toolName === 'fileChange') return t('activity.tool.fileChange');
+  if (toolName === 'mcpToolCall') return t('activity.tool.mcp');
+  return t('activity.tool.other');
 }
 
 export function actionNeedsDisclosure(event: RunEvent): boolean {
@@ -112,11 +113,12 @@ export function commandPreview(text: string, maxLength = 240): string {
 }
 
 export function statusLabel(status?: string): string {
-  if (!status) return 'Registrada';
-  if (isActionInProgress(status)) return 'Em andamento';
-  return (
-    ({ completed: 'Concluída', failed: 'Falhou', cancelled: 'Cancelada' } as Record<string, string>)[status] || status
-  );
+  if (!status) return t('activity.status.recorded');
+  if (isActionInProgress(status)) return t('activity.status.inProgress');
+  if (status === 'completed') return t('activity.status.completed');
+  if (status === 'failed') return t('activity.status.failed');
+  if (status === 'cancelled') return t('activity.status.cancelled');
+  return status;
 }
 
 function isActionInProgress(status?: string): boolean {
@@ -131,7 +133,13 @@ function isActionInProgress(status?: string): boolean {
 
 export function runStatusLabel(status?: RunStatus): string | null {
   if (!status || status === 'completed') return null;
-  return { running: 'Em andamento', cancelled: 'Cancelada', interrupted: 'Interrompida', failed: 'Falhou' }[status];
+  const keys = {
+    running: 'activity.status.inProgress',
+    cancelled: 'activity.status.cancelled',
+    interrupted: 'activity.status.interrupted',
+    failed: 'activity.status.failed',
+  } as const;
+  return t(keys[status]);
 }
 
 /** "Alterou 3 arquivos (+12 −4)"; counts include files beyond the listed ones when known. */
@@ -139,7 +147,7 @@ export function changesSummary(files: FileChange[], omitted = 0): string {
   const count = files.length + omitted;
   const additions = files.reduce((sum, f) => sum + f.additions, 0);
   const deletions = files.reduce((sum, f) => sum + f.deletions, 0);
-  return `Alterou ${count} ${count === 1 ? 'arquivo' : 'arquivos'} (+${additions} \u2212${deletions})`;
+  return t('activity.changes', { count, additions, deletions });
 }
 
 export type DiffLineKind = 'add' | 'del' | 'hunk' | 'meta' | 'context';
@@ -168,7 +176,9 @@ export function checksSummary(checks: RunEvent[]): string {
   const statuses = checks.map((event) => event.check?.status);
   const failed = statuses.filter((status) => status === 'failed' || status === 'timeout' || status === 'error').length;
   const running = statuses.filter((status) => status === 'running').length;
-  const total = `${checks.length} ${checks.length === 1 ? 'verificação' : 'verificações'}`;
-  if (running) return `${total} · rodando`;
-  return failed ? `${total} · ${failed} ${failed === 1 ? 'falhou' : 'falharam'}` : `${total} ok`;
+  const total = t('activity.checks', { count: checks.length });
+  if (running) return t('activity.checksRunning', { checks: total });
+  return failed
+    ? t('activity.checksFailed', { checks: total, count: failed })
+    : t('activity.checksOk', { checks: total });
 }

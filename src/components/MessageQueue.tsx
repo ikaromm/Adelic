@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Check, CornerDownRight, ListPlus, Paperclip, Pencil, Play, X, Zap } from 'lucide-react';
 import type { QueuedMessage } from '../../shared/contracts';
 import { queuePauseLabel, type useMessageQueue } from '../hooks/useMessageQueue';
+import { useI18n } from '../i18n';
 
 type QueueApi = ReturnType<typeof useMessageQueue>;
 
@@ -22,6 +23,7 @@ export function MessageQueue({
   /** Called after "Enviar agora" of composer text was accepted, to clear the draft. */
   onSentNow: () => void;
 }) {
+  const { t } = useI18n();
   const queue = api.queue;
   const items = queue?.items ?? [];
   const confirming = api.confirming;
@@ -30,29 +32,27 @@ export function MessageQueue({
     confirming && 'itemId' in confirming ? items.find((item) => item.id === confirming.itemId) : undefined;
   const confirmingText = confirming ? ('content' in confirming ? confirming.content : confirmingItem?.content) : '';
   return (
-    <section className="message-queue" aria-label="Mensagens na fila">
+    <section className="message-queue" aria-label={t('queue.label')}>
       {items.length > 0 && (
         <div className="message-queue-header">
           <span className="message-queue-title">
-            <ListPlus size={14} aria-hidden="true" /> Na fila ({items.length})
+            <ListPlus size={14} aria-hidden="true" /> {t('queue.title', { count: items.length })}
           </span>
           {queue?.paused ? (
             <span className="message-queue-paused" role="status">
-              <strong>Fila pausada.</strong> {queuePauseLabel(queue)}
+              <strong>{t('queue.paused')}</strong> {queuePauseLabel(queue)}
             </span>
           ) : (
-            <span className="message-queue-hint">
-              {running ? 'Começa quando a resposta atual terminar.' : 'Iniciando a próxima mensagem…'}
-            </span>
+            <span className="message-queue-hint">{running ? t('queue.hint.running') : t('queue.hint.starting')}</span>
           )}
           {queue?.paused?.reason === 'limit' && (
             <button type="button" className="secondary-button" onClick={() => void api.resume(true)}>
-              Continuar mesmo assim
+              {t('queue.continueAnyway')}
             </button>
           )}
           {queue?.paused && (
             <button type="button" className="secondary-button" onClick={() => void api.resume()}>
-              <Play size={13} /> Retomar fila
+              <Play size={13} /> {t('queue.resume')}
             </button>
           )}
         </div>
@@ -65,14 +65,14 @@ export function MessageQueue({
         </ol>
       )}
       {confirming && confirmingText !== undefined && (
-        <div className="message-queue-confirm" role="alertdialog" aria-label="Confirmar envio imediato">
+        <div className="message-queue-confirm" role="alertdialog" aria-label={t('queue.confirm')}>
           <span>
-            <strong>Interromper a resposta atual e enviar agora?</strong>
+            <strong>{t('queue.confirmTitle')}</strong>
             <small>{preview(confirmingText, 120)}</small>
           </span>
           <div className="message-queue-confirm-actions">
             <button type="button" className="secondary-button" onClick={() => api.askSendNow(null)}>
-              Continuar esperando
+              {t('queue.keepWaiting')}
             </button>
             <button
               type="button"
@@ -83,7 +83,7 @@ export function MessageQueue({
                 })
               }
             >
-              <Zap size={13} /> Interromper e enviar
+              <Zap size={13} /> {t('queue.interruptSend')}
             </button>
           </div>
         </div>
@@ -105,6 +105,7 @@ function QueueChip({
   canSteer: boolean;
   api: QueueApi;
 }) {
+  const { t } = useI18n();
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(item.content);
   const save = async () => {
@@ -119,7 +120,7 @@ function QueueChip({
         <textarea
           className="queue-chip-input"
           value={draft}
-          aria-label={`Editar mensagem ${position} da fila`}
+          aria-label={t('queue.edit', { position })}
           autoFocus
           rows={2}
           maxLength={32000}
@@ -140,8 +141,8 @@ function QueueChip({
           <button
             type="button"
             className="icon-button"
-            aria-label="Cancelar edição"
-            title="Cancelar edição (Esc)"
+            aria-label={t('queue.cancelEdit')}
+            title={t('queue.cancelEditTitle')}
             onClick={() => {
               setDraft(item.content);
               setEditing(false);
@@ -152,8 +153,8 @@ function QueueChip({
           <button
             type="button"
             className="icon-button"
-            aria-label="Salvar mensagem da fila"
-            title="Salvar (Enter)"
+            aria-label={t('queue.save')}
+            title={t('queue.saveTitle')}
             disabled={!draft.trim()}
             onClick={() => void save()}
           >
@@ -174,7 +175,7 @@ function QueueChip({
         <span
           className="queue-chip-attachments"
           title={item.attachments.map((a) => a.name).join(', ')}
-          aria-label={`${item.attachments.length} ${item.attachments.length === 1 ? 'anexo' : 'anexos'}`}
+          aria-label={t('queue.attachments', { count: item.attachments.length })}
         >
           <Paperclip size={12} aria-hidden="true" />
           {item.attachments.length}
@@ -184,8 +185,8 @@ function QueueChip({
         <button
           type="button"
           className="icon-button"
-          aria-label={`Editar mensagem ${position} da fila`}
-          title="Editar"
+          aria-label={t('queue.edit', { position })}
+          title={t('queue.editTitle')}
           onClick={() => {
             setDraft(item.content);
             setEditing(true);
@@ -197,8 +198,8 @@ function QueueChip({
           <button
             type="button"
             className="icon-button"
-            aria-label={`Orientar o agente com a mensagem ${position}`}
-            title="Orientar agora: envia ao agente sem interromper"
+            aria-label={t('queue.steer', { position })}
+            title={t('queue.steerTitle')}
             onClick={() => void api.steer(item.id)}
           >
             <CornerDownRight size={13} />
@@ -207,8 +208,8 @@ function QueueChip({
         <button
           type="button"
           className="icon-button"
-          aria-label={`Enviar agora a mensagem ${position}`}
-          title={running ? 'Enviar agora (interrompe a resposta atual)' : 'Enviar agora'}
+          aria-label={t('queue.sendNow', { position })}
+          title={running ? t('queue.sendNowRunningTitle') : t('queue.sendNowTitle')}
           onClick={() => (running ? api.askSendNow({ itemId: item.id }) : void api.sendNow({ itemId: item.id }))}
         >
           <Zap size={13} />
@@ -216,8 +217,8 @@ function QueueChip({
         <button
           type="button"
           className="icon-button"
-          aria-label={`Remover mensagem ${position} da fila`}
-          title="Remover da fila"
+          aria-label={t('queue.remove', { position })}
+          title={t('queue.removeTitle')}
           onClick={() => void api.remove(item.id)}
         >
           <X size={14} />

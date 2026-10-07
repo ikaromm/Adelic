@@ -3,10 +3,23 @@
 // Nothing here touches the DOM, so it is unit tested directly.
 import type { CommandEntry } from '../../shared/commands';
 import type { Mode, Project, ProviderInfo, Session } from '../../shared/contracts';
+import { t, type MessageKey } from '../i18n';
 import { fold, fuzzyScore } from './fuzzy';
 
+/** Group ids (stable, also the pt-BR names); `groupLabel` gives the text in the current locale. */
 export const PALETTE_GROUPS = ['Ações', 'Conversas', 'Projetos', 'Agente', 'Modo', 'Comandos salvos'] as const;
 export type PaletteGroup = (typeof PALETTE_GROUPS)[number];
+const GROUP_LABELS: Record<PaletteGroup | 'Recentes', MessageKey> = {
+  Ações: 'palette.group.actions',
+  Conversas: 'palette.group.conversations',
+  Projetos: 'palette.group.projects',
+  Agente: 'palette.group.agent',
+  Modo: 'palette.group.mode',
+  'Comandos salvos': 'palette.group.commands',
+  Recentes: 'palette.group.recent',
+};
+/** Section heading of a group id in the current locale. */
+export const groupLabel = (group: PaletteGroup | 'Recentes') => t(GROUP_LABELS[group]);
 export type PaletteIcon =
   | 'new'
   | 'search'
@@ -71,16 +84,16 @@ export interface PaletteCallbacks {
   insertCommand: (name: string) => void;
 }
 
-const MODES: { value: Mode; label: string; detail: string }[] = [
-  { value: 'fast', label: 'Rápido', detail: 'Caminho curto com um executor' },
-  { value: 'auto', label: 'Auto', detail: 'Rota escolhida por regras locais' },
-  { value: 'deep', label: 'Completo', detail: 'Mais contexto e esforço' },
+const MODES: { value: Mode; label: MessageKey; detail: MessageKey }[] = [
+  { value: 'fast', label: 'palette.mode.fast', detail: 'palette.mode.fastDetail' },
+  { value: 'auto', label: 'palette.mode.auto', detail: 'palette.mode.autoDetail' },
+  { value: 'deep', label: 'palette.mode.deep', detail: 'palette.mode.deepDetail' },
 ];
-const NO_SESSION = 'Abra uma conversa primeiro';
-const RUNNING = 'Indisponível durante a execução';
 
 /** Every palette action for the current state. Disabled actions stay listed, with a reason. */
 export function buildActions(state: PaletteState, cb: PaletteCallbacks): PaletteAction[] {
+  const NO_SESSION = t('palette.noSession');
+  const RUNNING = t('palette.running');
   const mod = state.isMac ? '⌘' : 'Ctrl';
   const session = state.session;
   // Conversation settings: need an open conversation and no active run.
@@ -93,8 +106,8 @@ export function buildActions(state: PaletteState, cb: PaletteCallbacks): Palette
     {
       id: 'action:new',
       group: 'Ações',
-      label: 'Nova conversa',
-      detail: 'Conversa avulsa, sem projeto',
+      label: t('palette.new'),
+      detail: t('palette.newDetail'),
       icon: 'new',
       shortcut: [mod, 'K'],
       ariaShortcut: state.isMac ? 'Meta+K' : 'Control+K',
@@ -103,8 +116,8 @@ export function buildActions(state: PaletteState, cb: PaletteCallbacks): Palette
     {
       id: 'action:search',
       group: 'Ações',
-      label: 'Buscar em conversas',
-      detail: 'Títulos e mensagens',
+      label: t('palette.search'),
+      detail: t('palette.searchDetail'),
       icon: 'search',
       shortcut: [mod, 'Shift', 'F'],
       ariaShortcut: state.isMac ? 'Meta+Shift+F' : 'Control+Shift+F',
@@ -113,8 +126,8 @@ export function buildActions(state: PaletteState, cb: PaletteCallbacks): Palette
     {
       id: 'action:settings',
       group: 'Ações',
-      label: 'Abrir configurações',
-      keywords: 'preferencias ajustes',
+      label: t('palette.settings'),
+      keywords: t('palette.settingsKeywords'),
       icon: 'settings',
       current: state.page === 'settings',
       run: () => cb.goTo('settings'),
@@ -122,8 +135,8 @@ export function buildActions(state: PaletteState, cb: PaletteCallbacks): Palette
     {
       id: 'action:activity',
       group: 'Ações',
-      label: 'Abrir atividade',
-      keywords: 'execucoes historico',
+      label: t('palette.activity'),
+      keywords: t('palette.activityKeywords'),
       icon: 'activity',
       current: state.page === 'activity',
       run: () => cb.goTo('activity'),
@@ -131,8 +144,8 @@ export function buildActions(state: PaletteState, cb: PaletteCallbacks): Palette
     {
       id: 'action:automations',
       group: 'Ações',
-      label: 'Abrir automações',
-      keywords: 'agendamento agenda tarefas agendadas',
+      label: t('palette.automations'),
+      keywords: t('palette.automationsKeywords'),
       icon: 'automations',
       current: state.page === 'automations',
       run: () => cb.goTo('automations'),
@@ -140,7 +153,7 @@ export function buildActions(state: PaletteState, cb: PaletteCallbacks): Palette
     {
       id: 'action:memory',
       group: 'Ações',
-      label: 'Abrir memória',
+      label: t('palette.memory'),
       keywords: 'ai-memory',
       icon: 'memory',
       current: state.page === 'memory',
@@ -149,18 +162,18 @@ export function buildActions(state: PaletteState, cb: PaletteCallbacks): Palette
     {
       id: 'action:sidebar',
       group: 'Ações',
-      label: 'Alternar barra lateral',
-      detail: state.sidebarCollapsed ? 'Expandir navegação' : 'Recolher navegação',
-      keywords: 'navegacao menu',
+      label: t('palette.sidebar'),
+      detail: state.sidebarCollapsed ? t('palette.sidebarExpand') : t('palette.sidebarCollapse'),
+      keywords: t('palette.sidebarKeywords'),
       icon: 'sidebar',
       run: cb.toggleSidebar,
     },
     ...(['md', 'json'] as const).map((format): PaletteAction => ({
       id: `export:${format}`,
       group: 'Ações',
-      label: `Exportar conversa (${format === 'md' ? 'Markdown' : 'JSON'})`,
-      detail: format === 'md' ? 'Mensagens visíveis' : 'Detalhes completos',
-      keywords: 'baixar download',
+      label: format === 'md' ? t('palette.exportMd') : t('palette.exportJson'),
+      detail: format === 'md' ? t('palette.exportMdDetail') : t('palette.exportJsonDetail'),
+      keywords: t('palette.exportKeywords'),
       icon: 'export',
       ...(session ? {} : { disabled: true, disabledReason: NO_SESSION }),
       run: () => session && cb.exportConversation(session.id, format),
@@ -172,8 +185,8 @@ export function buildActions(state: PaletteState, cb: PaletteCallbacks): Palette
     actions.push({
       id: `conversation:${item.id}`,
       group: 'Conversas',
-      label: item.title || 'Nova conversa',
-      detail: item.projectId ? projectName.get(item.projectId) || 'Projeto' : 'Conversa avulsa',
+      label: item.title || t('palette.untitled'),
+      detail: item.projectId ? projectName.get(item.projectId) || t('palette.project') : t('palette.detached'),
       icon: 'conversation',
       current: item.id === session?.id && state.page === 'chat',
       run: () => cb.openConversation(item.id),
@@ -192,14 +205,14 @@ export function buildActions(state: PaletteState, cb: PaletteCallbacks): Palette
   for (const provider of state.providers) {
     const unavailable = provider.available
       ? {}
-      : { disabled: true, disabledReason: `${provider.name} indisponível neste computador` };
+      : { disabled: true, disabledReason: t('palette.providerUnavailable', { name: provider.name }) };
     const isProvider = session?.providerId === provider.id;
     actions.push({
       id: `model:${provider.id}`,
       group: 'Agente',
-      label: `${provider.name} · Modelo padrão`,
-      detail: provider.defaultModel || 'Padrão do provedor',
-      keywords: 'agente provedor modelo',
+      label: t('palette.defaultModel', { name: provider.name }),
+      detail: provider.defaultModel || t('palette.providerDefault'),
+      keywords: t('palette.agentKeywords'),
       icon: 'agent',
       current: isProvider && !session?.model,
       ...(lock.disabled ? lock : unavailable),
@@ -211,7 +224,7 @@ export function buildActions(state: PaletteState, cb: PaletteCallbacks): Palette
         group: 'Agente',
         label: `${provider.name} · ${model.name}`,
         detail: model.id,
-        keywords: 'agente provedor modelo',
+        keywords: t('palette.agentKeywords'),
         icon: 'agent',
         current: isProvider && session?.model === model.id,
         ...(lock.disabled ? lock : unavailable),
@@ -223,9 +236,9 @@ export function buildActions(state: PaletteState, cb: PaletteCallbacks): Palette
     actions.push({
       id: `mode:${mode.value}`,
       group: 'Modo',
-      label: mode.label,
-      detail: mode.detail,
-      keywords: 'modo execucao',
+      label: t(mode.label),
+      detail: t(mode.detail),
+      keywords: t('palette.modeKeywords'),
       icon: 'mode',
       current: session?.mode === mode.value,
       ...lock,
@@ -238,7 +251,7 @@ export function buildActions(state: PaletteState, cb: PaletteCallbacks): Palette
       group: 'Comandos salvos',
       label: `/${command.name}`,
       detail: command.description || undefined,
-      keywords: 'comando slash',
+      keywords: t('palette.commandKeywords'),
       icon: 'command',
       ...(session ? {} : { disabled: true, disabledReason: NO_SESSION }),
       run: () => cb.insertCommand(command.name),
@@ -264,7 +277,7 @@ const SECONDARY_PENALTY = 500;
 /** Score of an action for `query`, or null when it does not match. */
 export function scoreAction(action: PaletteAction, query: string): number | null {
   const label = fuzzyScore(query, action.label);
-  const haystack = `${action.group} ${action.label} ${action.detail ?? ''} ${action.keywords ?? ''}`;
+  const haystack = `${groupLabel(action.group)} ${action.label} ${action.detail ?? ''} ${action.keywords ?? ''}`;
   const tokens = fold(query).split(/\s+/).filter(Boolean);
   let secondary: number | null = 0;
   for (const token of tokens) {

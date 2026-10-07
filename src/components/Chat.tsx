@@ -17,7 +17,6 @@ import {
 import type { Bootstrap, DelegatedTask, Message, ModelRef, Run, RunEvent, SessionDetail } from '../../shared/contracts';
 import { isCapacityFailure } from '../../shared/model-fallback';
 import { CopyButton, Markdown } from '../Markdown';
-import { formatCost, formatDuration, formatTokens } from '../format';
 import { taskRoleName, taskStatusName, timeLabel } from '../labels';
 import { thinkingLabel } from '../reasoning';
 import {
@@ -31,6 +30,7 @@ import {
   statusLabel,
 } from '../run-activity';
 import { useNow } from '../useNow';
+import { catalogs, useI18n } from '../i18n';
 import { COMPACTING_TEXT } from '../../shared/compaction';
 import { MessageAttachments } from './ComposerAttachments';
 import { RunChanges } from './RunChanges';
@@ -65,6 +65,7 @@ export function MessageCard({
   /** Replaces a user message's bubble while it is being edited. */
   editor?: ReactNode;
 }) {
+  const { t } = useI18n();
   if (message.handoff) return <HandoffCard message={message} />;
   if (message.role === 'user')
     return (
@@ -76,17 +77,16 @@ export function MessageCard({
               <UserText content={message.content} />
             </div>
             <div className="message-meta">
-              {message.automationId && <span className="automation-badge">Automação</span>}
+              {message.automationId && <span className="automation-badge">{t('chat.automation')}</span>}
               <time dateTime={message.createdAt}>{timeLabel(message.createdAt)}</time>
-              <CopyButton text={message.content} label="Copiar mensagem" />
+              <CopyButton text={message.content} label={t('chat.copyMessage')} />
               {actions}
             </div>
           </>
         )}
       </div>
     );
-  const content =
-    message.content || (message.status === 'failed' ? 'A execução falhou antes de gerar uma resposta.' : '');
+  const content = message.content || (message.status === 'failed' ? t('chat.failedBeforeAnswer') : '');
   return (
     <div className="message-row assistant-row">
       <div className="message-author">
@@ -96,7 +96,9 @@ export function MessageCard({
         <strong>{providerName}</strong>
         {message.route && (
           <span className="route-pill" title={message.route.reason}>
-            {message.route.level === 'fast' ? 'Rápido' : 'Completo'} · Thinking {thinkingLabel(message.route.effort)}
+            {t(message.route.level === 'fast' ? 'chat.route.fast' : 'chat.route.full', {
+              thinking: thinkingLabel(message.route.effort),
+            })}
           </span>
         )}
         <time dateTime={message.createdAt}>{timeLabel(message.createdAt)}</time>
@@ -104,12 +106,12 @@ export function MessageCard({
       {body ?? (content && <Markdown>{content}</Markdown>)}
       {message.status === 'failed' && (
         <div className="message-error">
-          <X size={13} /> Execução falhou
+          <X size={13} /> {t('chat.runFailed')}
         </div>
       )}
       {(message.content || actions) && (
         <div className="message-actions">
-          {message.content && <CopyButton text={message.content} label="Copiar resposta" />}
+          {message.content && <CopyButton text={message.content} label={t('chat.copyAnswer')} />}
           {actions}
         </div>
       )}
@@ -122,17 +124,18 @@ export function MessageCard({
  * Collapsed by default; the header says who wrote it and whether it is the local fallback.
  */
 export function HandoffCard({ message }: { message: Message }) {
+  const { t } = useI18n();
   const [open, setOpen] = useState(false);
   const handoff = message.handoff!;
   const bodyId = `handoff-${message.id}`;
   const source =
     handoff.source === 'model'
-      ? `Resumo escrito por ${handoff.fromName}`
+      ? t('chat.handoff.byModel', { name: handoff.fromName })
       : handoff.fallback
-        ? `Resumo local: ${handoff.fallback}`
-        : 'Resumo local, sem chamada de modelo';
+        ? t('chat.handoff.fallback', { reason: handoff.fallback })
+        : t('chat.handoff.local');
   return (
-    <section className="message-row handoff-card" aria-label={`Passagem para ${handoff.toName}`}>
+    <section className="message-row handoff-card" aria-label={t('chat.handoff.label', { name: handoff.toName })}>
       <button
         type="button"
         className="handoff-toggle"
@@ -145,11 +148,12 @@ export function HandoffCard({ message }: { message: Message }) {
         </span>
         <span className="handoff-heading">
           <strong>
-            Passagem para {handoff.toName}
-            {handoff.toModel ? ` · ${handoff.toModel}` : ''}
+            {handoff.toModel
+              ? t('chat.handoff.titleModel', { name: handoff.toName, model: handoff.toModel })
+              : t('chat.handoff.label', { name: handoff.toName })}
           </strong>
           <small className={handoff.fallback ? 'handoff-fallback' : undefined}>
-            Resumo levado para {handoff.toName} · {source}
+            {t('chat.handoff.carried', { name: handoff.toName, source })}
           </small>
         </span>
         <time dateTime={message.createdAt}>{timeLabel(message.createdAt)}</time>
@@ -159,7 +163,7 @@ export function HandoffCard({ message }: { message: Message }) {
         <div className="handoff-body" id={bodyId}>
           <Markdown>{message.content}</Markdown>
           <div className="message-actions">
-            <CopyButton text={message.content} label="Copiar resumo" />
+            <CopyButton text={message.content} label={t('chat.handoff.copy')} />
           </div>
         </div>
       )}
@@ -191,11 +195,12 @@ export function RunActivityPanel({
   /** A run is active in this conversation: undo is disabled meanwhile. */
   busy?: boolean;
 }) {
+  const { t, fmt } = useI18n();
   const activity = activityForRun(runId, tasks, events);
   const runStatus = run?.status;
   const running = runStatus === 'running' || (!runStatus && active);
   const now = useNow(1000, running);
-  const outcome = runStatusLabel(runStatus) || (active ? 'Em andamento' : null);
+  const outcome = runStatusLabel(runStatus) || (active ? t('chat.activity.inProgress') : null);
   const changes = (
     <>
       {run && <RunChanges run={run} busy={busy || active} />}
@@ -204,45 +209,48 @@ export function RunActivityPanel({
   );
   if (!activityIsVisible(activity) && !outcome)
     return run?.checkpoint?.files?.length || activity.checks.length ? (
-      <section className={`run-activity ${run?.status ?? 'completed'}`} aria-label="Atividade desta execução">
+      <section className={`run-activity ${run?.status ?? 'completed'}`} aria-label={t('chat.activity.label')}>
         {changes}
       </section>
     ) : null;
   const startedAt = run?.startedAt ? new Date(run.startedAt).getTime() : Number.NaN;
-  const elapsed = formatDuration(
+  const elapsed = fmt.duration(
     running ? (Number.isFinite(startedAt) ? Math.max(0, now - startedAt) : undefined) : run?.durationMs,
   );
   const tone = running ? 'running' : runStatus || 'completed';
   const headline = running
     ? elapsed
-      ? `Trabalhando · ${elapsed}`
-      : 'Trabalhando'
+      ? t('chat.activity.workingFor', { elapsed })
+      : t('chat.activity.working')
     : tone === 'completed'
       ? elapsed
-        ? `Trabalhou por ${elapsed}`
-        : 'Atividade'
-      : `${outcome}${elapsed ? ` após ${elapsed}` : ''}`;
+        ? t('chat.activity.workedFor', { elapsed })
+        : t('chat.activity.title')
+      : elapsed
+        ? t('chat.activity.outcomeAfter', { outcome: outcome ?? '', elapsed })
+        : outcome;
   const totalTokens =
     run && (run.inputTokens != null || run.outputTokens != null)
-      ? formatTokens((run.inputTokens ?? 0) + (run.outputTokens ?? 0))
+      ? fmt.tokens((run.inputTokens ?? 0) + (run.outputTokens ?? 0))
       : undefined;
   const lastRetry = activity.retries.at(-1);
-  // Automatic compaction runs before the answer starts (docs/specs/compaction.md).
-  const compacting = running && activity.events.at(-1)?.text === COMPACTING_TEXT;
+  // Automatic compaction runs before the answer starts (docs/specs/compaction.md). The status event
+  // comes from the server, possibly already in English.
+  const lastText = activity.events.at(-1)?.text;
+  const compacting = running && (lastText === COMPACTING_TEXT || lastText === catalogs.en['chat.activity.compacting']);
+  const attempt = lastRetry
+    ? t('chat.activity.attempt', { attempt: lastRetry.attempt ?? '', of: lastRetry.of ?? '' })
+    : '';
   const counts = [
-    compacting ? COMPACTING_TEXT : '',
-    running && lastRetry ? `tentativa ${lastRetry.attempt}/${lastRetry.of}` : '',
-    !running && activity.retries.length
-      ? `${activity.retries.length} ${activity.retries.length === 1 ? 'nova tentativa' : 'novas tentativas'}`
-      : '',
-    activity.fallbacks.length ? 'modelo trocado' : '',
-    activity.blocked.length
-      ? `${activity.blocked.length} ${activity.blocked.length === 1 ? 'comando bloqueado' : 'comandos bloqueados'}`
-      : '',
-    activity.tasks.length ? `${activity.tasks.length} ${activity.tasks.length === 1 ? 'tarefa' : 'tarefas'}` : '',
-    activity.actions.length ? `${activity.actions.length} ${activity.actions.length === 1 ? 'ação' : 'ações'}` : '',
-    !running && totalTokens ? `${totalTokens} tokens` : '',
-    !running ? (formatCost(run?.costUsd) ?? '') : '',
+    compacting ? t('chat.activity.compacting') : '',
+    running ? attempt : '',
+    !running && activity.retries.length ? t('chat.activity.retries', { count: activity.retries.length }) : '',
+    activity.fallbacks.length ? t('chat.activity.modelSwitched') : '',
+    activity.blocked.length ? t('chat.activity.blocked', { count: activity.blocked.length }) : '',
+    activity.tasks.length ? t('chat.activity.tasks', { count: activity.tasks.length }) : '',
+    activity.actions.length ? t('chat.activity.actions', { count: activity.actions.length }) : '',
+    !running && totalTokens ? t('chat.activity.tokens', { tokens: totalTokens }) : '',
+    !running ? (fmt.cost(run?.costUsd) ?? '') : '',
   ]
     .filter(Boolean)
     .join(' · ');
@@ -254,7 +262,7 @@ export function RunActivityPanel({
     <X size={14} />
   );
   return (
-    <section className={`run-activity ${tone}`} aria-label="Atividade desta execução">
+    <section className={`run-activity ${tone}`} aria-label={t('chat.activity.label')}>
       {activity.errors.map((event) => (
         <RunEventRow key={event.id} event={event} />
       ))}
@@ -292,24 +300,27 @@ export function RunActivityPanel({
                     {taskRoleName(task.role)} ·{' '}
                     {providers.find((item) => item.id === task.providerId)?.name || task.providerId}
                     {task.model ? ` / ${task.model}` : ''}
-                    {task.effort ? ` · Thinking ${thinkingLabel(task.effort)}` : ''}
+                    {task.effort ? t('chat.task.thinking', { thinking: thinkingLabel(task.effort) }) : ''}
                   </div>
                   {task.summary && (
                     <details className="activity-summary">
-                      <summary>Ver resumo</summary>
+                      <summary>{t('chat.task.summary')}</summary>
                       <p>{task.summary}</p>
                     </details>
                   )}
                   {task.scope.length > 0 && (
                     <div className="activity-scope">
-                      Escopo: {task.scope.slice(0, 3).join(' · ')}
-                      {task.scope.length > 3 ? ` · +${task.scope.length - 3}` : ''}
+                      {t('chat.task.scope', {
+                        scope:
+                          task.scope.slice(0, 3).join(' · ') +
+                          (task.scope.length > 3 ? ` · +${task.scope.length - 3}` : ''),
+                      })}
                     </div>
                   )}
                   {hasCachedOutput ? (
                     <details className="activity-output">
-                      <summary>Ver saída completa</summary>
-                      <pre>{taskOutputs[task.id] || 'Saída vazia.'}</pre>
+                      <summary>{t('chat.task.output')}</summary>
+                      <pre>{taskOutputs[task.id] || t('chat.task.outputEmpty')}</pre>
                     </details>
                   ) : task.status !== 'running' && task.status !== 'queued' ? (
                     <button
@@ -318,7 +329,7 @@ export function RunActivityPanel({
                       disabled={loadingOutput}
                     >
                       {loadingOutput ? <LoaderCircle className="spin" size={12} /> : <FileText size={12} />}
-                      {loadingOutput ? 'Carregando saída…' : 'Carregar saída completa'}
+                      {loadingOutput ? t('chat.task.loadingOutput') : t('chat.task.loadOutput')}
                     </button>
                   ) : null}
                 </article>
@@ -375,11 +386,7 @@ export function RunActivityPanel({
           <span className="activity-headline">{headline}</span>
           {running && (
             <span className="activity-counts">
-              {compacting
-                ? COMPACTING_TEXT
-                : lastRetry
-                  ? `tentativa ${lastRetry.attempt}/${lastRetry.of}`
-                  : 'Preparando resposta'}
+              {compacting ? t('chat.activity.compacting') : attempt || t('chat.activity.preparing')}
             </span>
           )}
         </div>
@@ -407,12 +414,13 @@ export function RetryNotice({
   alternatives?: { ref: Required<ModelRef>; label: string }[];
   onSwitch?: (target: Required<ModelRef>) => void;
 }) {
+  const { t } = useI18n();
   const failure = run?.failure;
   const offerSwitch = Boolean(onSwitch && alternatives.length && isCapacityFailure(failure));
   const retries = run?.retries ?? 0;
   const detail = [
-    failure?.reason && `Motivo: ${failure.reason}`,
-    retries > 0 && `${retries} ${retries === 1 ? 'nova tentativa automática' : 'novas tentativas automáticas'}`,
+    failure?.reason && t('chat.retry.reason', { reason: failure.reason }),
+    retries > 0 && t('chat.retry.automatic', { count: retries }),
     failure?.why,
   ]
     .filter(Boolean)
@@ -420,21 +428,19 @@ export function RetryNotice({
   return (
     <div className={`retry-notice ${failure?.retryable === false ? 'permanent' : ''}`} role="status">
       <span>
-        {failure?.retryable === false
-          ? 'Repetir provavelmente não resolve; confira a configuração ou o pedido.'
-          : 'Falha temporária. Você pode tentar de novo.'}
+        {failure?.retryable === false ? t('chat.retry.permanent') : t('chat.retry.temporary')}
         {detail && <small>{detail}</small>}
       </span>
       <div className="retry-actions">
         <button type="button" className="secondary-button" onClick={onRetry} disabled={disabled}>
-          <RotateCcw size={14} /> Tentar de novo
+          <RotateCcw size={14} /> {t('chat.retry.again')}
         </button>
         {offerSwitch && (
           <details className="retry-switch">
             <summary className="secondary-button" aria-disabled={disabled}>
-              <ArrowLeftRight size={14} /> Tentar com outro modelo
+              <ArrowLeftRight size={14} /> {t('chat.retry.otherModel')}
             </summary>
-            <ul aria-label="Outros modelos">
+            <ul aria-label={t('chat.retry.otherModels')}>
               {alternatives.map((item) => (
                 <li key={`${item.ref.providerId}:${item.ref.model}`}>
                   <button
@@ -461,8 +467,9 @@ export function RetryNotice({
  * collapsed activity.
  */
 export function RunChecks({ checks }: { checks: RunEvent[] }) {
+  const { t } = useI18n();
   return (
-    <div className="run-checks" role="group" aria-label={`Verificações do projeto: ${checksSummary(checks)}`}>
+    <div className="run-checks" role="group" aria-label={t('chat.checks.label', { summary: checksSummary(checks) })}>
       {checks.map((event) => {
         const check = event.check!;
         const tone =
@@ -490,9 +497,9 @@ export function RunChecks({ checks }: { checks: RunEvent[] }) {
               <span className="run-check-title">{event.text}</span>
               <ChevronDown className="activity-chevron" size={13} aria-hidden="true" />
             </summary>
-            <pre aria-label={`Saída da verificação ${check.name}`}>
-              {check.truncated ? '… (início da saída omitido; mostrando os últimos 64 KB)\n' : ''}
-              {check.output || check.detail || 'Sem saída.'}
+            <pre aria-label={t('chat.checks.output', { name: check.name })}>
+              {check.truncated ? `${t('chat.checks.truncated')}\n` : ''}
+              {check.output || check.detail || t('chat.checks.noOutput')}
             </pre>
           </details>
         );

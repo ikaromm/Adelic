@@ -1,11 +1,12 @@
 import { Command } from 'lucide-react';
 import type { CommandEntry } from '../../shared/commands';
+import { useI18n, type MessageKey } from '../i18n';
 
-const sourceLabel: Record<CommandEntry['source'], string> = {
-  builtin: 'embutido',
-  global: 'global',
-  repo: 'do repositório',
-  project: 'do projeto',
+const sourceLabel: Record<CommandEntry['source'], MessageKey> = {
+  builtin: 'slash.source.builtin',
+  global: 'slash.source.global',
+  repo: 'slash.source.repo',
+  project: 'slash.source.project',
 };
 
 /**
@@ -28,8 +29,9 @@ export function CommandPopup({
   onSelect: (command: CommandEntry) => void;
   onHover: (index: number) => void;
 }) {
+  const { t } = useI18n();
   return (
-    <ul id={id} className="command-popup composer-popover" role="listbox" aria-label="Comandos salvos">
+    <ul id={id} className="command-popup composer-popover" role="listbox" aria-label={t('slash.list')}>
       {items.map((command, index) => (
         <li
           key={command.id}
@@ -47,7 +49,7 @@ export function CommandPopup({
           <span className="command-popup-text">
             <span className="command-popup-name">
               /{command.name}
-              <small>{sourceLabel[command.source]}</small>
+              <small>{t(sourceLabel[command.source])}</small>
             </span>
             {command.description && <span className="command-popup-description">{command.description}</span>}
           </span>

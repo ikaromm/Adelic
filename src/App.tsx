@@ -91,13 +91,13 @@ import { SIDEBAR_LIMIT, SessionItem, SidebarNav, UpdateNotice, type Page } from 
 import { ToolsPanel, type ToolsTab } from './components/ToolsPanel';
 import { WorktreePanel } from './components/WorktreePanel';
 import { uuid } from './uuid';
-import { setLanguagePreference, useI18n, type LanguagePreference } from './i18n';
+import { setLanguagePreference, t as translate, useI18n, type LanguagePreference } from './i18n';
 import { useAccessKind } from './RemoteGate';
 
 type LocalStream = { runId: string; messageId: string; content: string };
 
 export default function App() {
-  const { t } = useI18n();
+  const { t, tRich } = useI18n();
   const accessKind = useAccessKind();
   const [data, setData] = useState<Bootstrap | null>(null);
   const [detail, setDetail] = useState<SessionDetail | null>(null);
@@ -221,8 +221,7 @@ export default function App() {
               ? {
                   ...item,
                   status: health.memory as typeof item.status,
-                  detail:
-                    health.memory === 'ready' ? 'Servidor MCP local disponível' : 'Servidor MCP local indisponível',
+                  detail: health.memory === 'ready' ? translate('app.memoryReady') : translate('app.memoryUnavailable'),
                 }
               : item,
           ),
@@ -302,7 +301,7 @@ export default function App() {
       setNotice(
         coordinationResult.reason instanceof Error
           ? coordinationResult.reason.message
-          : 'Não foi possível carregar o resumo do projeto.',
+          : translate('app.coordinationFailed'),
       );
     if (graphifyResult.status === 'fulfilled') setGraphifyStatus(graphifyResult.value);
     else setGraphifyStatus(null);
@@ -776,7 +775,7 @@ export default function App() {
   async function sendMessage(value = composer, explicit?: AttachmentMeta[], overrideLimit = false) {
     const content = value.trim();
     if (!content || !session || busy || session.activeRunId || settingsPendingRef.current) return;
-    if (!explicit && attachments.uploading) return setNotice('Aguarde o envio dos anexos terminar.');
+    if (!explicit && attachments.uploading) return setNotice(t('app.waitUploads'));
     // `/compactar` alone is an action, not a turn: no bubble, just the summary card.
     if (compactCommand(content) === 'compact' && !(explicit ?? attachments.ready).length) {
       setDrafts((current) => ({ ...current, [session.id]: '' }));
@@ -864,8 +863,7 @@ export default function App() {
       try {
         await refreshDetail(sessionId);
       } catch {
-        if (selectedSessionRef.current === sessionId)
-          setNotice('Mensagem enviada. Reconectando para acompanhar a resposta.');
+        if (selectedSessionRef.current === sessionId) setNotice(t('app.reconnecting'));
       }
     } catch (error) {
       if (!accepted) {
@@ -930,7 +928,7 @@ export default function App() {
   async function queueMessage() {
     const content = composer.trim();
     if (!content || !session) return;
-    if (attachments.uploading) return setNotice('Aguarde o envio dos anexos terminar.');
+    if (attachments.uploading) return setNotice(t('app.waitUploads'));
     const sessionId = session.id;
     setDrafts((current) => ({ ...current, [sessionId]: '' }));
     setNotice('');
@@ -1043,8 +1041,7 @@ export default function App() {
       );
       if (selectedSessionRef.current === sessionId && Object.hasOwn(patch, 'projectId'))
         selectProject(updated.projectId || '');
-      if (thinkingWasReset && selectedSessionRef.current === sessionId)
-        setNotice('O nível de Thinking não existe no modelo escolhido; ajustado para Automático.');
+      if (thinkingWasReset && selectedSessionRef.current === sessionId) setNotice(t('app.thinkingAdjusted'));
     } catch (error) {
       if (selectedSessionRef.current === sessionId) setNotice((error as Error).message);
     } finally {
@@ -1090,7 +1087,7 @@ export default function App() {
         );
       setHandoff(null);
       if (added?.handoff?.fallback && selectedSessionRef.current === sessionId)
-        setNotice(`Resumo gerado localmente: ${added.handoff.fallback}.`);
+        setNotice(t('app.localSummary', { reason: added.handoff.fallback }));
       focusComposerRef.current = true;
     } catch (error) {
       setHandoffError((error as Error).message);
@@ -1105,7 +1102,7 @@ export default function App() {
     const previous = projectWriteRef.current.get(projectId) || Promise.resolve();
     const request = previous.then(async () => {
       const current = projectSnapshotRef.current?.projects.find((item) => item.id === projectId);
-      if (!current) throw new Error('Projeto não encontrado.');
+      if (!current) throw new Error(t('app.projectNotFound'));
       const orchestration = { ...projectOrchestration(current), ...patch };
       const updated = await api.updateProject(projectId, { orchestration });
       const snapshot = projectSnapshotRef.current;
@@ -1369,7 +1366,7 @@ export default function App() {
           : page === 'memory'
             ? t('sidebar.memory')
             : page === 'git'
-              ? `Git · ${project?.name ?? ''}`
+              ? t('app.crumb.git', { project: project?.name ?? '' })
               : t('sidebar.settings');
 
   /** One message of the conversation, with its retry notice and activity panel. */
@@ -1626,7 +1623,7 @@ export default function App() {
                   <span className="crumb-separator" aria-hidden="true">
                     /
                   </span>
-                  <strong title={session.title || 'Nova conversa'}>{session.title || 'Nova conversa'}</strong>
+                  <strong title={session.title || t('app.untitled')}>{session.title || t('app.untitled')}</strong>
                   <BranchOrigin session={session} sessions={data?.sessions ?? []} onOpen={selectConversation} />
                 </>
               )}
@@ -1637,8 +1634,8 @@ export default function App() {
               <button
                 type="button"
                 className={`icon-button ${toolsTab ? 'active' : ''}`}
-                aria-label="Terminal e preview do projeto"
-                title="Terminal e preview do projeto"
+                aria-label={t('app.tools')}
+                title={t('app.tools')}
                 aria-pressed={Boolean(toolsTab)}
                 onClick={() => setToolsTab((current) => (current ? null : 'terminal'))}
               >
@@ -1649,8 +1646,8 @@ export default function App() {
               <button
                 type="button"
                 className="icon-button"
-                aria-label={`Git do projeto ${project.name}`}
-                title="Git do projeto"
+                aria-label={t('app.git', { project: project.name })}
+                title={t('app.gitTitle')}
                 onClick={() => goTo('git')}
               >
                 <GitBranch size={16} />
@@ -1660,8 +1657,8 @@ export default function App() {
               <button
                 type="button"
                 className="icon-button"
-                aria-label="Continuar com outro agente"
-                title="Continuar com outro agente"
+                aria-label={t('app.handoff')}
+                title={t('app.handoff')}
                 disabled={busy || Boolean(session.activeRunId)}
                 onClick={() => openHandoff()}
               >
@@ -1679,8 +1676,8 @@ export default function App() {
                 className="icon-button"
                 href={`/api/sessions/${encodeURIComponent(session.id)}/export`}
                 download
-                aria-label="Exportar conversa em Markdown"
-                title="Exportar conversa em Markdown"
+                aria-label={t('app.export')}
+                title={t('app.export')}
               >
                 <Download size={16} />
               </a>
@@ -1695,8 +1692,8 @@ export default function App() {
             </span>
             <button
               className="icon-button help-button"
-              aria-label="Ajuda"
-              title="Ajuda"
+              aria-label={t('app.help')}
+              title={t('app.help')}
               onClick={() => setHelpOpen(true)}
             >
               <CircleHelp size={17} />
@@ -1707,33 +1704,31 @@ export default function App() {
         {!data && (
           <div className="loading-screen">
             <LoaderCircle className="spin" size={22} />
-            <span>Conectando ao Adelic…</span>
+            <span>{t('app.connecting')}</span>
             {notice && <p className="error-text">{notice}</p>}
           </div>
         )}
         {data && page === 'chat' && (
-          <ErrorBoundary scope="a conversa" resetKey={session?.id ?? 'welcome'}>
+          <ErrorBoundary scope={t('app.scope.conversation')} resetKey={session?.id ?? 'welcome'}>
             {!session ? (
               <div className="welcome-view">
                 <div className="welcome-orb" aria-hidden="true">
                   <Sparkles size={22} />
                 </div>
-                <h1>O que vamos construir hoje?</h1>
-                <p>Comece sem uma pasta ou escolha um projeto depois.</p>
+                <h1>{t('app.welcome.title')}</h1>
+                <p>{t('app.welcome.text')}</p>
                 <button className="primary-button" onClick={() => void newConversation()} disabled={busy}>
-                  <Plus size={16} /> Começar uma conversa
+                  <Plus size={16} /> {t('app.welcome.start')}
                 </button>
                 <div className="welcome-suggestions">
-                  {[
-                    'Resuma uma ideia para mim',
-                    'Encontre um caminho para começar',
-                    'Revise uma ideia que estou explorando',
-                  ].map((suggestion) => (
-                    <button key={suggestion} onClick={() => void startSuggestedPrompt(suggestion)} disabled={busy}>
-                      <span>{suggestion}</span>
-                      <ArrowUp size={14} aria-hidden="true" />
-                    </button>
-                  ))}
+                  {[t('app.welcome.suggestion1'), t('app.welcome.suggestion2'), t('app.welcome.suggestion3')].map(
+                    (suggestion) => (
+                      <button key={suggestion} onClick={() => void startSuggestedPrompt(suggestion)} disabled={busy}>
+                        <span>{suggestion}</span>
+                        <ArrowUp size={14} aria-hidden="true" />
+                      </button>
+                    ),
+                  )}
                 </div>
               </div>
             ) : (
@@ -1752,7 +1747,7 @@ export default function App() {
                 />
                 <section
                   className="conversation"
-                  aria-label="Conversa"
+                  aria-label={t('app.conversation')}
                   ref={conversationScroll.ref}
                   onScroll={conversationScroll.onScroll}
                 >
@@ -1762,28 +1757,16 @@ export default function App() {
                         <div className="empty-icon" aria-hidden="true">
                           <MessageSquare size={18} />
                         </div>
-                        <h2>Uma boa conversa começa com uma pergunta.</h2>
+                        <h2>{t('app.empty.title')}</h2>
                         <p>
-                          {conversationProject ? (
-                            <>
-                              O agente usa o contexto de <strong>{conversationProject.name}</strong> quando necessário.
-                            </>
-                          ) : (
-                            'Converse livremente ou vincule um projeto no menu de projeto e modo, junto ao campo de mensagem.'
-                          )}
+                          {conversationProject
+                            ? tRich('app.empty.project', { project: <strong>{conversationProject.name}</strong> })
+                            : t('app.empty.detached')}
                         </p>
                         <div className="prompt-chips">
                           {(conversationProject
-                            ? [
-                                'Explique a estrutura deste projeto',
-                                'Quais são os próximos passos?',
-                                'Me ajude a resolver um problema',
-                              ]
-                            : [
-                                'Explique o que é recursão',
-                                'Me ajude a organizar uma ideia',
-                                'Me ajude a resolver um problema',
-                              ]
+                            ? [t('app.empty.projectPrompt1'), t('app.empty.projectPrompt2'), t('app.empty.prompt3')]
+                            : [t('app.empty.detachedPrompt1'), t('app.empty.detachedPrompt2'), t('app.empty.prompt3')]
                           ).map((text) => (
                             <button key={text} onClick={() => void sendMessage(text, [])}>
                               <span>{text}</span>
@@ -1803,7 +1786,7 @@ export default function App() {
                         <div className="timeline-compaction" key={segment.compaction.id}>
                           {segment.earlier.length > 0 && (
                             <details className="compacted-messages">
-                              <summary>Mensagens anteriores ao resumo ({segment.earlier.length})</summary>
+                              <summary>{t('app.earlierMessages', { count: segment.earlier.length })}</summary>
                               {segment.earlier.map(renderTimelineMessage)}
                             </details>
                           )}
@@ -1820,10 +1803,10 @@ export default function App() {
                           <span className="assistant-glyph" aria-hidden="true">
                             <Sparkles size={12} />
                           </span>
-                          <strong>{provider?.name || 'Agente'}</strong>
+                          <strong>{provider?.name || t('app.agentFallback')}</strong>
                           <span className="streaming-label">
                             <i aria-hidden="true" />
-                            escrevendo
+                            {t('app.writing')}
                           </span>
                         </div>
                         {stream.content ? (
@@ -1851,21 +1834,20 @@ export default function App() {
                           className={`approval-card ${approval.kind}`}
                           key={approval.id}
                           role="region"
-                          aria-label={approval.title || 'Aprovação necessária'}
+                          aria-label={approval.title || t('app.approval.title')}
                         >
                           <div className="approval-icon" aria-hidden="true">
                             <Shield size={16} />
                           </div>
                           <div className="approval-copy">
-                            <strong>{approval.title || 'Aprovação necessária'}</strong>
+                            <strong>{approval.title || t('app.approval.title')}</strong>
                             <p>{approval.detail}</p>
                             <span>
                               {approval.kind === 'command'
-                                ? 'Comando'
+                                ? t('app.approval.command')
                                 : approval.kind === 'file'
-                                  ? 'Arquivo'
-                                  : 'Ferramenta'}{' '}
-                              · confirme esta ação para continuar
+                                  ? t('app.approval.file')
+                                  : t('app.approval.tool')}
                             </span>
                           </div>
                           <div className="approval-actions">
@@ -1878,7 +1860,7 @@ export default function App() {
                                   .catch((e: Error) => setNotice(e.message))
                               }
                             >
-                              Negar
+                              {t('app.approval.deny')}
                             </button>
                             <button
                               className="primary-button"
@@ -1889,7 +1871,7 @@ export default function App() {
                                   .catch((e: Error) => setNotice(e.message))
                               }
                             >
-                              <Check size={14} /> Aprovar
+                              <Check size={14} /> {t('app.approval.approve')}
                             </button>
                           </div>
                         </div>
@@ -1901,8 +1883,8 @@ export default function App() {
                     <button
                       type="button"
                       className="jump-to-latest"
-                      aria-label="Ir para a mensagem mais recente"
-                      title="Ir para a mensagem mais recente"
+                      aria-label={t('app.jumpLatest')}
+                      title={t('app.jumpLatest')}
                       onClick={conversationScroll.scrollToLatest}
                     >
                       <ArrowDown size={16} />
@@ -1911,7 +1893,7 @@ export default function App() {
                   {notice && (
                     <div className="inline-notice error-notice" role="alert">
                       <span>{notice}</span>
-                      <button className="icon-button" onClick={() => setNotice('')} aria-label="Dispensar aviso">
+                      <button className="icon-button" onClick={() => setNotice('')} aria-label={t('app.dismissNotice')}>
                         <X size={15} />
                       </button>
                     </div>
@@ -2181,7 +2163,7 @@ export default function App() {
         )}
 
         {data && toolsProject && toolsTab && (
-          <ErrorBoundary scope="o terminal" resetKey={toolsProject.id}>
+          <ErrorBoundary scope={t('app.scope.terminal')} resetKey={toolsProject.id}>
             <ToolsPanel
               key={toolsProject.id}
               projectId={toolsProject.id}
@@ -2194,7 +2176,7 @@ export default function App() {
         )}
 
         {data && page === 'git' && project && (
-          <ErrorBoundary scope="o git" resetKey={project.id}>
+          <ErrorBoundary scope={t('app.scope.git')} resetKey={project.id}>
             <GitPanel
               key={project.id}
               project={project}
@@ -2213,16 +2195,16 @@ export default function App() {
         )}
         {data && page === 'git' && !project && (
           <section className="page-content">
-            <div className="inline-notice">Selecione um projeto para ver o git.</div>
+            <div className="inline-notice">{t('app.gitNoProject')}</div>
           </section>
         )}
         {data && page === 'activity' && (
-          <ErrorBoundary scope="a atividade" resetKey={page}>
+          <ErrorBoundary scope={t('app.scope.activity')} resetKey={page}>
             <ActivityPage runs={data.runs} providers={data.providers} />
           </ErrorBoundary>
         )}
         {data && page === 'automations' && (
-          <ErrorBoundary scope="as automações" resetKey={page}>
+          <ErrorBoundary scope={t('app.scope.automations')} resetKey={page}>
             <AutomationsPage
               data={data}
               version={automationsVersion}
@@ -2232,13 +2214,13 @@ export default function App() {
           </ErrorBoundary>
         )}
         {data && memoryVisited && (
-          <ErrorBoundary scope="a memória" resetKey={page}>
+          <ErrorBoundary scope={t('app.scope.memory')} resetKey={page}>
             <SharedMemoryPage activated={memoryVisited} visible={page === 'memory'} />
           </ErrorBoundary>
         )}
 
         {data && page === 'settings' && (
-          <ErrorBoundary scope="as configurações" resetKey={project?.id || 'global'}>
+          <ErrorBoundary scope={t('app.scope.settings')} resetKey={project?.id || 'global'}>
             <SettingsPage
               key={project?.id || 'global'}
               data={data}
@@ -2351,88 +2333,73 @@ export default function App() {
                 <CircleHelp size={17} />
               </div>
               <div>
-                <h2 id="help-title">Como usar o Adelic</h2>
-                <p>Um espaço local para trabalhar com seus agentes.</p>
+                <h2 id="help-title">{t('app.helpDialog.title')}</h2>
+                <p>{t('app.helpDialog.subtitle')}</p>
               </div>
               <button
                 type="button"
                 className="icon-button"
-                aria-label="Fechar ajuda"
+                aria-label={t('app.helpDialog.close')}
                 onClick={() => setHelpOpen(false)}
               >
                 <X size={17} />
               </button>
             </div>
             <div className="help-items">
-              <p>
-                <strong>Comece por uma conversa.</strong> Nova conversa cria uma conversa avulsa; o + ao lado de um
-                projeto cria uma conversa vinculada à pasta e ao escopo de memória dele.
-              </p>
-              <p>
-                <strong>Ajuste a conversa no campo de mensagem.</strong> Escolha agente, modelo, thinking, permissões,
-                projeto e modo. Auto adapta o caminho ao pedido; Rápido prioriza respostas diretas e pode consultar o
-                computador quando necessário.
-              </p>
-              <p>
-                <strong>Revise aprovações.</strong> A execução acontece neste computador. Confira ações de escrita antes
-                de aprovar.
-              </p>
-              <p>
-                <strong>Interrompa quando precisar.</strong> O botão de parar cancela a execução atual.
-              </p>
-              <p>
-                <strong>Escreva enquanto o agente trabalha.</strong> Enter coloca a mensagem na fila; ela começa quando
-                a resposta atual terminar. Se a execução for cancelada ou falhar, a fila pausa até você retomá-la.
-              </p>
+              {(['start', 'adjust', 'review', 'stop', 'queue'] as const).map((item) => (
+                <p key={item}>
+                  {tRich(`app.helpDialog.${item}`, { lead: <strong>{t(`app.helpDialog.${item}Lead`)}</strong> })}
+                </p>
+              ))}
             </div>
             <dl className="shortcut-list">
               <div>
-                <dt>Enviar mensagem</dt>
+                <dt>{t('app.shortcut.send')}</dt>
                 <dd>
                   <kbd>Enter</kbd>
                 </dd>
               </div>
               <div>
-                <dt>Colocar na fila (com o agente trabalhando)</dt>
+                <dt>{t('app.shortcut.queue')}</dt>
                 <dd>
                   <kbd>Enter</kbd>
                 </dd>
               </div>
               <div>
-                <dt>Enviar agora (interrompe a resposta)</dt>
+                <dt>{t('app.shortcut.sendNow')}</dt>
                 <dd>
                   <kbd>Ctrl</kbd>
                   <kbd>Enter</kbd>
                 </dd>
               </div>
               <div>
-                <dt>Nova linha</dt>
+                <dt>{t('app.shortcut.newline')}</dt>
                 <dd>
                   <kbd>Shift</kbd>
                   <kbd>Enter</kbd>
                 </dd>
               </div>
               <div>
-                <dt>Nova conversa</dt>
+                <dt>{t('app.shortcut.new')}</dt>
                 <dd>
                   <kbd>{shortcut}</kbd>
                 </dd>
               </div>
               <div>
-                <dt>Paleta de comandos</dt>
+                <dt>{t('app.shortcut.palette')}</dt>
                 <dd>
                   <kbd>{shortcut.startsWith('⌘') ? '⌘P' : 'Ctrl P'}</kbd>
                 </dd>
               </div>
               <div>
-                <dt>Fechar menus e janelas</dt>
+                <dt>{t('app.shortcut.close')}</dt>
                 <dd>
                   <kbd>Esc</kbd>
                 </dd>
               </div>
             </dl>
             <button type="button" className="primary-button help-done" onClick={() => setHelpOpen(false)}>
-              Entendi
+              {t('app.helpDialog.done')}
             </button>
           </div>
         </div>

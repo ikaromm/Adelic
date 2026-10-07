@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Check, Copy } from 'lucide-react';
+import { useI18n, type I18n } from './i18n';
 
 type HastNode = {
   type?: string;
@@ -65,15 +66,9 @@ export async function copyText(text: string): Promise<boolean> {
   }
 }
 
-export function CopyButton({
-  text,
-  label = 'Copiar',
-  className = '',
-}: {
-  text: string;
-  label?: string;
-  className?: string;
-}) {
+export function CopyButton({ text, label, className = '' }: { text: string; label?: string; className?: string }) {
+  const { t } = useI18n();
+  label ??= t('chat.copy');
   const [state, setState] = useState<'idle' | 'copied' | 'failed'>('idle');
   const timer = useRef<number | undefined>(undefined);
   useEffect(() => () => window.clearTimeout(timer.current), []);
@@ -83,7 +78,7 @@ export function CopyButton({
     window.clearTimeout(timer.current);
     timer.current = window.setTimeout(() => setState('idle'), 1800);
   };
-  const status = state === 'copied' ? 'Copiado' : state === 'failed' ? 'Não foi possível copiar' : '';
+  const status = state === 'copied' ? t('chat.copied') : state === 'failed' ? t('chat.copyFailed') : '';
   return (
     <>
       <button
@@ -102,7 +97,7 @@ export function CopyButton({
   );
 }
 
-const components: Components = {
+const markdownComponents = (t: I18n['t']): Components => ({
   a({ node: _node, href, children, ...props }) {
     if (href && /^(https?:|mailto:)/i.test(href))
       return (
@@ -131,18 +126,22 @@ const components: Components = {
     return (
       <div className="code-block">
         <div className="code-block-header">
-          <span>{language || 'texto'}</span>
-          <CopyButton text={text} label="Copiar código" />
+          <span>{language || t('chat.codeText')}</span>
+          <CopyButton text={text} label={t('chat.copyCode')} />
         </div>
         <pre>{children}</pre>
       </div>
     );
   },
-};
-
-const rehypeOptions = { footnoteLabel: 'Notas', footnoteBackLabel: 'Voltar ao texto' };
+});
 
 export function Markdown({ children, className = 'markdown-content' }: { children: string; className?: string }) {
+  const { t } = useI18n();
+  const components = useMemo(() => markdownComponents(t), [t]);
+  const rehypeOptions = useMemo(
+    () => ({ footnoteLabel: t('chat.footnotes'), footnoteBackLabel: t('chat.footnoteBack') }),
+    [t],
+  );
   return (
     <div className={className}>
       <ReactMarkdown remarkPlugins={[remarkGfm]} remarkRehypeOptions={rehypeOptions} components={components}>

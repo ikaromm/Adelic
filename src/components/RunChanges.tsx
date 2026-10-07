@@ -3,15 +3,17 @@ import { ChevronDown, FileDiff, LoaderCircle, Undo2, X } from 'lucide-react';
 import type { FileChange, Run } from '../../shared/contracts';
 import { api, type ApiError } from '../api';
 import { changesSummary, diffLines } from '../run-activity';
+import { t, useI18n, type MessageKey } from '../i18n';
 
-const statusName: Record<FileChange['status'], string> = {
-  added: 'criado',
-  modified: 'alterado',
-  deleted: 'removido',
+const statusName: Record<FileChange['status'], MessageKey> = {
+  added: 'changes.status.added',
+  modified: 'changes.status.modified',
+  deleted: 'changes.status.deleted',
 };
 
 /** Files a run changed in a git project, their diffs and "undo"; see docs/specs/checkpoints.md. */
 export function RunChanges({ run, busy }: { run: Run; busy: boolean }) {
+  const { t } = useI18n();
   const checkpoint = run.checkpoint;
   const files = checkpoint?.files ?? [];
   const [selected, setSelected] = useState<string | null>(null);
@@ -54,7 +56,7 @@ export function RunChanges({ run, busy }: { run: Run; busy: boolean }) {
         <summary>
           <FileDiff size={14} aria-hidden="true" />
           <span className="run-changes-summary">{changesSummary(files, checkpoint.omitted)}</span>
-          {restoredAt && <span className="run-changes-restored">desfeito</span>}
+          {restoredAt && <span className="run-changes-restored">{t('changes.undone')}</span>}
           <ChevronDown className="activity-chevron" size={14} aria-hidden="true" />
         </summary>
         <ul className="run-changes-files">
@@ -69,11 +71,11 @@ export function RunChanges({ run, busy }: { run: Run; busy: boolean }) {
                   aria-expanded={open}
                   onClick={() => void toggle(file.path)}
                 >
-                  <span className={`run-change-status ${file.status}`}>{statusName[file.status]}</span>
+                  <span className={`run-change-status ${file.status}`}>{t(statusName[file.status])}</span>
                   <code>{file.path}</code>
                   <span className="run-change-counts">
                     {file.binary ? (
-                      'binário'
+                      t('changes.binary')
                     ) : (
                       <>
                         <span className="add">+{file.additions}</span> <span className="del">−{file.deletions}</span>
@@ -84,13 +86,13 @@ export function RunChanges({ run, busy }: { run: Run; busy: boolean }) {
                 {open &&
                   (!diff ? (
                     <div className="run-diff-loading">
-                      <LoaderCircle className="spin" size={12} /> Carregando diferenças…
+                      <LoaderCircle className="spin" size={12} /> {t('changes.loadingDiff')}
                     </div>
                   ) : 'error' in diff ? (
                     <div className="form-error">{diff.error}</div>
                   ) : (
                     <>
-                      <pre className="run-diff" aria-label={`Diferenças em ${file.path}`}>
+                      <pre className="run-diff" aria-label={t('changes.diffOf', { path: file.path })}>
                         {diffLines(diff.diff).map((line, index) => (
                           <span key={index} className={`diff-${line.kind}`}>
                             {line.text}
@@ -98,7 +100,7 @@ export function RunChanges({ run, busy }: { run: Run; busy: boolean }) {
                           </span>
                         ))}
                       </pre>
-                      {diff.truncated && <small className="run-diff-note">Diferenças cortadas em 200 KB.</small>}
+                      {diff.truncated && <small className="run-diff-note">{t('changes.diffTruncated')}</small>}
                     </>
                   ))}
               </li>
@@ -106,9 +108,7 @@ export function RunChanges({ run, busy }: { run: Run; busy: boolean }) {
           })}
         </ul>
         {checkpoint.omitted ? (
-          <small className="run-diff-note">
-            Mais {checkpoint.omitted} {checkpoint.omitted === 1 ? 'arquivo' : 'arquivos'} não listados.
-          </small>
+          <small className="run-diff-note">{t('changes.omitted', { count: checkpoint.omitted })}</small>
         ) : null}
         {result?.error && (
           <div className="run-changes-error" role="alert">
@@ -126,26 +126,20 @@ export function RunChanges({ run, busy }: { run: Run; busy: boolean }) {
         )}
         {restoredAt ? (
           <p className="run-changes-done" role="status">
-            Alterações desfeitas. Os arquivos voltaram ao estado de antes desta execução.
+            {t('changes.restored')}
           </p>
         ) : (
           <button
             type="button"
             className="secondary-button run-changes-undo"
             disabled={busy || restoring || Boolean(checkpoint.omitted)}
-            title={
-              checkpoint.omitted
-                ? 'Execuções com muitos arquivos não podem ser desfeitas por aqui'
-                : busy
-                  ? 'Aguarde a execução atual terminar'
-                  : undefined
-            }
+            title={checkpoint.omitted ? t('changes.tooMany') : busy ? t('changes.waitRun') : undefined}
             onClick={() => {
               setResult(null);
               setConfirming(true);
             }}
           >
-            <Undo2 size={14} /> Desfazer alterações desta execução
+            <Undo2 size={14} /> {t('changes.undo')}
           </button>
         )}
       </details>
@@ -164,19 +158,10 @@ export function RunChanges({ run, busy }: { run: Run; busy: boolean }) {
 
 /** "Os 2 arquivos alterados voltam…; o arquivo criado por ela é removido." */
 export function restoreSentence(changed: number, added: number) {
-  const back =
-    changed === 1
-      ? 'O arquivo alterado ou removido volta ao conteúdo que tinha antes desta execução'
-      : changed
-        ? `Os ${changed} arquivos alterados ou removidos voltam ao conteúdo que tinham antes desta execução`
-        : '';
-  const gone = added
-    ? added === 1
-      ? 'o arquivo criado por ela é removido'
-      : `os ${added} arquivos criados por ela são removidos`
-    : '';
-  const text = [back, gone].filter(Boolean).join('; ');
-  return `${text.charAt(0).toUpperCase()}${text.slice(1)}.`;
+  if (!added) return t('changes.restore.changed', { count: changed });
+  if (!changed) return t('changes.restore.added', { count: added });
+  const key = `changes.restore.both${changed === 1 ? 'One' : 'Many'}${added === 1 ? 'One' : 'Many'}` as const;
+  return t(key, { changed, added });
 }
 
 function ConfirmRestore({
@@ -192,6 +177,7 @@ function ConfirmRestore({
   onCancel: () => void;
   onConfirm: () => void;
 }) {
+  const { t } = useI18n();
   const cancelRef = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     cancelRef.current?.focus();
@@ -219,26 +205,29 @@ function ConfirmRestore({
             <Undo2 size={17} />
           </div>
           <div>
-            <h2 id="restore-title">Desfazer alterações desta execução?</h2>
+            <h2 id="restore-title">{t('changes.confirmTitle')}</h2>
           </div>
-          <button type="button" className="icon-button" aria-label="Fechar" onClick={onCancel} disabled={restoring}>
+          <button
+            type="button"
+            className="icon-button"
+            aria-label={t('changes.close')}
+            onClick={onCancel}
+            disabled={restoring}
+          >
             <X size={17} />
           </button>
         </div>
         <div id="restore-detail" className="restore-detail">
           <p>{restoreSentence(count - added, added)}</p>
-          <p>
-            Se algum deles foi editado depois da execução, nada é desfeito e a lista desses arquivos aparece aqui.
-            Outros arquivos, commits, branches, índice e stash do git não são alterados.
-          </p>
+          <p>{t('changes.confirmDetail')}</p>
         </div>
         <div className="modal-actions">
           <button ref={cancelRef} type="button" className="secondary-button" onClick={onCancel} disabled={restoring}>
-            Cancelar
+            {t('changes.cancel')}
           </button>
           <button type="button" className="danger-button" onClick={onConfirm} disabled={restoring}>
             {restoring ? <LoaderCircle className="spin" size={14} /> : <Undo2 size={14} />}
-            Desfazer alterações
+            {t('changes.confirm')}
           </button>
         </div>
       </div>

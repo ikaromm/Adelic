@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef } from 'react';
 import type { StreamEvent } from '../../shared/contracts';
+import { t } from '../i18n';
 
 /** What a system notification says; text is limited to titles and short reasons. */
 export interface RunNotice {
@@ -52,33 +53,33 @@ export function noticeFor(event: StreamEvent, titleOf: (sessionId: string) => st
     const { run } = event;
     // The handoff summary call is followed in its own dialog.
     if (run.handoff) return null;
-    const conversation = clip(titleOf(run.sessionId) || 'Conversa', MAX_TITLE);
+    const conversation = clip(titleOf(run.sessionId) || t('notifications.conversation'), MAX_TITLE);
     if (run.status === 'completed')
       return {
         key: `run:${run.id}:completed`,
         sessionId: run.sessionId,
-        title: run.compaction ? 'Conversa compactada' : 'Resposta pronta',
+        title: run.compaction ? t('notifications.compacted') : t('notifications.ready'),
         body: conversation,
       };
     if (run.status === 'failed') {
-      const reason = clip(run.failure?.reason || run.error || 'erro não informado', MAX_REASON);
+      const reason = clip(run.failure?.reason || run.error || t('notifications.noReason'), MAX_REASON);
       return {
         key: `run:${run.id}:failed`,
         sessionId: run.sessionId,
-        title: 'Execução falhou',
-        body: `${conversation}: ${reason}`,
+        title: t('notifications.failed'),
+        body: t('notifications.failedBody', { conversation, reason }),
       };
     }
     return null;
   }
   if (event.type === 'approval' && event.approval.status === 'pending') {
     const { approval } = event;
-    const conversation = clip(titleOf(approval.sessionId) || 'Conversa', MAX_TITLE);
+    const conversation = clip(titleOf(approval.sessionId) || t('notifications.conversation'), MAX_TITLE);
     return {
       key: `approval:${approval.id}`,
       sessionId: approval.sessionId,
-      title: 'Aprovação necessária',
-      body: `${clip(approval.title, MAX_TITLE)} · ${conversation}`,
+      title: t('notifications.approval'),
+      body: t('notifications.approvalBody', { title: clip(approval.title, MAX_TITLE), conversation }),
     };
   }
   return null;

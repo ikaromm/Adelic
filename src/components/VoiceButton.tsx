@@ -1,6 +1,7 @@
 import { LoaderCircle, Mic, Square } from 'lucide-react';
 import { formatElapsed, MAX_VOICE_SECONDS } from '../../shared/voice';
 import type { DictationState } from '../hooks/useVoiceDictation';
+import { useI18n } from '../i18n';
 
 /**
  * Composer microphone (docs/specs/voice.md): click to record, click again (or Esc) to stop
@@ -21,14 +22,15 @@ export function VoiceButton({
   disabled: boolean;
   onToggle: () => void;
 }) {
+  const { t } = useI18n();
   if (state === 'recording') {
-    const label = `Parar gravação e transcrever (${formatElapsed(elapsed)} de ${formatElapsed(MAX_VOICE_SECONDS)})`;
+    const label = t('voice.stopLabel', { elapsed: formatElapsed(elapsed), max: formatElapsed(MAX_VOICE_SECONDS) });
     return (
       <button
         type="button"
         className="composer-pill voice-button is-recording"
         aria-label={label}
-        title="Parar e transcrever (Esc)"
+        title={t('voice.stopTitle')}
         onClick={onToggle}
       >
         <Square size={11} fill="currentColor" aria-hidden="true" />
@@ -43,9 +45,9 @@ export function VoiceButton({
   }
   if (state === 'transcribing')
     return (
-      <button type="button" className="composer-pill voice-button" aria-label="Transcrevendo o áudio…" disabled>
+      <button type="button" className="composer-pill voice-button" aria-label={t('voice.transcribingLabel')} disabled>
         <LoaderCircle className="spin" size={15} aria-hidden="true" />
-        <span className="composer-pill-label">Transcrevendo…</span>
+        <span className="composer-pill-label">{t('voice.transcribing')}</span>
       </button>
     );
   // Unavailable stays focusable (aria-disabled) so the reason shows as a tooltip and, on
@@ -54,9 +56,9 @@ export function VoiceButton({
     <button
       type="button"
       className="composer-pill voice-button"
-      aria-label={blocker ? `Ditar por voz (${blocker})` : 'Ditar por voz'}
+      aria-label={blocker ? t('voice.dictateBlocked', { reason: blocker }) : t('voice.dictate')}
       aria-disabled={blocker ? true : undefined}
-      title={blocker ?? 'Ditar por voz (transcrição local)'}
+      title={blocker ?? t('voice.dictateTitle')}
       disabled={disabled}
       onClick={onToggle}
     >

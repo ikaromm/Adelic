@@ -15,7 +15,8 @@ import {
   Search,
   Settings as SettingsIcon,
 } from 'lucide-react';
-import { rankActions, type PaletteAction, type PaletteIcon } from '../palette/actions';
+import { groupLabel, rankActions, type PaletteAction, type PaletteIcon } from '../palette/actions';
+import { useI18n } from '../i18n';
 
 const ICONS: Record<PaletteIcon, ReactNode> = {
   new: <Plus size={15} />,
@@ -49,6 +50,7 @@ export function CommandPalette({
   onRun: (action: PaletteAction) => void;
   onClose: () => void;
 }) {
+  const { t, tRich } = useI18n();
   const [query, setQuery] = useState('');
   const [activeId, setActiveId] = useState<string | null>(null);
   const baseId = useId();
@@ -121,7 +123,7 @@ export function CommandPalette({
 
   return (
     <div className="modal-backdrop palette-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="modal-card palette-card" role="dialog" aria-modal="true" aria-label="Paleta de comandos">
+      <div className="modal-card palette-card" role="dialog" aria-modal="true" aria-label={t('palette.label')}>
         <label className="search-field palette-field">
           <Command size={15} aria-hidden="true" />
           <input
@@ -130,23 +132,23 @@ export function CommandPalette({
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={onKeyDown}
             role="combobox"
-            aria-label="Buscar ações"
+            aria-label={t('palette.input')}
             aria-expanded={flat.length > 0}
             aria-controls={listboxId}
             aria-autocomplete="list"
             aria-activedescendant={active ? optionId(active) : undefined}
-            placeholder="Ação, conversa, projeto ou comando…"
+            placeholder={t('palette.placeholder')}
             autoComplete="off"
             spellCheck={false}
           />
         </label>
-        <div ref={list} id={listboxId} className="palette-list" role="listbox" aria-label="Ações">
+        <div ref={list} id={listboxId} className="palette-list" role="listbox" aria-label={t('palette.list')}>
           {sections.map((section, sectionIndex) => {
             const headingId = `${baseId}-group-${sectionIndex}`;
             return (
               <div key={section.title} role="group" aria-labelledby={headingId} className="palette-group">
                 <div id={headingId} role="presentation" className="palette-group-title">
-                  {section.title}
+                  {groupLabel(section.title)}
                 </div>
                 {section.items.map((action) => {
                   const selected = action === active;
@@ -175,7 +177,7 @@ export function CommandPalette({
                       {action.current && (
                         <span className="palette-option-current">
                           <Check size={14} aria-hidden="true" />
-                          <span className="visually-hidden">atual</span>
+                          <span className="visually-hidden">{t('palette.current')}</span>
                         </span>
                       )}
                       {action.shortcut && (
@@ -191,19 +193,23 @@ export function CommandPalette({
               </div>
             );
           })}
-          {flat.length === 0 && <p className="muted-empty palette-empty">Nada encontrado para “{query.trim()}”.</p>}
+          {flat.length === 0 && (
+            <p className="muted-empty palette-empty">{t('palette.empty', { query: query.trim() })}</p>
+          )}
         </div>
         <p className="palette-hint" aria-hidden="true">
           <span>
-            <kbd>↑</kbd>
-            <kbd>↓</kbd> navegar
+            {tRich('palette.hint.navigate', {
+              keys: (
+                <>
+                  <kbd>↑</kbd>
+                  <kbd>↓</kbd>
+                </>
+              ),
+            })}
           </span>
-          <span>
-            <kbd>Enter</kbd> executar
-          </span>
-          <span>
-            <kbd>Esc</kbd> fechar
-          </span>
+          <span>{tRich('palette.hint.run', { key: <kbd>Enter</kbd> })}</span>
+          <span>{tRich('palette.hint.close', { key: <kbd>Esc</kbd> })}</span>
         </p>
       </div>
     </div>

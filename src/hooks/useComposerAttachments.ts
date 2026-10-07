@@ -3,6 +3,7 @@ import type { AttachmentMeta } from '../../shared/contracts';
 import { MAX_ATTACHMENTS_PER_MESSAGE, checkAttachment } from '../../shared/attachments';
 import { api } from '../api';
 import { uuid } from '../uuid';
+import { t } from '../i18n';
 
 export interface PendingAttachment {
   key: string;
@@ -20,7 +21,7 @@ function readBase64(file: File) {
   return new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(String(reader.result).replace(/^data:[^,]*,/, ''));
-    reader.onerror = () => reject(new Error(`Não foi possível ler “${file.name}”.`));
+    reader.onerror = () => reject(new Error(t('attachments.readFailed', { name: file.name })));
     reader.readAsDataURL(file);
   });
 }
@@ -56,7 +57,9 @@ export function useComposerAttachments(sessionId: string | undefined, onError: (
       const problems: string[] = [];
       if (files.length > room)
         problems.push(
-          `Cada mensagem aceita até ${MAX_ATTACHMENTS_PER_MESSAGE} anexos; ${room > 0 ? `só cabem mais ${room}` : 'remova algum para anexar outro'}.`,
+          room > 0
+            ? t('attachments.tooMany', { max: MAX_ATTACHMENTS_PER_MESSAGE, count: room })
+            : t('attachments.noRoom', { max: MAX_ATTACHMENTS_PER_MESSAGE }),
         );
       for (const file of files.slice(0, Math.max(0, room))) {
         const check = checkAttachment(file.name, file.type, file.size);

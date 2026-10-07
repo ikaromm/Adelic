@@ -4,6 +4,7 @@ import type { AttachmentMeta } from '../../shared/contracts';
 import { IMAGE_MIMES, MAX_ATTACHMENTS_PER_MESSAGE, formatBytes } from '../../shared/attachments';
 import { api } from '../api';
 import type { PendingAttachment } from '../hooks/useComposerAttachments';
+import { useI18n } from '../i18n';
 
 // Accept list for the file picker; the shared rules still decide (some text files have no extension).
 const ACCEPT = [
@@ -22,8 +23,9 @@ export function AttachButton({
   full: boolean;
   onFiles: (files: File[]) => void;
 }) {
+  const { t } = useI18n();
   const input = useRef<HTMLInputElement>(null);
-  const label = full ? `Limite de ${MAX_ATTACHMENTS_PER_MESSAGE} anexos por mensagem` : 'Anexar arquivos ou imagens';
+  const label = full ? t('attachments.full', { max: MAX_ATTACHMENTS_PER_MESSAGE }) : t('attachments.attach');
   return (
     <>
       <button
@@ -63,9 +65,10 @@ export function PendingAttachments({
   disabled: boolean;
   onRemove: (key: string) => void;
 }) {
+  const { t, locale } = useI18n();
   if (!items.length) return null;
   return (
-    <ul className="attachment-chips composer-attachments" aria-label="Anexos da mensagem">
+    <ul className="attachment-chips composer-attachments" aria-label={t('attachments.pending')}>
       {items.map((item) => (
         <li key={item.key} className={`attachment-chip ${item.meta ? '' : 'uploading'}`}>
           {item.previewUrl ? (
@@ -77,14 +80,14 @@ export function PendingAttachments({
             <span className="attachment-name" title={item.name}>
               {item.name}
             </span>
-            <small>{item.meta ? formatBytes(item.size) : 'Enviando…'}</small>
+            <small>{item.meta ? formatBytes(item.size, locale) : t('attachments.uploading')}</small>
           </span>
-          {!item.meta && <LoaderCircle className="spin" size={13} aria-label="Enviando" />}
+          {!item.meta && <LoaderCircle className="spin" size={13} aria-label={t('attachments.uploadingLabel')} />}
           <button
             type="button"
             className="icon-button attachment-remove"
-            aria-label={`Remover anexo ${item.name}`}
-            title="Remover"
+            aria-label={t('attachments.remove', { name: item.name })}
+            title={t('attachments.removeTitle')}
             disabled={disabled}
             onClick={() => onRemove(item.key)}
           >
@@ -98,8 +101,9 @@ export function PendingAttachments({
 
 /** Attachments shown in a sent user message: thumbnails for images, chips for files. */
 export function MessageAttachments({ attachments }: { attachments: AttachmentMeta[] }) {
+  const { t, locale } = useI18n();
   return (
-    <ul className="attachment-chips message-attachments" aria-label="Anexos">
+    <ul className="attachment-chips message-attachments" aria-label={t('attachments.sent')}>
       {attachments.map((attachment) => {
         const url = api.attachmentUrl(attachment.id);
         const image = attachment.mime.startsWith('image/');
@@ -114,7 +118,7 @@ export function MessageAttachments({ attachments }: { attachments: AttachmentMet
                   <span className="attachment-name" title={attachment.name}>
                     {attachment.name}
                   </span>
-                  <small>{formatBytes(attachment.size)}</small>
+                  <small>{formatBytes(attachment.size, locale)}</small>
                 </span>
               </>
             )}

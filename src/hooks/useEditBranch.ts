@@ -3,6 +3,7 @@ import type { AttachmentMeta, Message, Plan, Session } from '../../shared/contra
 import { api, type ApiError } from '../api';
 import { isLimitError } from './useUsage';
 import { uuid } from '../uuid';
+import { t } from '../i18n';
 
 /**
  * Edit and resend, and "Ramificar daqui" for the open conversation (docs/specs/edit-branch.md).
@@ -34,11 +35,11 @@ export function useEditBranch({
   const sessionId = session?.id;
   // Same refusals as the server (409), so the button explains instead of failing.
   const disabledReason = session?.activeRunId
-    ? 'Aguarde a execução terminar ou cancele antes de editar'
+    ? t('branch.blocked.run')
     : plans.some((plan) => plan.status === 'executing')
-      ? 'Um plano está em execução; pare o plano antes de editar'
+      ? t('branch.blocked.plan')
       : busy
-        ? 'Aguarde a ação em andamento'
+        ? t('branch.blocked.busy')
         : undefined;
 
   const save = useCallback(

@@ -1,5 +1,6 @@
 import { FileText } from 'lucide-react';
 import type { MentionPopupState } from '../hooks/useFileMentions';
+import { useI18n } from '../i18n';
 
 /** Splits a path into folder and file name for display. */
 function parts(path: string) {
@@ -29,26 +30,22 @@ export function MentionPopup({
   onSelect: (path: string) => void;
   onHover: (index: number) => void;
 }) {
+  const { t } = useI18n();
   if (state.kind === 'closed') return null;
   if (state.kind !== 'list')
     return (
       <div className="command-popup mention-popup composer-popover mention-popup-status" role="status">
         {state.kind === 'no-project'
-          ? 'Escolha um projeto para mencionar arquivos'
+          ? t('mentions.noProject')
           : state.kind === 'loading'
-            ? 'Buscando arquivos…'
+            ? t('mentions.loading')
             : state.kind === 'empty'
-              ? 'Nenhum arquivo encontrado'
-              : `Não foi possível listar os arquivos: ${state.message}`}
+              ? t('mentions.empty')
+              : t('mentions.error', { message: state.message })}
       </div>
     );
   return (
-    <ul
-      id={id}
-      className="command-popup mention-popup composer-popover"
-      role="listbox"
-      aria-label="Arquivos do projeto"
-    >
+    <ul id={id} className="command-popup mention-popup composer-popover" role="listbox" aria-label={t('mentions.list')}>
       {items.map((path, index) => {
         const { dir, base } = parts(path);
         return (

@@ -35,9 +35,10 @@ const extension = (name: string) => {
 };
 const basename = (name: string) => (name.split(/[\\/]/).at(-1) ?? '').toLowerCase();
 
-export const formatBytes = (bytes: number) =>
+/** "1,5 MB" (en "1.5 MB"), "12 KB", "300 B". */
+export const formatBytes = (bytes: number, locale: 'pt-BR' | 'en' = 'pt-BR') =>
   bytes >= 1024 * 1024
-    ? `${(bytes / (1024 * 1024)).toFixed(1).replace('.', ',')} MB`
+    ? `${(bytes / (1024 * 1024)).toFixed(1).replace('.', locale === 'en' ? '.' : ',')} MB`
     : bytes >= 1024
       ? `${Math.round(bytes / 1024)} KB`
       : `${bytes} B`;

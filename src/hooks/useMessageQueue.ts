@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { MessageQueue } from '../../shared/contracts';
 import { api } from '../api';
 import { uuid } from '../uuid';
+import { t } from '../i18n';
 
 export type SendNowTarget = { itemId: string } | { content: string; attachmentIds?: string[] };
 export type ComposerKeyAction = 'send' | 'queue' | 'send-now' | null;
@@ -24,12 +25,11 @@ export function composerKeyAction(
 export function queuePauseLabel(queue: MessageQueue | null) {
   const reason = queue?.paused?.reason;
   if (!reason) return '';
-  if (reason === 'limit') return queue?.paused?.error || 'Limite de uso atingido.';
-  return reason === 'cancelled'
-    ? 'A execução foi cancelada.'
-    : reason === 'interrupted'
-      ? 'O Adelic foi reiniciado durante a execução.'
-      : `A execução falhou${queue?.paused?.error ? `: ${queue.paused.error}` : '.'}`;
+  if (reason === 'limit') return queue?.paused?.error || t('queue.pause.limit');
+  if (reason === 'cancelled') return t('queue.pause.cancelled');
+  if (reason === 'interrupted') return t('queue.pause.interrupted');
+  const error = queue?.paused?.error;
+  return error ? t('queue.pause.failedReason', { error }) : t('queue.pause.failed');
 }
 
 /**

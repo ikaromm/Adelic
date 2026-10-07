@@ -1,6 +1,7 @@
 import { useCallback, useState } from 'react';
 import type { AttachmentMeta, Message, Plan, Session } from '../../shared/contracts';
-import { api } from '../api';
+import { api, type ApiError } from '../api';
+import { isLimitError } from './useUsage';
 
 /**
  * Edit and resend, and "Ramificar daqui" for the open conversation (docs/specs/edit-branch.md).
@@ -12,6 +13,7 @@ export function useEditBranch({
   plans,
   busy,
   onError,
+  onLimit,
   onEdited,
   onBranched,
 }: {
@@ -20,6 +22,8 @@ export function useEditBranch({
   plans: Plan[];
   busy: boolean;
   onError: (message: string) => void;
+  /** A usage limit refused the edit; `retry` repeats it with "Continuar mesmo assim". */
+  onLimit?: (error: ApiError, retry: () => Promise<unknown>) => void;
   /** The edit was accepted: drop the discarded messages locally and reload the conversation. */
   onEdited: (sessionId: string, keep: Message[], started: { runId: string; messageId: string }) => void;
   /** The branch was created: add it to the list and open it. */
@@ -37,7 +41,12 @@ export function useEditBranch({
         : undefined;
 
   const save = useCallback(
-    async (message: Message, content: string, attachments: AttachmentMeta[]) => {
+    async function save(
+      message: Message,
+      content: string,
+      attachments: AttachmentMeta[],
+      overrideLimit = false,
+    ): Promise<boolean> {
       if (!sessionId) return false;
       try {
         const started = await api.editMessage(
@@ -46,17 +55,19 @@ export function useEditBranch({
           content,
           crypto.randomUUID(),
           attachments.map((item) => item.id),
+          overrideLimit,
         );
         setEditingId(undefined);
         const index = messages.findIndex((item) => item.id === message.id);
         onEdited(sessionId, index < 0 ? messages : messages.slice(0, index), started);
         return true;
       } catch (error) {
-        onError((error as Error).message);
+        if (isLimitError(error) && onLimit) onLimit(error, () => save(message, content, attachments, true));
+        else onError((error as Error).message);
         return false;
       }
     },
-    [sessionId, messages, onEdited, onError],
+    [sessionId, messages, onEdited, onError, onLimit],
   );
 
   const branch = useCallback(

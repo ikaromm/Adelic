@@ -81,6 +81,9 @@ import { timelineSegments, upsertCompaction } from './compaction-timeline';
 import { compactCommand } from '../shared/compaction';
 import { SettingsPage } from './components/SettingsPage';
 import { HandoffDialog, type HandoffTarget } from './components/HandoffDialog';
+import { LimitNotice, SpendWarningBanner } from './components/SpendLimits';
+import { isLimitError, useUsage } from './hooks/useUsage';
+import type { ApiError, SpendLimitsPatch } from './api';
 import { SIDEBAR_LIMIT, SessionItem, SidebarNav, UpdateNotice, type Page } from './components/Sidebar';
 import { ToolsPanel, type ToolsTab } from './components/ToolsPanel';
 
@@ -115,6 +118,16 @@ export default function App() {
   const [handoffError, setHandoffError] = useState('');
   // Terminal / Preview panel of the project in context (docs/specs/terminal-preview.md).
   const [toolsTab, setToolsTab] = useState<ToolsTab | null>(null);
+  const [handoffLimited, setHandoffLimited] = useState(false);
+  // A request refused by a usage limit (409): its message and the same request with
+  // "Continuar mesmo assim" (overrideLimit for that one request only; never stored).
+  const [limitBlock, setLimitBlock] = useState<{
+    sessionId: string;
+    message: string;
+    retry: () => Promise<unknown>;
+  } | null>(null);
+  const [limitRetrying, setLimitRetrying] = useState(false);
+  const [usageWarningHidden, setUsageWarningHidden] = useState('');
   const focusComposerRef = useRef(false);
   const [expandedLists, setExpandedLists] = useState<Record<string, boolean>>({});
   const now = useNow(60_000);
@@ -153,7 +166,7 @@ export default function App() {
   const taskOutputs = useTaskOutputs(selectedSessionRef, detailSnapshotRef, setNotice);
   const messageQueue = useMessageQueue(selectedSession, setNotice);
   const { apply: applyQueue, reload: reloadQueue } = messageQueue;
-  const plans = usePlans(selectedSession, setNotice);
+  const plans = usePlans(selectedSession, setNotice, (error, retry) => blockedByLimit(error, retry));
   const { apply: applyPlan, reload: reloadPlans } = plans;
   const selectSession = (id: string) => {
     selectedSessionRef.current = id;
@@ -478,6 +491,27 @@ export default function App() {
   const thinkingOptions = supportedThinking(provider, session?.model);
   const reasoningUnavailable = provider?.capabilities.reasoning === false;
   activeRunIdRef.current = session?.activeRunId;
+  // Usage limits (docs/specs/spend-limits.md): the report of the open project (Settings) or of
+  // the conversation's project (chat banner), reloaded when a run finishes or a limit changes.
+  const limitsEnabled = data?.settings.spendLimits?.enabled === true;
+  const usageScope = page === 'settings' ? project?.id : (session?.projectId ?? undefined);
+  const usageVersion = useMemo(
+    () =>
+      JSON.stringify([
+        data?.settings.spendLimits,
+        data?.projects.find((p) => p.id === usageScope)?.spendLimits,
+        data?.runs.reduce(
+          (latest, run) => (run.completedAt && run.completedAt > latest ? run.completedAt : latest),
+          '',
+        ),
+      ]),
+    [data?.settings.spendLimits, data?.projects, data?.runs, usageScope],
+  );
+  const usage = useUsage(usageScope, usageVersion, page === 'settings' || limitsEnabled);
+  // Dismissing the banner hides it until another limit (or a limit being reached) appears.
+  const usageWarningKey = (usage.report?.warnings ?? [])
+    .map((w) => `${w.kind}:${w.used >= w.limit ? 'reached' : 'warn'}`)
+    .join(',');
   const projectSessions = useMemo(
     () => data?.sessions.filter((s) => s.projectId === selectedProject) || [],
     [data?.sessions, selectedProject],
@@ -497,6 +531,7 @@ export default function App() {
     plans: plans.plans,
     busy: busy || pendingSendForSession,
     onError: setNotice,
+    onLimit: (error, retry) => blockedByLimit(error, retry),
     onEdited: (sessionId, keep, started) => {
       setStream(null);
       setDetail((current) =>
@@ -706,15 +741,34 @@ export default function App() {
     }
   }
 
+  /** Shows the limit notice for the open conversation with its "Continuar mesmo assim" action. */
+  function blockedByLimit(error: ApiError, retry: () => Promise<unknown>) {
+    const sessionId = selectedSessionRef.current;
+    setNotice('');
+    setLimitBlock({ sessionId, message: error.message, retry });
+    void usage.reload();
+  }
+  async function continueDespiteLimit() {
+    const block = limitBlock;
+    if (!block || limitRetrying) return;
+    setLimitRetrying(true);
+    setLimitBlock(null);
+    try {
+      await block.retry();
+    } finally {
+      setLimitRetrying(false);
+    }
+  }
+
   /** `explicit` resends given attachments (retry, suggestions) instead of the composer's. */
-  async function sendMessage(value = composer, explicit?: AttachmentMeta[]) {
+  async function sendMessage(value = composer, explicit?: AttachmentMeta[], overrideLimit = false) {
     const content = value.trim();
     if (!content || !session || busy || session.activeRunId || settingsPendingRef.current) return;
     if (!explicit && attachments.uploading) return setNotice('Aguarde o envio dos anexos terminar.');
     // `/compactar` alone is an action, not a turn: no bubble, just the summary card.
     if (compactCommand(content) === 'compact' && !(explicit ?? attachments.ready).length) {
       setDrafts((current) => ({ ...current, [session.id]: '' }));
-      if (!(await compactConversation()))
+      if (!(await compactConversation(overrideLimit)))
         setDrafts((current) => ({ ...current, [session.id]: current[session.id] || content }));
       return;
     }
@@ -730,6 +784,7 @@ export default function App() {
     setDrafts((current) => ({ ...current, [sessionId]: '' }));
     setBusy(true);
     setNotice('');
+    setLimitBlock(null);
     conversationScroll.stick();
     const optimistic: Message = {
       id: `local-${crypto.randomUUID()}`,
@@ -749,6 +804,7 @@ export default function App() {
         content,
         crypto.randomUUID(),
         sentAttachments.map((item) => item.id),
+        overrideLimit,
       );
       accepted = true;
       if (!explicit) attachments.clear(sessionId);
@@ -806,11 +862,20 @@ export default function App() {
             ? { ...current, messages: current.messages.filter((message) => message.id !== optimistic.id) }
             : current,
         );
-        setDrafts((current) => ({
-          ...current,
-          [sessionId]: current[sessionId] ? `${content}\n${current[sessionId]}` : content,
-        }));
-        if (selectedSessionRef.current === sessionId) setNotice((error as Error).message);
+        if (selectedSessionRef.current === sessionId && isLimitError(error)) {
+          // The text leaves the composer only once "Continuar mesmo assim" sends it.
+          setDrafts((current) => ({ ...current, [sessionId]: current[sessionId] || content }));
+          blockedByLimit(error, async () => {
+            setDrafts((current) => (current[sessionId] === content ? { ...current, [sessionId]: '' } : current));
+            await sendMessage(content, sentAttachments, true);
+          });
+        } else {
+          setDrafts((current) => ({
+            ...current,
+            [sessionId]: current[sessionId] ? `${content}\n${current[sessionId]}` : content,
+          }));
+          if (selectedSessionRef.current === sessionId) setNotice((error as Error).message);
+        }
       }
     } finally {
       if (pendingSendRef.current === pendingSend) {
@@ -822,14 +887,15 @@ export default function App() {
   }
 
   /** "Compactar conversa" (docs/specs/compaction.md); true when the server accepted it. */
-  async function compactConversation() {
+  async function compactConversation(overrideLimit = false) {
     if (!session || busy || session.activeRunId) return false;
     const sessionId = session.id;
     setBusy(true);
     setNotice('');
+    setLimitBlock(null);
     conversationScroll.stick();
     try {
-      const { runId } = await api.compact(sessionId);
+      const { runId } = await api.compact(sessionId, overrideLimit);
       setDetail((current) =>
         current?.session.id === sessionId
           ? { ...current, session: { ...current.session, activeRunId: runId } }
@@ -838,7 +904,10 @@ export default function App() {
       await refreshDetail(sessionId).catch(() => undefined);
       return true;
     } catch (error) {
-      if (selectedSessionRef.current === sessionId) setNotice((error as Error).message);
+      if (selectedSessionRef.current === sessionId) {
+        if (isLimitError(error)) blockedByLimit(error, () => compactConversation(true));
+        else setNotice((error as Error).message);
+      }
       return false;
     } finally {
       setBusy(false);
@@ -880,14 +949,15 @@ export default function App() {
   }
 
   /** "Tentar com outro modelo": the server switches the conversation and starts the new run. */
-  async function retryWithModel(runId: string, target: { providerId: string; model: string }) {
+  async function retryWithModel(runId: string, target: { providerId: string; model: string }, overrideLimit = false) {
     if (!session || busy || session.activeRunId) return;
     const sessionId = session.id;
     setBusy(true);
     setNotice('');
+    setLimitBlock(null);
     conversationScroll.stick();
     try {
-      const started = await api.retryRun(runId, target);
+      const started = await api.retryRun(runId, target, overrideLimit);
       invalidateBootstrapRefreshes();
       const updated = { ...started.session, activeRunId: started.session.activeRunId ?? started.runId };
       setDetail((current) => (current?.session.id === sessionId ? { ...current, session: updated } : current));
@@ -898,7 +968,10 @@ export default function App() {
       );
       await refreshDetail(sessionId);
     } catch (error) {
-      if (selectedSessionRef.current === sessionId) setNotice((error as Error).message);
+      if (selectedSessionRef.current === sessionId) {
+        if (isLimitError(error)) blockedByLimit(error, () => retryWithModel(runId, target, true));
+        else setNotice((error as Error).message);
+      }
     } finally {
       setBusy(false);
     }
@@ -981,17 +1054,19 @@ export default function App() {
   function openHandoff(target?: HandoffTarget) {
     if (!session || busy || session.activeRunId) return;
     setHandoffError('');
+    setHandoffLimited(false);
     setHandoff({ sessionId: session.id, ...(target ? { target } : {}) });
   }
 
-  async function confirmHandoff(target: HandoffTarget, summary: HandoffSummaryMode) {
+  async function confirmHandoff(target: HandoffTarget, summary: HandoffSummaryMode, overrideLimit = false) {
     if (!handoff) return;
     const sessionId = handoff.sessionId;
     setHandoffBusy(true);
     setBusy(true);
     setHandoffError('');
+    setHandoffLimited(false);
     try {
-      const result = await api.handoff(sessionId, { ...target, summary });
+      const result = await api.handoff(sessionId, { ...target, summary }, overrideLimit);
       invalidateBootstrapRefreshes();
       applySession(result.session);
       const added = result.message;
@@ -1007,6 +1082,7 @@ export default function App() {
       focusComposerRef.current = true;
     } catch (error) {
       setHandoffError((error as Error).message);
+      setHandoffLimited(isLimitError(error));
     } finally {
       setHandoffBusy(false);
       setBusy(false);
@@ -1156,6 +1232,26 @@ export default function App() {
     if (!data) return;
     permissionTargetRef.current = { sandbox, approvalMode };
     await enqueueSettingsPatch({ sandbox, approvalMode });
+  }
+
+  async function changeSpendLimits(patch: SpendLimitsPatch) {
+    await enqueueSettingsPatch({ spendLimits: patch });
+  }
+
+  async function changeProjectSpendLimits(
+    projectId: string,
+    patch: { monthlyTokens?: number | null; monthlyCostUsd?: number | null },
+  ) {
+    try {
+      const updated = await api.updateProject(projectId, { spendLimits: patch });
+      setData((current) =>
+        current
+          ? { ...current, projects: current.projects.map((item) => (item.id === projectId ? updated : item)) }
+          : current,
+      );
+    } catch (error) {
+      setNotice((error as Error).message);
+    }
   }
 
   async function enqueueSettingsPatch(patch: Parameters<typeof api.settings>[0]) {
@@ -1759,6 +1855,21 @@ export default function App() {
                       </button>
                     </div>
                   )}
+                  {limitBlock && limitBlock.sessionId === session.id ? (
+                    <LimitNotice
+                      message={limitBlock.message}
+                      busy={limitRetrying || busy || Boolean(session.activeRunId)}
+                      onContinue={() => void continueDespiteLimit()}
+                      onDismiss={() => setLimitBlock(null)}
+                    />
+                  ) : (
+                    usageWarningKey !== usageWarningHidden && (
+                      <SpendWarningBanner
+                        report={usage.report}
+                        onDismiss={() => setUsageWarningHidden(usageWarningKey)}
+                      />
+                    )
+                  )}
                   <MessageQueue
                     queue={messageQueue}
                     running={Boolean(session.activeRunId)}
@@ -2073,6 +2184,10 @@ export default function App() {
               }
               onSetting={updateSetting}
               onModelFallback={(modelFallback) => void enqueueSettingsPatch({ modelFallback })}
+              usage={usage.report}
+              usageError={usage.error}
+              onSpendLimits={(patch) => void changeSpendLimits(patch)}
+              onProjectSpendLimits={(patch) => project && void changeProjectSpendLimits(project.id, patch)}
               onSkill={async (id, enabled) => {
                 try {
                   const result = await api.skill(id, enabled);
@@ -2125,7 +2240,8 @@ export default function App() {
           fixedTarget={handoff.target}
           busy={handoffBusy}
           error={handoffError}
-          onConfirm={(target, summary) => void confirmHandoff(target, summary)}
+          limitBlocked={handoffLimited}
+          onConfirm={(target, summary, overrideLimit) => void confirmHandoff(target, summary, overrideLimit)}
           onCancelRunning={() => void api.cancel(handoff.sessionId).catch(() => undefined)}
           onClose={() => setHandoff(null)}
         />

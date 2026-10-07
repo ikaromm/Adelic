@@ -14,6 +14,8 @@ export interface Project {
   memoryProject: string;
   orchestration?: OrchestrationConfig;
   graphify?: GraphifyConfig;
+  /** Optional monthly limits for this project; they apply while Settings.spendLimits is on. */
+  spendLimits?: ProjectSpendLimits;
 }
 export interface GraphifyConfig {
   enabled: boolean;
@@ -229,6 +231,8 @@ export interface Run {
   discardedAt?: string;
   /** A manual "Compactar conversa" run: one read-only summary call, no messages. */
   compaction?: { auto: boolean };
+  /** The summary call of "Continuar com outro agente": no messages, recorded for its usage. */
+  handoff?: { toProviderId: ProviderId };
 }
 /** A provider and one of its models; no model means the provider's default. */
 export interface ModelRef {
@@ -335,7 +339,8 @@ export interface QueuedMessage {
 }
 /** Why the queue stopped starting messages on its own; cleared by "Retomar fila". */
 export interface QueuePause {
-  reason: 'cancelled' | 'failed' | 'interrupted';
+  /** 'limit': the next message hit a usage limit (docs/specs/spend-limits.md). */
+  reason: 'cancelled' | 'failed' | 'interrupted' | 'limit';
   at: string;
   error?: string;
 }
@@ -389,6 +394,58 @@ export interface Settings {
   terminalRemote?: boolean;
   /** Global switch of scheduled automations (off by default): nothing runs while it is off. */
   automations?: boolean;
+  /** Opt-in usage limits checked before each model call (docs/specs/spend-limits.md). */
+  spendLimits?: SpendLimits;
+}
+/** Global usage limits; an absent value means no limit. Periods use the local timezone. */
+export interface SpendLimits {
+  enabled: boolean;
+  /** Input + output tokens since 00:00. */
+  dailyTokens?: number;
+  /** Input + output tokens in the calendar month. */
+  monthlyTokens?: number;
+  /** USD, counting only runs that reported a cost. */
+  dailyCostUsd?: number;
+  monthlyCostUsd?: number;
+}
+export interface ProjectSpendLimits {
+  monthlyTokens?: number;
+  monthlyCostUsd?: number;
+}
+/** Usage of the runs started in a period [from, to). */
+export interface UsageTotals {
+  from: string;
+  to: string;
+  /** Input + output tokens of the runs that reported them. */
+  tokens: number;
+  /** Sum over the runs that reported a cost; null when none did (never zero for unknown). */
+  costUsd: number | null;
+  runs: number;
+  /** Finished runs that reported no cost / no tokens. */
+  runsWithoutCost: number;
+  runsWithoutTokens: number;
+}
+export type SpendLimitKind =
+  'daily-tokens' | 'monthly-tokens' | 'daily-cost' | 'monthly-cost' | 'project-monthly-tokens' | 'project-monthly-cost';
+export interface SpendLimitStatus {
+  kind: SpendLimitKind;
+  /** pt-BR name of the limit, e.g. "tokens hoje". */
+  label: string;
+  used: number;
+  limit: number;
+  /** used / limit, rounded down (100 for a zero limit). */
+  percent: number;
+  usedText: string;
+  limitText: string;
+}
+/** GET /api/usage. `warnings`: at 80% or more; `reached`: at or over the limit. */
+export interface UsageReport {
+  today: UsageTotals;
+  month: UsageTotals;
+  project?: { id: string; today: UsageTotals; month: UsageTotals };
+  limits: { enabled: boolean; global: SpendLimits; project?: ProjectSpendLimits };
+  warnings: SpendLimitStatus[];
+  reached: SpendLimitStatus[];
 }
 export interface Integration {
   id: string;

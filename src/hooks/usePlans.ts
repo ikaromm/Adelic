@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Plan } from '../../shared/contracts';
 import { api, type ApiError } from '../api';
+import { isLimitError } from './useUsage';
 
 /** Inserts or replaces a plan, keeping creation order; plans of other conversations are ignored. */
 export function upsertPlan(plans: Plan[], next: Plan, sessionId: string) {
@@ -16,12 +17,19 @@ export function upsertPlan(plans: Plan[], next: Plan, sessionId: string) {
  * Plans of the open conversation (docs/specs/plan-mode.md). The server owns them; this hook
  * mirrors them, applies `plan` stream events and wraps the actions of the plan card.
  */
-export function usePlans(sessionId: string, onError: (message: string) => void) {
+export function usePlans(
+  sessionId: string,
+  onError: (message: string) => void,
+  /** A usage limit refused the start; `retry` repeats it with "Continuar mesmo assim". */
+  onLimit?: (error: ApiError, retry: () => Promise<unknown>) => void,
+) {
   const [plans, setPlans] = useState<Plan[]>([]);
   const sessionRef = useRef(sessionId);
   sessionRef.current = sessionId;
   const onErrorRef = useRef(onError);
   onErrorRef.current = onError;
+  const onLimitRef = useRef(onLimit);
+  onLimitRef.current = onLimit;
 
   const apply = useCallback((plan: Plan) => {
     setPlans((current) => upsertPlan(current, plan, sessionRef.current));
@@ -65,11 +73,19 @@ export function usePlans(sessionId: string, onError: (message: string) => void) 
         () => api.editPlan(id, markdown),
         (plan) => plan,
       ),
-    approve: (id: string, mode: 'all' | 'next') =>
-      act(
-        () => api.approvePlan(id, mode),
-        (result) => result.plan,
-      ),
+    approve: async function approve(id: string, mode: 'all' | 'next', overrideLimit = false): Promise<unknown> {
+      try {
+        const result = await api.approvePlan(id, mode, overrideLimit);
+        apply(result.plan);
+        return result;
+      } catch (error) {
+        if (isLimitError(error) && onLimitRef.current) onLimitRef.current(error, () => approve(id, mode, true));
+        else onErrorRef.current((error as Error).message);
+        // The server put the plan back; its stream event may arrive after this response.
+        void reload();
+        return undefined;
+      }
+    },
     setTask: (id: string, taskId: string, status: 'skipped' | 'pending') =>
       act(
         () => api.planTask(id, taskId, status),

@@ -74,7 +74,8 @@ export class Plans {
     return this.save(plan);
   }
 
-  async approve(planId: string, mode: 'all' | 'next') {
+  /** `overrideLimit` ("Continuar mesmo assim") lets only the first task pass the usage limits. */
+  async approve(planId: string, mode: 'all' | 'next', overrideLimit = false) {
     const plan = this.require(planId);
     this.requireIdle(plan);
     if (plan.status === 'rejected') throw httpError('Este plano foi descartado', 409);
@@ -89,7 +90,7 @@ export class Plans {
     delete plan.error;
     this.save(plan);
     try {
-      return { plan: this.store.getPlan(plan.id)!, started: await this.startNext(plan) };
+      return { plan: this.store.getPlan(plan.id)!, started: await this.startNext(plan, overrideLimit) };
     } catch (error) {
       const latest = this.store.getPlan(plan.id) ?? plan;
       latest.status = previous === 'draft' ? 'draft' : 'approved';
@@ -101,11 +102,12 @@ export class Plans {
   }
 
   /** Starts the first pending (or failed, i.e. retried) task. */
-  private async startNext(plan: Plan) {
+  private async startNext(plan: Plan, overrideLimit = false) {
     const task = plan.tasks.find((t) => t.status === 'pending' || t.status === 'failed');
     if (!task) throw httpError('Não há tarefas pendentes neste plano', 409);
     return this.deps.start(this.session(plan), taskLabel(plan, task), {
       planTask: { planId: plan.id, taskId: task.id, prompt: buildTaskPrompt(plan, task) },
+      ...(overrideLimit ? { overrideLimit } : {}),
     });
   }
 

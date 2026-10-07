@@ -8,6 +8,7 @@ import {
 } from '../../shared/schemas.js';
 import { error, errorStatus, message } from './common.js';
 import type { BackendContext } from './context.js';
+import { SPEND_LIMIT_CODE } from '../../shared/spend-limits.js';
 
 /** Plan mode (docs/specs/plan-mode.md): list, edit, approve, skip, stop, discard and save plans. */
 export function plansRoutes({ store, orchestrator }: BackendContext) {
@@ -19,8 +20,12 @@ export function plansRoutes({ store, orchestrator }: BackendContext) {
         await handler(req, res);
       } catch (e) {
         const status = errorStatus(e) || 500;
-        const { exists, path } = e as { exists?: boolean; path?: string };
-        res.status(status).json({ error: message(e), ...(exists ? { exists, path } : {}) });
+        const { exists, path, code, limit } = e as { exists?: boolean; path?: string; code?: string; limit?: unknown };
+        res.status(status).json({
+          error: message(e),
+          ...(exists ? { exists, path } : {}),
+          ...(code === SPEND_LIMIT_CODE ? { code, limit } : {}),
+        });
       }
     };
   const id = (req: Request, key = 'id') => String(req.params[key]);
@@ -44,7 +49,7 @@ export function plansRoutes({ store, orchestrator }: BackendContext) {
     route(async (req, res) => {
       const parsed = parseBody(PlanApproveSchema, req.body, 'mode deve ser all ou next');
       if (!parsed.ok) return error(res, 400, parsed.message);
-      res.status(202).json(await plans.approve(id(req), parsed.data.mode));
+      res.status(202).json(await plans.approve(id(req), parsed.data.mode, parsed.data.overrideLimit === true));
     }),
   );
   app.post(

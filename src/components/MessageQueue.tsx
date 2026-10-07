@@ -45,6 +45,11 @@ export function MessageQueue({
               {running ? 'Começa quando a resposta atual terminar.' : 'Iniciando a próxima mensagem…'}
             </span>
           )}
+          {queue?.paused?.reason === 'limit' && (
+            <button type="button" className="secondary-button" onClick={() => void api.resume(true)}>
+              Continuar mesmo assim
+            </button>
+          )}
           {queue?.paused && (
             <button type="button" className="secondary-button" onClick={() => void api.resume()}>
               <Play size={13} /> Retomar fila

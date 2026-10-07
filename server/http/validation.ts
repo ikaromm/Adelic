@@ -24,3 +24,14 @@ export function projectPath(input: unknown) {
   if (!existsSync(p) || !statSync(p).isDirectory()) throw new Error('O caminho precisa ser uma pasta existente');
   return p;
 }
+
+/** Merges a limits patch: absent keeps a field, `null` removes it. */
+export function mergeLimits<T extends object>(base: T, patch: { [K in keyof T]?: T[K] | null }): T {
+  const merged = { ...base } as Record<string, unknown>;
+  for (const [key, value] of Object.entries(patch)) {
+    if (value === undefined) continue;
+    if (value === null) delete merged[key];
+    else merged[key] = value;
+  }
+  return merged as T;
+}

@@ -1,6 +1,8 @@
 import { Router } from 'express';
-import type { Settings } from '../../shared/contracts.js';
-import { SettingsPatchSchema, SkillPatchSchema, parseBody } from '../../shared/schemas.js';
+import type { Settings, SpendLimits } from '../../shared/contracts.js';
+import { SettingsPatchSchema, SkillPatchSchema, UsageQuerySchema, parseBody } from '../../shared/schemas.js';
+import { usageReport } from '../usage.js';
+import { mergeLimits } from './validation.js';
 import { checkForUpdate } from '../updates.js';
 import { isLoopbackRequest } from './auth.js';
 import { error } from './common.js';
@@ -15,12 +17,24 @@ export function settingsRoutes({ store, automations }: BackendContext) {
     if (parsed.data.terminalRemote !== undefined && !isLoopbackRequest(req))
       return error(res, 403, 'Esta opção só pode ser alterada neste computador, não pelo acesso remoto');
     // Unknown keys are ignored, as before; only defined fields change.
-    const patch = Object.fromEntries(Object.entries(parsed.data).filter(([, value]) => value !== undefined));
+    const { spendLimits, ...rest } = parsed.data;
+    const patch = Object.fromEntries(Object.entries(rest).filter(([, value]) => value !== undefined));
     const previous = store.getSettings()!;
     const next: Settings = { ...previous, ...patch };
+    // Limits are merged field by field; `null` clears one. Off until the user turns them on.
+    if (spendLimits)
+      next.spendLimits = mergeLimits({ enabled: false, ...previous.spendLimits }, spendLimits) as SpendLimits;
     const saved = store.setSettings(next);
     if ((previous.automations === true) !== (saved.automations === true)) automations.globalChanged();
     res.json(saved);
+  });
+  // Usage today and this month (local time), the configured limits and those at 80% or more.
+  app.get('/api/usage', (req, res) => {
+    const query = parseBody(UsageQuerySchema, req.query, 'Parâmetros inválidos');
+    if (!query.ok) return error(res, 400, query.message);
+    const projectId = query.data.projectId;
+    if (projectId && !store.getProject(projectId)) return error(res, 404, 'Projeto não encontrado');
+    res.json(usageReport(store, projectId));
   });
   // Opt-in update check. `force` (manual "Verificar agora") works even when the automatic
   // check is off, since the user asked for it explicitly.

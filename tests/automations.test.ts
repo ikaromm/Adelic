@@ -556,6 +556,22 @@ describe('scheduler', () => {
     }
   });
 
+  it('a usage limit already reached stops the automation before any model call', async () => {
+    const t = setup({
+      settings: { spendLimits: { enabled: true, dailyTokens: 0 } },
+      before: (store) => store.putAutomation(automation()),
+    });
+    try {
+      const fired = await t.automations.fire('a1', 'manual');
+      expect(fired).toMatchObject({ ok: false, status: 409 });
+      expect(t.get().lastResult).toMatchObject({ status: 'failed' });
+      expect(t.get().lastResult?.detail).toMatch(/Limite de uso atingido/);
+      expect(t.provider.inputs).toHaveLength(0);
+    } finally {
+      await t.close();
+    }
+  });
+
   it('auto-denies a pending approval of an automated run after the timeout, never approves', async () => {
     const t = setup({
       before: (store) => store.putAutomation(automation({ prompt: '[aprovar] rode', denyApprovalsAfterMinutes: 5 })),

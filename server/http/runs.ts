@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { CheckpointError, checkpointDiff } from '../checkpoints.js';
 import { RestoreRunSchema, RetryRunSchema, parseBody, text } from '../../shared/schemas.js';
-import { error, errorStatus, message } from './common.js';
+import { error, errorStatus, failure, message } from './common.js';
 import type { BackendContext } from './context.js';
 
 const pathQuery = text(4096);
@@ -48,10 +48,11 @@ export function runsRoutes({ store, orchestrator }: BackendContext) {
   app.post('/api/runs/:id/retry', async (req, res) => {
     const parsed = parseBody(RetryRunSchema, req.body, 'Pedido inválido');
     if (!parsed.ok) return error(res, 400, parsed.message);
+    const { overrideLimit, ...target } = parsed.data;
     try {
-      res.status(202).json(await orchestrator.retryRun(req.params.id, parsed.data));
+      res.status(202).json(await orchestrator.retryRun(req.params.id, target, { overrideLimit }));
     } catch (e) {
-      error(res, errorStatus(e) || 500, message(e));
+      failure(res, e);
     }
   });
   return app;

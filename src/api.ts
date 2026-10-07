@@ -24,6 +24,8 @@ import type {
   SessionDetail,
   Settings,
   Skill,
+  SpendLimitStatus,
+  UsageReport,
 } from '../shared/contracts';
 import type { CommandList, CommandMode, SavedCommand } from '../shared/commands';
 import type { VoiceStatus } from '../shared/voice';
@@ -75,7 +77,20 @@ type ProjectPatch = {
   memoryProject?: string;
   orchestration?: Project['orchestration'];
   graphify?: Project['graphify'];
+  /** `null` clears all; a field set to `null` clears that limit. */
+  spendLimits?: { monthlyTokens?: number | null; monthlyCostUsd?: number | null } | null;
 };
+/** Settings › Limites de uso: absent keeps a field, `null` clears a limit. */
+export type SpendLimitsPatch = {
+  enabled?: boolean;
+  dailyTokens?: number | null;
+  monthlyTokens?: number | null;
+  dailyCostUsd?: number | null;
+  monthlyCostUsd?: number | null;
+};
+export type SettingsPatch = Partial<Omit<Settings, 'spendLimits'>> & { spendLimits?: SpendLimitsPatch };
+/** Body flag of "Continuar mesmo assim": that one request passes the usage limits. */
+const override = (overrideLimit?: boolean) => (overrideLimit ? { overrideLimit: true } : {});
 function serializeProjectPatch(data: ProjectPatch) {
   if (!data.orchestration) return JSON.stringify(data);
   const orchestration: Record<string, unknown> = { ...data.orchestration };
@@ -85,8 +100,17 @@ function serializeProjectPatch(data: ProjectPatch) {
   return JSON.stringify({ ...data, orchestration });
 }
 
-/** Error from the API; `conflicts` lists files that blocked an undo (409), `exists` a file not overwritten. */
-export type ApiError = Error & { status: number; conflicts?: string[]; exists?: boolean };
+/**
+ * Error from the API; `conflicts` lists files that blocked an undo (409), `exists` a file not
+ * overwritten, `code: 'spend_limit'` a usage limit that "Continuar mesmo assim" can pass.
+ */
+export type ApiError = Error & {
+  status: number;
+  conflicts?: string[];
+  exists?: boolean;
+  code?: string;
+  limit?: SpendLimitStatus;
+};
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
@@ -98,11 +122,15 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       error?: string;
       conflicts?: string[];
       exists?: boolean;
+      code?: string;
+      limit?: SpendLimitStatus;
     };
     const error = new Error(body.error || `Falha na solicitação (${response.status})`) as ApiError;
     error.status = response.status;
     if (Array.isArray(body.conflicts)) error.conflicts = body.conflicts;
     if (body.exists === true) error.exists = true;
+    if (typeof body.code === 'string') error.code = body.code;
+    if (body.limit) error.limit = body.limit;
     throw error;
   }
   if (response.status === 204) return undefined as T;
@@ -148,22 +176,41 @@ export const api = {
     },
   ) => request<Session>(`/api/sessions/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(data) }),
   /** "Continuar com outro agente" (docs/specs/provider-handoff.md). */
-  handoff: (id: string, body: { providerId: string; model?: string; summary: HandoffSummaryMode }) =>
+  handoff: (
+    id: string,
+    body: { providerId: string; model?: string; summary: HandoffSummaryMode },
+    overrideLimit?: boolean,
+  ) =>
     request<{ session: Session; message?: Message }>(`/api/sessions/${encodeURIComponent(id)}/handoff`, {
       method: 'POST',
-      body: JSON.stringify(body),
+      body: JSON.stringify({ ...body, ...override(overrideLimit) }),
     }),
   deleteSession: (id: string) => request<void>(`/api/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' }),
-  send: (id: string, content: string, clientMessageId: string, attachmentIds: string[] = []) =>
+  send: (id: string, content: string, clientMessageId: string, attachmentIds: string[] = [], overrideLimit?: boolean) =>
     request<{ runId: string; messageId: string }>(`/api/sessions/${encodeURIComponent(id)}/messages`, {
       method: 'POST',
-      body: JSON.stringify({ content, clientMessageId, ...(attachmentIds.length ? { attachmentIds } : {}) }),
+      body: JSON.stringify({
+        content,
+        clientMessageId,
+        ...(attachmentIds.length ? { attachmentIds } : {}),
+        ...override(overrideLimit),
+      }),
     }),
   /** Edit and resend (docs/specs/edit-branch.md): discards this message and the later ones. */
-  editMessage: (id: string, messageId: string, content: string, clientMessageId: string, attachmentIds: string[]) =>
+  editMessage: (
+    id: string,
+    messageId: string,
+    content: string,
+    clientMessageId: string,
+    attachmentIds: string[],
+    overrideLimit?: boolean,
+  ) =>
     request<{ runId: string; messageId: string }>(
       `/api/sessions/${encodeURIComponent(id)}/messages/${encodeURIComponent(messageId)}/edit`,
-      { method: 'POST', body: JSON.stringify({ content, clientMessageId, attachmentIds }) },
+      {
+        method: 'POST',
+        body: JSON.stringify({ content, clientMessageId, attachmentIds, ...override(overrideLimit) }),
+      },
     ),
   /** "Ramificar daqui": a new conversation with the messages up to and including `messageId`. */
   branch: (id: string, messageId: string) =>
@@ -203,10 +250,10 @@ export const api = {
       method: 'DELETE',
       body: JSON.stringify({}),
     }),
-  resumeQueue: (id: string) =>
+  resumeQueue: (id: string, overrideLimit?: boolean) =>
     request<{ queue: MessageQueue }>(`/api/sessions/${encodeURIComponent(id)}/queue/resume`, {
       method: 'POST',
-      body: JSON.stringify({}),
+      body: JSON.stringify(override(overrideLimit)),
     }),
   steerQueued: (id: string, itemId: string) =>
     request<{ queue: MessageQueue }>(
@@ -219,10 +266,10 @@ export const api = {
       body: JSON.stringify(body),
     }),
   // Conversation compaction (docs/specs/compaction.md).
-  compact: (sessionId: string) =>
+  compact: (sessionId: string, overrideLimit?: boolean) =>
     request<{ runId: string }>(`/api/sessions/${encodeURIComponent(sessionId)}/compact`, {
       method: 'POST',
-      body: JSON.stringify({}),
+      body: JSON.stringify(override(overrideLimit)),
     }),
   compactions: (sessionId: string) =>
     request<{ compactions: Compaction[] }>(`/api/sessions/${encodeURIComponent(sessionId)}/compactions`),
@@ -230,10 +277,10 @@ export const api = {
   plans: (sessionId: string) => request<{ plans: Plan[] }>(`/api/sessions/${encodeURIComponent(sessionId)}/plans`),
   editPlan: (id: string, markdown: string) =>
     request<Plan>(`/api/plans/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ markdown }) }),
-  approvePlan: (id: string, mode: 'all' | 'next') =>
+  approvePlan: (id: string, mode: 'all' | 'next', overrideLimit?: boolean) =>
     request<{ plan: Plan; started: { runId: string; messageId: string } }>(
       `/api/plans/${encodeURIComponent(id)}/approve`,
-      { method: 'POST', body: JSON.stringify({ mode }) },
+      { method: 'POST', body: JSON.stringify({ mode, ...override(overrideLimit) }) },
     ),
   planTask: (id: string, taskId: string, status: 'skipped' | 'pending') =>
     request<Plan>(`/api/plans/${encodeURIComponent(id)}/tasks/${encodeURIComponent(taskId)}`, {
@@ -264,15 +311,18 @@ export const api = {
       body: JSON.stringify({ confirm: true }),
     }),
   /** Repeats a finished run's request; with a target, switches the conversation to it first. */
-  retryRun: (id: string, target: { providerId?: string; model?: string } = {}) =>
+  retryRun: (id: string, target: { providerId?: string; model?: string } = {}, overrideLimit?: boolean) =>
     request<{ runId: string; messageId: string; session: Session }>(`/api/runs/${encodeURIComponent(id)}/retry`, {
       method: 'POST',
-      body: JSON.stringify(target),
+      body: JSON.stringify({ ...target, ...override(overrideLimit) }),
     }),
   approve: (id: string, decision: 'approve' | 'deny') =>
     request<void>(`/api/approvals/${encodeURIComponent(id)}`, { method: 'POST', body: JSON.stringify({ decision }) }),
-  settings: (data: Partial<Settings>) =>
+  settings: (data: SettingsPatch) =>
     request<Settings>('/api/settings', { method: 'PATCH', body: JSON.stringify(data) }),
+  /** Usage today and this month, the limits and those at 80% or more (docs/specs/spend-limits.md). */
+  usage: (projectId?: string) =>
+    request<UsageReport>(`/api/usage${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ''}`),
   memorySearch: (projectId: string, q: string) =>
     request<{ hits: MemoryHit[] }>(
       `/api/memory/search?projectId=${encodeURIComponent(projectId)}&q=${encodeURIComponent(q)}`,

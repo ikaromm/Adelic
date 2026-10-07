@@ -43,8 +43,8 @@ Em execuções coordenadas, o planejador e os executores recebem o pedido com os
 
 ## O que foi verificado
 
-- Codex CLI 0.160.0 instalado: o app-server lista `localImage` entre as variantes de `UserInput` e aceita `{ type: 'localImage', path }` (erro só de thread inexistente, sem chamar o modelo). Uma resposta real do modelo a uma imagem não foi testada.
-- kiro-cli 2.23.0 instalado: `initialize` em `acp --agent-engine v2` responde `promptCapabilities: { image: true }`. O envio real de uma imagem ao modelo não foi testado.
+- Codex CLI 0.160.0 instalado: o app-server lista `localImage` entre as variantes de `UserInput` e aceita `{ type: 'localImage', path }` (erro só de thread inexistente, sem chamar o modelo). Com modelo real (2026-10-07), uma PNG vermelha anexada foi identificada como "Vermelho".
+- kiro-cli 2.23.0 instalado: `initialize` em `acp --agent-engine v2` responde `promptCapabilities: { image: true }`. Com modelo real (2026-10-07), a mesma PNG vermelha foi identificada como "Vermelho".
 - Testes com runtimes simulados: input do Codex com o caminho copiado e legível, recusa do Kiro sem capacidade, cópia legível dentro do bubblewrap real, rotas, migração, limites e E2E no navegador.
 
 ## O que não foi feito

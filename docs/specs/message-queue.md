@@ -28,7 +28,7 @@ A fila fica no servidor (SQLite, migração 4: `message_queue(id, session_id, po
 
 ## Orientação (steering): o que foi verificado
 
-- Codex: o `codex-cli 0.160.0` local anuncia `turn/steer` no protocolo do app-server (`codex app-server generate-ts`: `TurnSteerParams { threadId, input: UserInput[], expectedTurnId, clientUserMessageId? }`, resposta `{ turnId }`). Uma chamada real com uma thread inexistente respondeu "thread not found", e não "unknown variant", o que confirma que o método existe. O Codex informa `steer: true`; a orientação usa o `turnId` do turno ativo e é recusada quando há mais de uma tarefa do Codex em paralelo na mesma execução. O efeito sobre um turno real não foi testado com modelo, só contra o app-server simulado dos testes.
+- Codex: o `codex-cli 0.160.0` local anuncia `turn/steer` no protocolo do app-server (`codex app-server generate-ts`: `TurnSteerParams { threadId, input: UserInput[], expectedTurnId, clientUserMessageId? }`, resposta `{ turnId }`). Uma chamada real com uma thread inexistente respondeu "thread not found", e não "unknown variant", o que confirma que o método existe. O Codex informa `steer: true`; a orientação usa o `turnId` do turno ativo e é recusada quando há mais de uma tarefa do Codex em paralelo na mesma execução. Com modelo real (2026-10-07), uma orientação enviada durante uma contagem foi aceita no turno em andamento, que terminou com a palavra pedida.
 - Kiro (ACP), Claude e OpenCode: sem método verificado, `steer: false`. A interface oferece só **Enviar agora (interrompe)**.
 
 ## Limites

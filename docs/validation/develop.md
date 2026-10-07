@@ -28,14 +28,15 @@ Estado do `develop` com os 21 recursos do roadmap inspirado em outras harness (a
   - `initialize` anuncia imagens;
   - `session/new` aceita `mcpServers`;
   - a lista de servidores da sessão pode ser consultada.
+- **Turnos com modelo real** (2026-10-07, pelos adaptadores do Adelic, sandbox somente leitura):
+  - imagem PNG vermelha anexada: Codex 0.160 e Kiro 2.23 responderam "Vermelho";
+  - orientação (`turn/steer`) no Codex durante uma contagem: aceita no turno em andamento, que terminou respondendo a palavra pedida na orientação.
 - **voxtype 1.1.0 local** (whisper, modo local, large-v3): a transcrição de um tom gerado passou pelo pipeline real com ffmpeg. O teste fica desligado por padrão (`ADELIC_VOICE_INTEGRATION=1`).
 - **Electron** com uma pasta de dados descartável: permissão de notificação concedida só à própria origem; câmera continua negada.
 
 ## Não verificado
 
 - **Turnos com modelo real:**
-  - imagem enviada ao modelo;
-  - orientação (steer) durante um turno;
   - chamada de ferramenta MCP com aprovação;
   - sobrecarga real para a troca de modelo.
 - **Voz:** microfone de verdade no navegador ou no Electron, e fala real transcrita.

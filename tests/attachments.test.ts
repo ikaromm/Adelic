@@ -158,7 +158,11 @@ describe('migration 3: attachments table', () => {
     );
     expect(userVersion(db)).toBe(2);
     db.exec(`INSERT INTO sessions(id,project_id,data) VALUES('s',NULL,'{}');`);
-    const result = migrate(db, dir);
+    const result = migrate(
+      db,
+      dir,
+      migrations.filter((m) => m.version <= 3),
+    );
     expect(result).toMatchObject({ from: 2, to: 3, applied: [3] });
     expect(result.backupPath).toBeTruthy();
     db.exec(`INSERT INTO attachments(id,session_id,data) VALUES('a','s','{}');`);

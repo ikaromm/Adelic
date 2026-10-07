@@ -18,6 +18,10 @@ import {
   type Skill,
   type ConversationSearchHit,
   type StoredAttachment,
+  type MessageQueue,
+  type QueuePause,
+  type QueuedMessage,
+  QUEUE_LIMIT,
 } from '../shared/contracts.js';
 import { migrate, type MigrationResult } from './migrations.js';
 
@@ -93,6 +97,12 @@ export class Store {
     this.db.exec(
       "UPDATE delegated_tasks SET data=json_set(data,'$.status','interrupted','$.completedAt',datetime('now'),'$.error','Servidor reiniciado durante a tarefa') WHERE json_extract(data,'$.status') IN ('running','queued')",
     );
+    // Nothing drains a queue after a restart on its own: pause it so the UI offers "Retomar fila".
+    this.db
+      .prepare(
+        'INSERT INTO message_queue_state(session_id,data) SELECT DISTINCT session_id, ? FROM message_queue WHERE session_id NOT IN (SELECT session_id FROM message_queue_state)',
+      )
+      .run(JSON.stringify({ reason: 'interrupted', at: new Date().toISOString() } satisfies QueuePause));
   }
   close() {
     this.db.close();
@@ -440,6 +450,82 @@ export class Store {
       hits.set(session.id, hit);
     }
     return [...hits.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, limit);
+  }
+  private transaction<T>(work: () => T): T {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const result = work();
+      this.db.exec('COMMIT');
+      return result;
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+  listQueue(sessionId: string) {
+    return this.rows<QueuedMessage>('message_queue', 'WHERE session_id=? ORDER BY position, rowid', [sessionId]);
+  }
+  getQueue(sessionId: string): MessageQueue {
+    const row = this.db.prepare('SELECT data FROM message_queue_state WHERE session_id=?').get(sessionId) as
+      { data: string } | undefined;
+    return {
+      sessionId,
+      items: this.listQueue(sessionId),
+      ...(row ? { paused: JSON.parse(row.data) as QueuePause } : {}),
+    };
+  }
+  /**
+   * Appends an item, or puts it at the front with `front` (a start that failed, or
+   * "Enviar agora"). Returns the queued item that already has the same clientId, if any.
+   * Throws 409 when the queue is full, unless `ignoreLimit`.
+   */
+  enqueue(item: QueuedMessage, options: { front?: boolean; ignoreLimit?: boolean } = {}): QueuedMessage {
+    return this.transaction(() => {
+      const items = this.listQueue(item.sessionId);
+      const duplicate = item.clientId ? items.find((i) => i.clientId === item.clientId) : undefined;
+      if (duplicate) return duplicate;
+      if (!options.ignoreLimit && items.length >= QUEUE_LIMIT)
+        throw Object.assign(new Error(`A fila já tem o máximo de ${QUEUE_LIMIT} mensagens`), { status: 409 });
+      const bound = this.db
+        .prepare(`SELECT ${options.front ? 'MIN' : 'MAX'}(position) AS p FROM message_queue WHERE session_id=?`)
+        .get(item.sessionId) as { p: number | null };
+      const position = bound.p === null ? 0 : options.front ? bound.p - 1 : bound.p + 1;
+      this.db
+        .prepare('INSERT INTO message_queue(id,session_id,position,data) VALUES(?,?,?,?)')
+        .run(item.id, item.sessionId, position, JSON.stringify(item));
+      return item;
+    });
+  }
+  updateQueued(sessionId: string, itemId: string, content: string) {
+    const item = this.listQueue(sessionId).find((i) => i.id === itemId);
+    if (!item) return undefined;
+    const next: QueuedMessage = { ...item, content, updatedAt: new Date().toISOString() };
+    this.db
+      .prepare('UPDATE message_queue SET data=? WHERE id=? AND session_id=?')
+      .run(JSON.stringify(next), itemId, sessionId);
+    return next;
+  }
+  removeQueued(sessionId: string, itemId: string) {
+    const result = this.db.prepare('DELETE FROM message_queue WHERE id=? AND session_id=?').run(itemId, sessionId);
+    return Number(result.changes) > 0;
+  }
+  /** Removes and returns the first queued item (or `itemId`), atomically. */
+  takeQueued(sessionId: string, itemId?: string) {
+    return this.transaction(() => {
+      const items = this.listQueue(sessionId);
+      const item = itemId ? items.find((i) => i.id === itemId) : items[0];
+      if (item) this.db.prepare('DELETE FROM message_queue WHERE id=?').run(item.id);
+      return item;
+    });
+  }
+  setQueuePause(sessionId: string, pause: QueuePause | null) {
+    if (pause)
+      this.db
+        .prepare(
+          'INSERT INTO message_queue_state(session_id,data) VALUES(?,?) ON CONFLICT(session_id) DO UPDATE SET data=excluded.data',
+        )
+        .run(sessionId, JSON.stringify(pause));
+    else this.db.prepare('DELETE FROM message_queue_state WHERE session_id=?').run(sessionId);
   }
   exportData() {
     return {

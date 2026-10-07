@@ -11,7 +11,9 @@ import type {
   MemoryPage,
   MemoryScope,
   FileChange,
+  MessageQueue,
   Project,
+  QueuedMessage,
   ProjectCoordination,
   Run,
   Session,
@@ -146,6 +148,41 @@ export const api = {
       signal,
     }),
   attachmentUrl: (id: string) => `/api/attachments/${encodeURIComponent(id)}`,
+  queue: (id: string) => request<MessageQueue>(`/api/sessions/${encodeURIComponent(id)}/queue`),
+  enqueue: (id: string, content: string, clientId: string, attachmentIds: string[] = []) =>
+    request<{ item?: QueuedMessage; started?: { runId: string; messageId: string }; queue: MessageQueue }>(
+      `/api/sessions/${encodeURIComponent(id)}/queue`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ content, clientId, ...(attachmentIds.length ? { attachmentIds } : {}) }),
+      },
+    ),
+  editQueued: (id: string, itemId: string, content: string) =>
+    request<QueuedMessage>(`/api/sessions/${encodeURIComponent(id)}/queue/${encodeURIComponent(itemId)}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ content }),
+    }),
+  removeQueued: (id: string, itemId: string) =>
+    // The origin guard requires a JSON body on every mutation, DELETE included.
+    request<void>(`/api/sessions/${encodeURIComponent(id)}/queue/${encodeURIComponent(itemId)}`, {
+      method: 'DELETE',
+      body: JSON.stringify({}),
+    }),
+  resumeQueue: (id: string) =>
+    request<{ queue: MessageQueue }>(`/api/sessions/${encodeURIComponent(id)}/queue/resume`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    }),
+  steerQueued: (id: string, itemId: string) =>
+    request<{ queue: MessageQueue }>(
+      `/api/sessions/${encodeURIComponent(id)}/queue/${encodeURIComponent(itemId)}/steer`,
+      { method: 'POST', body: JSON.stringify({}) },
+    ),
+  sendNow: (id: string, body: { content: string; clientId: string; attachmentIds?: string[] } | { itemId: string }) =>
+    request<{ queue: MessageQueue }>(`/api/sessions/${encodeURIComponent(id)}/send-now`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
   cancel: (id: string) => request<void>(`/api/sessions/${encodeURIComponent(id)}/cancel`, { method: 'POST' }),
   runChanges: (id: string) =>
     request<{ available: boolean; reason?: string; files: FileChange[]; omitted?: number; restoredAt?: string }>(

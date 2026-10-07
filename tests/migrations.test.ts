@@ -119,4 +119,20 @@ describe('SQLite schema migrations', () => {
     expect(tableRows(restored, 'projects')).toEqual([{ id: 'p', data: '{"v":1}' }]);
     restored.close();
   });
+
+  it('upgrades a version 2 database through the attachments and message queue schemas', () => {
+    const dir = tempDir();
+    const db = new DatabaseSync(join(dir, 'adelic.sqlite'));
+    migrate(
+      db,
+      dir,
+      migrations.filter((m) => m.version <= 2),
+    );
+    db.exec(`INSERT INTO sessions VALUES('s',NULL,'{}');`);
+    const result = migrate(db, dir);
+    expect(result).toMatchObject({ from: 2, to: 4, applied: [3, 4] });
+    db.exec(`PRAGMA foreign_keys=ON; INSERT INTO message_queue VALUES('q','s',0,'{}'); DELETE FROM sessions;`);
+    expect(tableRows(db, 'message_queue')).toEqual([]);
+    db.close();
+  });
 });

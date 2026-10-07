@@ -8,8 +8,11 @@ import {
   ApprovalDecisionSchema,
   CreateSessionSchema,
   PatchSessionSchema,
+  QueueEditSchema,
+  QueueMessageSchema,
   SendMessageSchema,
   UploadAttachmentSchema,
+  SendNowSchema,
   parseBody,
   text,
 } from '../../shared/schemas.js';
@@ -52,7 +55,19 @@ function knownModel(catalog: ProviderInfo[], providerId: string, model: string) 
   return Boolean(provider && provider.models.some((item) => item.id === model));
 }
 
+const MISSING_ATTACHMENT = 'Anexo não encontrado nesta conversa; envie o arquivo de novo.';
+
 export function sessionsRoutes({ store, orchestrator, providerList }: BackendContext) {
+  /** Attachments by id, only when every one belongs to the conversation; otherwise undefined. */
+  const ownedAttachments = (sessionId: string, ids: string[]): StoredAttachment[] | undefined => {
+    const found: StoredAttachment[] = [];
+    for (const attachmentId of ids) {
+      const attachment = store.getAttachment(attachmentId);
+      if (!attachment || attachment.sessionId !== sessionId) return undefined;
+      found.push(attachment);
+    }
+    return found;
+  };
   const app = Router();
   app.post('/api/sessions', async (req, res) => {
     const parsed = parseBody(CreateSessionSchema, req.body, 'Conversa inválida');
@@ -228,13 +243,8 @@ export function sessionsRoutes({ store, orchestrator, providerList }: BackendCon
     const parsed = parseBody(SendMessageSchema, req.body, 'content obrigatório (máximo 32000 caracteres)');
     if (!parsed.ok) return error(res, 400, parsed.message);
     const { content, clientMessageId, attachmentIds = [] } = parsed.data;
-    const attachments: StoredAttachment[] = [];
-    for (const id of attachmentIds) {
-      const attachment = store.getAttachment(id);
-      if (!attachment || attachment.sessionId !== s.id)
-        return error(res, 400, 'Anexo não encontrado nesta conversa; envie o arquivo de novo.');
-      attachments.push(attachment);
-    }
+    const attachments = ownedAttachments(s.id, attachmentIds);
+    if (!attachments) return error(res, 400, MISSING_ATTACHMENT);
     try {
       const result = await orchestrator.start(s, content, clientMessageId, attachments);
       res.status(202).json(result);
@@ -252,6 +262,81 @@ export function sessionsRoutes({ store, orchestrator, providerList }: BackendCon
       error(res, errorStatus(e) || 500, message(e));
     }
   });
+  // Message queue: waits for the active run, then starts on its own (docs/specs/message-queue.md).
+  // Queued messages keep their attachment ids; ownership is checked here and again when they start.
+  const queueRoute =
+    (handler: (req: Request, res: Response) => Promise<unknown> | unknown) => async (req: Request, res: Response) => {
+      if (!store.getSession(String(req.params.id))) return error(res, 404, 'Conversa não encontrada');
+      try {
+        await handler(req, res);
+      } catch (e) {
+        error(res, errorStatus(e) || 500, message(e));
+      }
+    };
+  const id = (req: Request, key = 'id') => String(req.params[key]);
+  app.get(
+    '/api/sessions/:id/queue',
+    queueRoute((req, res) => res.json(orchestrator.queue(id(req)))),
+  );
+  app.post(
+    '/api/sessions/:id/queue',
+    queueRoute(async (req, res) => {
+      const parsed = parseBody(QueueMessageSchema, req.body, 'content obrigatório (máximo 32000 caracteres)');
+      if (!parsed.ok) return error(res, 400, parsed.message);
+      const attachments = ownedAttachments(id(req), parsed.data.attachmentIds ?? []);
+      if (!attachments) return error(res, 400, MISSING_ATTACHMENT);
+      const result = await orchestrator.enqueue(
+        id(req),
+        parsed.data.content,
+        parsed.data.clientId,
+        attachments.map(attachmentMeta),
+      );
+      res.status(result.started ? 202 : 201).json({ ...result, queue: orchestrator.queue(id(req)) });
+    }),
+  );
+  app.patch(
+    '/api/sessions/:id/queue/:itemId',
+    queueRoute((req, res) => {
+      const parsed = parseBody(QueueEditSchema, req.body, 'content obrigatório (máximo 32000 caracteres)');
+      if (!parsed.ok) return error(res, 400, parsed.message);
+      res.json(orchestrator.editQueued(id(req), id(req, 'itemId'), parsed.data.content));
+    }),
+  );
+  app.delete(
+    '/api/sessions/:id/queue/:itemId',
+    queueRoute((req, res) => {
+      orchestrator.removeQueued(id(req), id(req, 'itemId'));
+      res.status(204).end();
+    }),
+  );
+  app.post(
+    '/api/sessions/:id/queue/resume',
+    queueRoute(async (req, res) => res.json(await orchestrator.resumeQueue(id(req)))),
+  );
+  app.post(
+    '/api/sessions/:id/queue/:itemId/steer',
+    queueRoute(async (req, res) => {
+      await orchestrator.steerQueued(id(req), id(req, 'itemId'));
+      res.status(202).json({ ok: true, queue: orchestrator.queue(id(req)) });
+    }),
+  );
+  app.post(
+    '/api/sessions/:id/send-now',
+    queueRoute(async (req, res) => {
+      const parsed = parseBody(SendNowSchema, req.body, 'Envie content ou itemId');
+      if (!parsed.ok) return error(res, 400, parsed.message);
+      const { content, clientId, itemId, attachmentIds = [] } = parsed.data;
+      if (Boolean(content) === Boolean(itemId)) return error(res, 400, 'Envie content ou itemId');
+      if (itemId && attachmentIds.length) return error(res, 400, 'attachmentIds só vale com content');
+      const attachments = ownedAttachments(id(req), attachmentIds);
+      if (!attachments) return error(res, 400, MISSING_ATTACHMENT);
+      const result = await orchestrator.sendNow(
+        id(req),
+        itemId ? { itemId } : { content: content!, clientId, attachments: attachments.map(attachmentMeta) },
+      );
+      res.status(202).json({ ...result, queue: orchestrator.queue(id(req)) });
+    }),
+  );
   app.post('/api/approvals/:id', async (req, res) => {
     const parsed = parseBody(ApprovalDecisionSchema, req.body, 'decision deve ser approve ou deny');
     if (!parsed.ok) return error(res, 400, parsed.message);

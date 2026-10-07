@@ -115,6 +115,25 @@ export const UploadAttachmentSchema = z.object({
     'data deve ser o conteúdo do arquivo em base64',
   ),
 });
+const attachmentIdsField = optional(
+  AttachmentIdsSchema,
+  `attachmentIds inválido (até ${MAX_ATTACHMENTS_PER_MESSAGE} anexos, sem repetição)`,
+);
+export const QueueMessageSchema = z.object({
+  content: required(text(32000), 'content obrigatório (máximo 32000 caracteres)'),
+  clientId: optional(text(128), 'clientId inválido'),
+  attachmentIds: attachmentIdsField,
+});
+export const QueueEditSchema = z.object({
+  content: required(text(32000), 'content obrigatório (máximo 32000 caracteres)'),
+});
+/** "Enviar agora": new text (`content`) or a queued item (`itemId`); the route requires exactly one. */
+export const SendNowSchema = z.object({
+  content: optional(text(32000), 'content obrigatório (máximo 32000 caracteres)'),
+  clientId: optional(text(128), 'clientId inválido'),
+  itemId: optional(text(128), 'itemId inválido'),
+  attachmentIds: attachmentIdsField,
+});
 export const ApprovalDecisionSchema = z.object({
   decision: required(z.enum(['approve', 'deny']), 'decision deve ser approve ou deny'),
 });

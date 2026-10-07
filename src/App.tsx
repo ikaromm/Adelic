@@ -19,6 +19,7 @@ import {
   Menu,
   Search,
   Download,
+  ListPlus,
 } from 'lucide-react';
 import type {
   AttachmentMeta,
@@ -49,6 +50,8 @@ import { useTaskOutputs } from './hooks/useTaskOutputs';
 import { notificationsEnabled, useRunNotifications } from './hooks/useRunNotifications';
 import { useComposerAttachments } from './hooks/useComposerAttachments';
 import { AttachButton, PendingAttachments } from './components/ComposerAttachments';
+import { composerKeyAction, useMessageQueue } from './hooks/useMessageQueue';
+import { MessageQueue } from './components/MessageQueue';
 import { projectOrchestration } from '../shared/contracts';
 import { ActivityPage } from './components/ActivityPage';
 import { ConversationSearch } from './components/ConversationSearch';
@@ -116,6 +119,8 @@ export default function App() {
   projectSnapshotRef.current = data;
   detailSnapshotRef.current = detail;
   const taskOutputs = useTaskOutputs(selectedSessionRef, detailSnapshotRef, setNotice);
+  const messageQueue = useMessageQueue(selectedSession, setNotice);
+  const { apply: applyQueue, reload: reloadQueue } = messageQueue;
   const selectSession = (id: string) => {
     selectedSessionRef.current = id;
     setSelectedSession(id);
@@ -272,8 +277,13 @@ export default function App() {
         return;
       }
       notifyRun(event);
+      if (event.type === 'queue') {
+        applyQueue(event.queue);
+        return;
+      }
       if (event.type === 'refresh') {
         reconcile();
+        void reloadQueue();
         if (selectedProjectRef.current) void refreshProjectViews(selectedProjectRef.current);
         return;
       }
@@ -298,6 +308,10 @@ export default function App() {
       }
       if (event.type === 'session') {
         if (event.session.id === selectedSession) activeRunIdRef.current = event.session.activeRunId;
+        // Runs can start without this tab sending them (the queue, another device).
+        setDetail((current) =>
+          current?.session.id === event.session.id ? { ...current, session: event.session } : current,
+        );
         setData((current) =>
           current
             ? { ...current, sessions: current.sessions.map((s) => (s.id === event.session.id ? event.session : s)) }
@@ -334,9 +348,21 @@ export default function App() {
           current
             ? {
                 ...current,
-                messages: [...current.messages.filter((m) => m.id !== event.message.id), event.message].sort((a, b) =>
-                  a.createdAt.localeCompare(b.createdAt),
-                ),
+                // The server's copy of a just-sent message may arrive before the send request
+                // resolves; it replaces the optimistic `local-` bubble instead of showing twice.
+                messages: [
+                  ...current.messages.filter(
+                    (m) =>
+                      m.id !== event.message.id &&
+                      !(
+                        event.message.role === 'user' &&
+                        m.role === 'user' &&
+                        m.id.startsWith('local-') &&
+                        m.content === event.message.content
+                      ),
+                  ),
+                  event.message,
+                ].sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
               }
             : current,
         );
@@ -361,7 +387,7 @@ export default function App() {
       /* EventSource reconnects; the server sends a fresh snapshot signal. */
     };
     return () => events.close();
-  }, [refreshBootstrap, refreshDetail, refreshProjectViews, selectedSession, notifyRun]);
+  }, [refreshBootstrap, refreshDetail, refreshProjectViews, selectedSession, notifyRun, applyQueue, reloadQueue]);
 
   // Follow new content only while the reader is at the end; reading history is never interrupted.
   // Approvals, tasks and error rows count as new content too, not only messages and streamed text.
@@ -595,6 +621,26 @@ export default function App() {
       }
       setBusy(false);
     }
+  }
+
+  /** Enter while the agent works: the message waits on the server and starts on its own. */
+  async function queueMessage() {
+    const content = composer.trim();
+    if (!content || !session) return;
+    if (attachments.uploading) return setNotice('Aguarde o envio dos anexos terminar.');
+    const sessionId = session.id;
+    setDrafts((current) => ({ ...current, [sessionId]: '' }));
+    setNotice('');
+    const result = await messageQueue.add(
+      content,
+      attachments.ready.map((item) => item.id),
+    );
+    if (result) attachments.clear(sessionId);
+    else
+      setDrafts((current) => ({
+        ...current,
+        [sessionId]: current[sessionId] ? `${content}\n${current[sessionId]}` : content,
+      }));
   }
 
   async function cancelPendingSend(sessionId: string) {
@@ -1320,6 +1366,15 @@ export default function App() {
                       </button>
                     </div>
                   )}
+                  <MessageQueue
+                    queue={messageQueue}
+                    running={Boolean(session.activeRunId)}
+                    canSteer={provider?.capabilities.steer === true}
+                    onSentNow={() => {
+                      setDrafts((current) => ({ ...current, [session.id]: '' }));
+                      attachments.clear(session.id);
+                    }}
+                  />
                   <div
                     className={`composer-box ${session.activeRunId ? 'is-running' : ''} ${attachments.dragging ? 'is-dragging' : ''}`}
                     {...attachments.dropHandlers}
@@ -1332,27 +1387,31 @@ export default function App() {
                       onChange={(event) => setDrafts((current) => ({ ...current, [session.id]: event.target.value }))}
                       onPaste={attachments.onPaste}
                       onKeyDown={(event) => {
-                        if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
-                          event.preventDefault();
-                          void sendMessage();
-                        }
+                        const action = composerKeyAction(
+                          { ...event, isComposing: event.nativeEvent.isComposing },
+                          Boolean(session.activeRunId),
+                        );
+                        if (!action) return;
+                        event.preventDefault();
+                        if (action === 'send') void sendMessage();
+                        else if (action === 'queue') void queueMessage();
+                        else if (composer.trim() && !attachments.uploading)
+                          messageQueue.askSendNow({
+                            content: composer.trim(),
+                            attachmentIds: attachments.ready.map((item) => item.id),
+                          });
                       }}
                       placeholder={
                         session.activeRunId
-                          ? 'Executando… cancele para enviar outra mensagem.'
+                          ? 'O agente está trabalhando… Enter coloca na fila, Ctrl+Enter envia agora.'
                           : 'Escreva uma mensagem…'
                       }
                       aria-label="Mensagem para o agente"
                       rows={1}
-                      disabled={Boolean(session.activeRunId)}
                     />
                     <div className="composer-toolbar">
                       <div className="composer-controls">
-                        <AttachButton
-                          disabled={busy || Boolean(session.activeRunId)}
-                          full={attachments.full}
-                          onFiles={attachments.add}
-                        />
+                        <AttachButton disabled={busy} full={attachments.full} onFiles={attachments.add} />
                         <ModelMenu
                           providers={data.providers}
                           providerId={session.providerId}
@@ -1453,6 +1512,17 @@ export default function App() {
                           }
                         />
                       </div>
+                      {session.activeRunId && composer.trim() && (
+                        <button
+                          type="button"
+                          className="queue-button"
+                          aria-label="Adicionar à fila"
+                          title="Adicionar à fila (Enter)"
+                          onClick={() => void queueMessage()}
+                        >
+                          <ListPlus size={16} />
+                        </button>
+                      )}
                       <button
                         className={`send-button ${canCancelCurrentSend ? 'stop' : ''}`}
                         aria-label={canCancelCurrentSend ? 'Cancelar execução' : 'Enviar mensagem'}
@@ -1609,11 +1679,28 @@ export default function App() {
               <p>
                 <strong>Interrompa quando precisar.</strong> O botão de parar cancela a execução atual.
               </p>
+              <p>
+                <strong>Escreva enquanto o agente trabalha.</strong> Enter coloca a mensagem na fila; ela começa quando
+                a resposta atual terminar. Se a execução for cancelada ou falhar, a fila pausa até você retomá-la.
+              </p>
             </div>
             <dl className="shortcut-list">
               <div>
                 <dt>Enviar mensagem</dt>
                 <dd>
+                  <kbd>Enter</kbd>
+                </dd>
+              </div>
+              <div>
+                <dt>Colocar na fila (com o agente trabalhando)</dt>
+                <dd>
+                  <kbd>Enter</kbd>
+                </dd>
+              </div>
+              <div>
+                <dt>Enviar agora (interrompe a resposta)</dt>
+                <dd>
+                  <kbd>Ctrl</kbd>
                   <kbd>Enter</kbd>
                 </dd>
               </div>

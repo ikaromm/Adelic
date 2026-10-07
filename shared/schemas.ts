@@ -129,6 +129,9 @@ export const SettingsPatchSchema = z.object({
   autoRetry: optional(z.boolean(), 'autoRetry deve ser booleano'),
   notifications: optional(z.boolean(), 'notifications deve ser booleano'),
 });
+export const RestoreRunSchema = z.object({
+  confirm: required(z.literal(true), 'confirm: true é obrigatório para desfazer alterações'),
+});
 export const SkillPatchSchema = z.object({ enabled: required(z.boolean(), 'enabled deve ser booleano') });
 
 export type ParseResult<T> = { ok: true; data: T } | { ok: false; message: string };

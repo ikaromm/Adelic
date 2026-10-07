@@ -4,6 +4,7 @@
 
 - Notificações do sistema quando uma resposta fica pronta, uma execução falha ou uma aprovação é necessária, só com a janela em segundo plano, e contador no título da aba. Ligado por padrão no desktop; no navegador, pede permissão. Veja [notificações](docs/specs/notifications.md).
 - Anexos nas mensagens: imagens (PNG, JPEG, WebP, GIF até 10 MB) para Codex e Kiro, e arquivos de texto (até 512 KB) para todos os agentes, pelo clipe, colando ou arrastando, até 5 por mensagem; veja [anexos](docs/specs/attachments.md).
+- Cada execução que pode escrever num projeto git mostra os arquivos que alterou ("Alterou 3 arquivos (+12 −4)"), o diff de cada um e **Desfazer alterações desta execução**, que é recusado se algum arquivo mudou depois. HEAD, branches, índice e stash nunca são tocados; veja [checkpoints](docs/specs/checkpoints.md).
 - Repetição automática de falhas temporárias (tempo esgotado, conexão interrompida, modelo sobrecarregado), com espera crescente e até 2 novas tentativas, só quando a tentativa não exibiu texto, não executou ferramenta nem pediu aprovação. Falhas mostram o motivo e um botão **Tentar de novo**; configurável em Configurações. Veja [repetição automática](docs/specs/retries.md).
 - Busca em todas as conversas (títulos e mensagens, sem diferenciar acentos) com Ctrl+Shift+F, e exportação da conversa aberta em Markdown ou JSON.
 - Tokens por execução, quando o provedor informa (Codex informa; custo continua "não informado", nunca zero).

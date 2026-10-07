@@ -1213,6 +1213,7 @@ export default function App() {
                               taskOutputs={taskOutputs.outputs}
                               loadingTaskOutputs={taskOutputs.loading}
                               onLoadTaskOutput={taskOutputs.load}
+                              busy={Boolean(session.activeRunId)}
                             />
                           )}
                         </div>

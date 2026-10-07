@@ -4,10 +4,11 @@
 // The fake provider reacts to a marker in the current message:
 //   [aprovar] → asks for approval, then answers with the decision
 //   [lento]   → streams slowly until cancelled
+//   [escrever] → with sandbox workspace-write, edits README.md and creates novo.txt in input.cwd
 //   [normal] or no marker → streams a short Markdown answer with a code block
 //   [anexos]  → lists the images it received and the text files inlined in the prompt
 import { createServer } from 'node:http';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import express from 'express';
@@ -59,7 +60,7 @@ const providers: ProviderRegistry = {
     }
     const current = (input.prompt.split('Pedido atual:').at(-1) ?? input.prompt).split('\n\nMensagens recentes')[0];
     const marker =
-      ['[aprovar]', '[lento]', '[normal]', '[instavel]', '[quebra]', '[anexos]'].find((m) =>
+      ['[aprovar]', '[lento]', '[normal]', '[instavel]', '[quebra]', '[anexos]', '[escrever]'].find((m) =>
         current.toLowerCase().includes(m),
       ) ?? '';
     try {
@@ -82,6 +83,16 @@ const providers: ProviderRegistry = {
         const text = `Imagens recebidas: ${images.join(', ') || 'nenhuma'}. Arquivos recebidos: ${[...new Set(files)].join(', ') || 'nenhum'}.`;
         emit({ type: 'delta', text });
         return { text, stopReason: 'completed' };
+      }
+      // Acts like an agent allowed to write in the project (checkpoints flow).
+      if (marker === '[escrever]') {
+        if (input.sandbox !== 'workspace-write') throw new Error('[escrever] requer workspace-write');
+        const n = current.match(/\[escrever\]\s*(\d+)/)?.[1] ?? '1';
+        writeFileSync(join(input.cwd, 'README.md'), `# Projeto\n\nlinha alterada pelo agente ${n}\n`);
+        writeFileSync(join(input.cwd, `novo ${n}.txt`), 'criado pelo agente\n');
+        emit({ type: 'tool', name: 'fileChange', description: 'Editou README.md', status: 'completed' });
+        emit({ type: 'delta', text: 'Arquivos alterados.' });
+        return { text: 'Arquivos alterados.', stopReason: 'completed' };
       }
       if (marker === '[aprovar]') {
         const id = `e2e-approval-${input.runId}`;

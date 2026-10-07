@@ -105,20 +105,20 @@ export function mcpLines(value: string) {
     .filter(Boolean);
 }
 
-/** First problem with the editable fields, or '' when valid (the API checks again). */
-export function mcpFieldsError(fields: {
+/** Key of the first problem with the editable fields (MCP_MESSAGES), or '' when valid. */
+export type McpFieldsErrorKey = 'name' | 'description' | 'command' | 'args' | 'env' | 'literal' | 'tools';
+export function mcpFieldsErrorKey(fields: {
   name: string;
   description: string;
   command: string;
   args: string[];
   env: { name: string; from: McpEnvSource; value?: string; stored?: boolean }[];
   tools: string[];
-}) {
-  if (!MCP_NAME.test(fields.name)) return MCP_MESSAGES.name;
-  if (fields.description.length > MCP_DESCRIPTION_MAX) return MCP_MESSAGES.description;
-  if (!fields.command.trim() || fields.command.length > MCP_COMMAND_MAX) return MCP_MESSAGES.command;
-  if (fields.args.length > MCP_ARGS_MAX || fields.args.some((arg) => arg.length > MCP_ARG_MAX))
-    return MCP_MESSAGES.args;
+}): McpFieldsErrorKey | '' {
+  if (!MCP_NAME.test(fields.name)) return 'name';
+  if (fields.description.length > MCP_DESCRIPTION_MAX) return 'description';
+  if (!fields.command.trim() || fields.command.length > MCP_COMMAND_MAX) return 'command';
+  if (fields.args.length > MCP_ARGS_MAX || fields.args.some((arg) => arg.length > MCP_ARG_MAX)) return 'args';
   const names = fields.env.map((item) => item.name);
   if (
     fields.env.length > MCP_ENV_MAX ||
@@ -126,13 +126,19 @@ export function mcpFieldsError(fields: {
     new Set(names).size !== names.length ||
     fields.env.some((item) => (item.value?.length ?? 0) > MCP_ENV_VALUE_MAX)
   )
-    return MCP_MESSAGES.env;
-  if (fields.env.some((item) => item.from === 'literal' && !item.value && !item.stored)) return MCP_MESSAGES.literal;
+    return 'env';
+  if (fields.env.some((item) => item.from === 'literal' && !item.value && !item.stored)) return 'literal';
   if (
     fields.tools.length > MCP_TOOLS_MAX ||
     fields.tools.some((tool) => !MCP_TOOL_NAME.test(tool)) ||
     new Set(fields.tools).size !== fields.tools.length
   )
-    return MCP_MESSAGES.tools;
+    return 'tools';
   return '';
+}
+
+/** First problem with the editable fields, or '' when valid (the API checks again). */
+export function mcpFieldsError(fields: Parameters<typeof mcpFieldsErrorKey>[0]) {
+  const key = mcpFieldsErrorKey(fields);
+  return key ? MCP_MESSAGES[key] : '';
 }

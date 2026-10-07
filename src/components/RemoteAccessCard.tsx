@@ -2,21 +2,31 @@ import { useCallback, useEffect, useId, useRef, useState, type FormEvent } from 
 import { ExternalLink, Globe, LoaderCircle, LogOut, RefreshCw, ShieldAlert, X } from 'lucide-react';
 import { api, type ApiError } from '../api';
 import {
+  PASSWORD_MAX,
   PASSWORD_MIN,
-  passwordHints,
-  passwordProblems,
-  usernameProblem,
+  USERNAME_MAX,
+  USERNAME_MIN,
+  passwordHintKeys,
+  passwordProblemKeys,
+  usernameProblemKey,
   type RemoteAccessState,
   type TailscaleState,
 } from '../../shared/remote-access';
+import { t, useI18n } from '../i18n';
 
-const when = (iso: string) => new Date(iso).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' });
-const kindLabel = { tailnet: 'Tailnet', internet: 'Internet' } as const;
-const strength = ['Fraca', 'Aceitável', 'Boa', 'Forte'] as const;
+const kindKey = { tailnet: 'remoteAccess.kind.tailnet', internet: 'remoteAccess.kind.internet' } as const;
+const reasonKey = {
+  credentials: 'remoteAccess.reason.credentials',
+  'rate-limit': 'remoteAccess.reason.rateLimit',
+  'no-account': 'remoteAccess.reason.noAccount',
+} as const;
+/** Limits interpolated into the translated account rules. */
+const usernameVars = { min: USERNAME_MIN, max: USERNAME_MAX };
+const passwordVars = { min: PASSWORD_MIN, max: PASSWORD_MAX };
 
 /** Short device name from a user agent ("Firefox · Android"), never the whole string. */
 export function deviceLabel(userAgent: string) {
-  if (!userAgent) return 'Dispositivo desconhecido';
+  if (!userAgent) return t('remoteAccess.unknownDevice');
   const browser = /Edg\//.test(userAgent)
     ? 'Edge'
     : /Firefox\//.test(userAgent)
@@ -80,6 +90,7 @@ export function RemoteAccessCard({
       setBusy('');
     }
   };
+  const { t } = useI18n();
   const local = state?.kind === 'local';
   return (
     <section className="settings-card remote-access-card" aria-labelledby="remote-access-title">
@@ -88,11 +99,8 @@ export function RemoteAccessCard({
           <Globe size={17} />
         </div>
         <div>
-          <h2 id="remote-access-title">Acesso remoto</h2>
-          <p>
-            Usuário e senha para abrir o Adelic de outro dispositivo, pela tailnet ou pela internet com o Tailscale
-            Funnel. Neste computador o login não é pedido.
-          </p>
+          <h2 id="remote-access-title">{t('remoteAccess.title')}</h2>
+          <p>{t('remoteAccess.detail')}</p>
         </div>
       </div>
       {error && (
@@ -101,23 +109,20 @@ export function RemoteAccessCard({
         </div>
       )}
       {!state ? (
-        !error && <p className="remote-muted">Carregando…</p>
+        !error && <p className="remote-muted">{t('remoteAccess.loading')}</p>
       ) : (
         <>
           <AccountSection state={state} local={local} busy={busy} act={act} />
           <div className="setting-row">
             <div>
-              <strong>Pela internet, exigir aprovação manual para comandos</strong>
-              <span>
-                Execuções iniciadas de uma sessão pela internet pedem sua confirmação a cada solicitação do agente,
-                mesmo com a aprovação automática segura ligada. Só pode ser alterado neste computador.
-              </span>
+              <strong>{t('remoteAccess.manualApproval')}</strong>
+              <span>{t('remoteAccess.manualApprovalDetail')}</span>
             </div>
             <button
               className={`toggle ${internetManualApproval ? 'on' : ''}`}
               role="switch"
               aria-checked={internetManualApproval}
-              aria-label="Pela internet, exigir aprovação manual para comandos"
+              aria-label={t('remoteAccess.manualApproval')}
               disabled={!local}
               onClick={() => onInternetManualApproval(!internetManualApproval)}
             >
@@ -146,16 +151,22 @@ function AccountSection({
   busy: string;
   act: Act;
 }) {
+  const { t, fmt } = useI18n();
   const [editing, setEditing] = useState(false);
   const [username, setUsername] = useState(state.account?.username ?? '');
   const [password, setPassword] = useState('');
   const [confirm, setConfirm] = useState('');
   const hintsId = useId();
-  const userProblem = username ? usernameProblem(username) : undefined;
-  const problems = password ? passwordProblems(username, password) : [];
-  const { score, hints } = passwordHints(password);
+  const userProblemKey = username ? usernameProblemKey(username) : undefined;
+  const userProblem = userProblemKey && t(`remoteAccess.problem.${userProblemKey}`, usernameVars);
+  const problems = (password ? passwordProblemKeys(username, password) : []).map((key) =>
+    t(`remoteAccess.problem.${key}`, passwordVars),
+  );
+  const hintKeys = passwordHintKeys(password);
+  const score = hintKeys.score;
+  const hints = hintKeys.hints.map((key) => t(`remoteAccess.hint.${key}`));
   const mismatch = Boolean(confirm) && confirm !== password;
-  const valid = !usernameProblem(username) && password && !problems.length && confirm === password;
+  const valid = !usernameProblemKey(username) && password && !problems.length && confirm === password;
   const submit = (event: FormEvent) => {
     event.preventDefault();
     if (!valid) return;
@@ -171,20 +182,24 @@ function AccountSection({
     <>
       <div className="setting-row">
         <div>
-          <strong>{state.account ? `Conta: ${state.account.username}` : 'Nenhuma conta criada'}</strong>
+          <strong>
+            {state.account
+              ? t('remoteAccess.account', { username: state.account.username })
+              : t('remoteAccess.noAccount')}
+          </strong>
           <span>
             {state.account
-              ? `Senha alterada em ${when(state.account.passwordChangedAt)}. Trocar a senha encerra todas as sessões.`
+              ? t('remoteAccess.passwordChanged', { date: fmt.dateTime(state.account.passwordChangedAt) })
               : local
-                ? 'Crie o usuário e a senha antes de abrir o acesso pela internet.'
-                : 'A conta só pode ser criada no computador onde o Adelic roda.'}
-            {state.tailnet && ` Tailnet em ${state.tailnet.url} (o token ADELIC_REMOTE_TOKEN também vale lá).`}
+                ? t('remoteAccess.createFirst')
+                : t('remoteAccess.localOnly')}
+            {state.tailnet && t('remoteAccess.tailnet', { url: state.tailnet.url })}
           </span>
         </div>
         {local && !editing && (
           <div className="remote-row-actions">
             <button type="button" className="secondary-button" onClick={() => setEditing(true)}>
-              {state.account ? 'Trocar senha' : 'Criar conta'}
+              {state.account ? t('remoteAccess.changePassword') : t('remoteAccess.createAccount')}
             </button>
             {state.account && (
               <button
@@ -192,20 +207,20 @@ function AccountSection({
                 className="danger-button"
                 disabled={busy === 'delete'}
                 onClick={() => {
-                  if (window.confirm('Apagar a conta? Ninguém conseguirá entrar pela internet e as sessões terminam.'))
+                  if (window.confirm(t('remoteAccess.deleteConfirm')))
                     void act('delete', () => api.deleteRemoteAccount());
                 }}
               >
-                Apagar conta
+                {t('remoteAccess.deleteAccount')}
               </button>
             )}
           </div>
         )}
       </div>
       {local && editing && (
-        <form className="remote-account-form" onSubmit={submit} aria-label="Conta do acesso remoto">
+        <form className="remote-account-form" onSubmit={submit} aria-label={t('remoteAccess.form')}>
           <label>
-            Usuário
+            {t('remoteAccess.username')}
             <input
               name="remote-username"
               autoComplete="username"
@@ -219,7 +234,7 @@ function AccountSection({
           </label>
           {userProblem && <p className="remote-problem">{userProblem}</p>}
           <label>
-            Nova senha
+            {t('remoteAccess.newPassword')}
             <input
               name="remote-password"
               type="password"
@@ -235,18 +250,20 @@ function AccountSection({
             {password ? (
               <>
                 <span className={`remote-strength s${problems.length ? 0 : score}`}>
-                  Força: {problems.length ? strength[0] : strength[score]}
+                  {t('remoteAccess.strength', {
+                    level: t(`remoteAccess.strength.${problems.length ? 0 : score}`),
+                  })}
                 </span>
                 {[...problems, ...hints].map((text) => (
                   <span key={text}>{text}</span>
                 ))}
               </>
             ) : (
-              <span>Pelo menos {PASSWORD_MIN} caracteres, diferente do usuário. Uma frase longa funciona bem.</span>
+              <span>{t('remoteAccess.passwordRule', { min: PASSWORD_MIN })}</span>
             )}
           </div>
           <label>
-            Repita a senha
+            {t('remoteAccess.repeatPassword')}
             <input
               name="remote-password-confirm"
               type="password"
@@ -257,13 +274,13 @@ function AccountSection({
               required
             />
           </label>
-          {mismatch && <p className="remote-problem">As senhas não conferem.</p>}
+          {mismatch && <p className="remote-problem">{t('remoteAccess.mismatch')}</p>}
           <div className="remote-row-actions">
             <button type="button" className="secondary-button" onClick={() => setEditing(false)}>
-              Cancelar
+              {t('remoteAccess.cancel')}
             </button>
             <button className="primary-button" disabled={!valid || busy === 'account'}>
-              {busy === 'account' && <LoaderCircle size={14} className="spin" />} Salvar conta
+              {busy === 'account' && <LoaderCircle size={14} className="spin" />} {t('remoteAccess.saveAccount')}
             </button>
           </div>
         </form>
@@ -279,6 +296,7 @@ function FunnelSection({
   state: RemoteAccessState;
   onChanged: (state: RemoteAccessState) => void;
 }) {
+  const { t } = useI18n();
   const [tailscale, setTailscale] = useState<TailscaleState | null>(null);
   const [checking, setChecking] = useState(false);
   const [working, setWorking] = useState(false);
@@ -319,81 +337,98 @@ function FunnelSection({
     <div className="remote-funnel">
       <div className="setting-row">
         <div>
-          <strong>Publicar na internet (Tailscale Funnel)</strong>
+          <strong>{t('remoteAccess.funnel.title')}</strong>
           <span>
             {on
-              ? `Publicado em ${tailscale!.publicUrl}. Qualquer pessoa na internet vê a tela de login.`
-              : `O Funnel encaminha https://${tailscale?.dnsName ?? '<máquina>.<tailnet>.ts.net'}/ para 127.0.0.1:${state.funnel!.port}, que pede login sempre.`}
+              ? t('remoteAccess.funnel.on', { url: tailscale!.publicUrl ?? '' })
+              : t('remoteAccess.funnel.off', {
+                  host: tailscale?.dnsName ?? t('remoteAccess.funnel.hostPlaceholder'),
+                  port: state.funnel!.port,
+                })}
           </span>
         </div>
         <div className="remote-row-actions">
           <button type="button" className="ghost-button" onClick={() => void check()} disabled={checking}>
-            <RefreshCw size={14} className={checking ? 'spin' : undefined} /> Verificar
+            <RefreshCw size={14} className={checking ? 'spin' : undefined} /> {t('remoteAccess.funnel.check')}
           </button>
           {on ? (
             <button type="button" className="danger-button" disabled={working} onClick={() => void toggle(false)}>
-              {working && <LoaderCircle size={14} className="spin" />} Desligar
+              {working && <LoaderCircle size={14} className="spin" />} {t('remoteAccess.funnel.turnOff')}
             </button>
           ) : (
             <button
               type="button"
               className="primary-button"
               disabled={!state.account || working || !tailscale?.installed || !tailscale.loggedIn}
-              title={!state.account ? 'Crie o usuário e a senha antes' : undefined}
+              title={!state.account ? t('remoteAccess.funnel.accountFirst') : undefined}
               onClick={() => setConfirming(true)}
             >
-              Publicar na internet
+              {t('remoteAccess.funnel.publish')}
             </button>
           )}
         </div>
       </div>
       {tailscale && (
-        <dl className="remote-status" aria-label="Estado do Tailscale">
+        <dl className="remote-status" aria-label={t('remoteAccess.status.label')}>
           <div>
             <dt>Tailscale</dt>
-            <dd>{tailscale.installed ? `instalado (${tailscale.version ?? '?'})` : 'não encontrado'}</dd>
+            <dd>
+              {tailscale.installed
+                ? t('remoteAccess.status.installed', { version: tailscale.version ?? '?' })
+                : t('remoteAccess.status.notFound')}
+            </dd>
           </div>
           <div>
-            <dt>Conectado</dt>
-            <dd>{tailscale.loggedIn ? 'sim' : (tailscale.backendState ?? 'não')}</dd>
+            <dt>{t('remoteAccess.status.connected')}</dt>
+            <dd>
+              {tailscale.loggedIn
+                ? t('remoteAccess.status.yes')
+                : (tailscale.backendState ?? t('remoteAccess.status.no'))}
+            </dd>
           </div>
           <div>
-            <dt>Nome</dt>
+            <dt>{t('remoteAccess.status.name')}</dt>
             <dd>{tailscale.dnsName ?? '—'}</dd>
           </div>
           <div>
             <dt>HTTPS</dt>
-            <dd>{tailscale.https ? 'permitido' : 'não permitido'}</dd>
+            <dd>{tailscale.https ? t('remoteAccess.status.allowed') : t('remoteAccess.status.notAllowed')}</dd>
           </div>
           <div>
             <dt>Funnel</dt>
             <dd>
               {tailscale.funnelAllowed
                 ? tailscale.port443Allowed
-                  ? 'permitido'
-                  : 'porta 443 não permitida'
-                : 'não permitido'}
+                  ? t('remoteAccess.status.allowed')
+                  : t('remoteAccess.status.port443')
+                : t('remoteAccess.status.notAllowed')}
             </dd>
           </div>
           <div>
-            <dt>Situação</dt>
-            <dd>{on ? 'publicado' : tailscale.stale ? 'aponta para uma porta antiga' : 'desligado'}</dd>
+            <dt>{t('remoteAccess.status.state')}</dt>
+            <dd>
+              {on
+                ? t('remoteAccess.status.published')
+                : tailscale.stale
+                  ? t('remoteAccess.status.stale')
+                  : t('remoteAccess.status.off')}
+            </dd>
           </div>
         </dl>
       )}
       {tailscale?.conflict && (
         <p className="remote-problem">
-          https://{tailscale.dnsName}/ já publica outro destino ({tailscale.conflict}). O Adelic não o substitui.
+          {t('remoteAccess.funnel.conflict', { host: tailscale.dnsName ?? '', target: tailscale.conflict })}
         </p>
       )}
       {tailscale && !ready && tailscale.requirements.length > 0 && (
-        <ul className="remote-requirements" aria-label="O que falta na tailnet">
+        <ul className="remote-requirements" aria-label={t('remoteAccess.funnel.requirements')}>
           {tailscale.requirements.map((item) => (
             <li key={item.text}>
               {item.text}{' '}
               {item.url && (
                 <a href={item.url} target="_blank" rel="noreferrer">
-                  Abrir console <ExternalLink size={12} aria-hidden="true" />
+                  {t('remoteAccess.funnel.openConsole')} <ExternalLink size={12} aria-hidden="true" />
                 </a>
               )}
             </li>
@@ -406,7 +441,7 @@ function FunnelSection({
             {lastError}{' '}
             {failure?.url && (
               <a href={failure.url} target="_blank" rel="noreferrer">
-                Abrir console da Tailscale
+                {t('remoteAccess.funnel.openTailscaleConsole')}
               </a>
             )}
           </span>
@@ -435,6 +470,7 @@ function FunnelConfirm({
   onCancel: () => void;
   onConfirm: () => void;
 }) {
+  const { t } = useI18n();
   const cancelRef = useRef<HTMLButtonElement>(null);
   useEffect(() => cancelRef.current?.focus(), []);
   return (
@@ -460,29 +496,32 @@ function FunnelConfirm({
             <ShieldAlert size={18} />
           </div>
           <div>
-            <h2 id="funnel-confirm-title">Publicar o Adelic na internet?</h2>
+            <h2 id="funnel-confirm-title">{t('remoteAccess.confirm.title')}</h2>
           </div>
-          <button type="button" className="icon-button" aria-label="Fechar" onClick={onCancel} disabled={working}>
+          <button
+            type="button"
+            className="icon-button"
+            aria-label={t('remoteAccess.confirm.close')}
+            onClick={onCancel}
+            disabled={working}
+          >
             <X size={17} />
           </button>
         </div>
         <div id="funnel-confirm-detail" className="restore-detail">
-          <p>
-            {url ?? 'O endereço .ts.net'} ficará acessível a qualquer pessoa na internet. Quem entrar com o seu usuário
-            e senha controla agentes que leem e alteram arquivos e executam comandos neste computador.
-          </p>
+          <p>{url ? t('remoteAccess.confirm.detail', { url }) : t('remoteAccess.confirm.detailNoUrl')}</p>
           <ul>
-            <li>Use uma senha longa e exclusiva.</li>
-            <li>Pela internet, o terminal, MCP, automações, verificações, git push e estas opções ficam bloqueados.</li>
-            <li>O endereço fica público até você clicar em Desligar (o Tailscale mantém o Funnel após reiniciar).</li>
+            <li>{t('remoteAccess.confirm.password')}</li>
+            <li>{t('remoteAccess.confirm.blocked')}</li>
+            <li>{t('remoteAccess.confirm.public')}</li>
           </ul>
         </div>
         <div className="modal-actions">
           <button ref={cancelRef} type="button" className="secondary-button" onClick={onCancel} disabled={working}>
-            Cancelar
+            {t('remoteAccess.cancel')}
           </button>
           <button type="button" className="danger-button" onClick={onConfirm} disabled={working}>
-            {working && <LoaderCircle size={14} className="spin" />} Publicar
+            {working && <LoaderCircle size={14} className="spin" />} {t('remoteAccess.confirm.publish')}
           </button>
         </div>
       </div>
@@ -491,11 +530,12 @@ function FunnelConfirm({
 }
 
 function SessionsSection({ state, busy, act }: { state: RemoteAccessState; busy: string; act: Act }) {
+  const { t, fmt } = useI18n();
   const local = state.kind === 'local';
   return (
     <div className="remote-list-block">
       <div className="remote-list-heading">
-        <h3>Sessões ativas</h3>
+        <h3>{t('remoteAccess.sessions')}</h3>
         {state.sessions.length > 0 && (
           <button
             type="button"
@@ -510,22 +550,26 @@ function SessionsSection({ state, busy, act }: { state: RemoteAccessState; busy:
               })
             }
           >
-            Encerrar todas
+            {t('remoteAccess.endAll')}
           </button>
         )}
       </div>
       {state.sessions.length ? (
-        <ul className="remote-list" aria-label="Sessões ativas">
+        <ul className="remote-list" aria-label={t('remoteAccess.sessions')}>
           {state.sessions.map((session) => (
             <li key={session.id}>
               <div>
                 <strong>
                   {deviceLabel(session.userAgent)}
-                  {session.current && <span className="count-chip">esta sessão</span>}
+                  {session.current && <span className="count-chip">{t('remoteAccess.thisSession')}</span>}
                 </strong>
                 <span>
-                  {kindLabel[session.kind]} · {session.ip} · visto em {when(session.lastSeenAt)}
-                  {session.method === 'token' && ' · token'}
+                  {t('remoteAccess.sessionLine', {
+                    kind: t(kindKey[session.kind]),
+                    ip: session.ip,
+                    date: fmt.dateTime(session.lastSeenAt),
+                  })}
+                  {session.method === 'token' && t('remoteAccess.tokenSuffix')}
                 </span>
               </div>
               {session.current ? (
@@ -539,49 +583,49 @@ function SessionsSection({ state, busy, act }: { state: RemoteAccessState; busy:
                     })
                   }
                 >
-                  <LogOut size={14} /> Sair
+                  <LogOut size={14} /> {t('remoteAccess.logout')}
                 </button>
               ) : (
                 <button
                   type="button"
                   className="secondary-button"
-                  aria-label={`Encerrar sessão ${deviceLabel(session.userAgent)} (${session.ip})`}
+                  aria-label={t('remoteAccess.endSession', { device: deviceLabel(session.userAgent), ip: session.ip })}
                   disabled={busy === session.id}
                   onClick={() => void act(session.id, () => api.revokeRemoteSession(session.id))}
                 >
-                  Encerrar
+                  {t('remoteAccess.end')}
                 </button>
               )}
             </li>
           ))}
         </ul>
       ) : (
-        <p className="remote-muted">Nenhuma sessão aberta.</p>
+        <p className="remote-muted">{t('remoteAccess.noSessions')}</p>
       )}
     </div>
   );
 }
 
 function LoginsSection({ state }: { state: RemoteAccessState }) {
+  const { t, fmt } = useI18n();
   if (!state.logins.length) return null;
-  const reason = {
-    credentials: 'senha incorreta',
-    'rate-limit': 'muitas tentativas',
-    'no-account': 'sem conta',
-  };
   return (
     <details className="remote-list-block">
-      <summary>Últimos acessos ({state.logins.length})</summary>
-      <ul className="remote-list compact" aria-label="Últimos acessos">
+      <summary>{t('remoteAccess.loginsCount', { count: state.logins.length })}</summary>
+      <ul className="remote-list compact" aria-label={t('remoteAccess.logins')}>
         {state.logins.map((login, index) => (
           <li key={`${login.at}-${index}`}>
             <div>
               <strong className={login.ok ? 'remote-ok' : 'remote-fail'}>
-                {login.ok ? 'Entrou' : `Falhou (${login.reason ? reason[login.reason] : 'erro'})`}
+                {login.ok
+                  ? t('remoteAccess.loginOk')
+                  : t('remoteAccess.loginFailed', {
+                      reason: t(login.reason ? reasonKey[login.reason] : 'remoteAccess.reason.error'),
+                    })}
                 {login.username && ` · ${login.username}`}
               </strong>
               <span>
-                {when(login.at)} · {kindLabel[login.kind]} · {login.ip} · {deviceLabel(login.userAgent)}
+                {fmt.dateTime(login.at)} · {t(kindKey[login.kind])} · {login.ip} · {deviceLabel(login.userAgent)}
               </span>
             </div>
           </li>

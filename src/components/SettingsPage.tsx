@@ -1,5 +1,11 @@
 import { Bot, Brain, Code2, Command, Layers3, Shield } from 'lucide-react';
-import { type FormEvent, useState } from 'react';
+import { type FormEvent, useId, useState } from 'react';
+import {
+  AUTO_COMPACT_DEFAULT_TOKENS,
+  AUTO_COMPACT_MAX_TOKENS,
+  AUTO_COMPACT_MIN_TOKENS,
+  CHARS_PER_TOKEN,
+} from '../../shared/compaction';
 import type {
   Bootstrap,
   GraphifyQueryResult,
@@ -59,8 +65,10 @@ export function SettingsPage({
       | 'approvalMode'
       | 'updateCheck'
       | 'autoRetry'
-      | 'notifications',
-    value: string | boolean,
+      | 'notifications'
+      | 'autoCompact'
+      | 'autoCompactTokens',
+    value: string | boolean | number,
   ) => void;
   onSkill: (id: string, enabled: boolean) => void;
   notice: string;
@@ -195,6 +203,12 @@ export function SettingsPage({
                 <span />
               </button>
             </div>
+            <AutoCompactSetting
+              enabled={data.settings.autoCompact === true}
+              tokens={data.settings.autoCompactTokens ?? AUTO_COMPACT_DEFAULT_TOKENS}
+              onEnabled={(enabled) => onSetting('autoCompact', enabled)}
+              onTokens={(tokens) => onSetting('autoCompactTokens', tokens)}
+            />
             <NotificationSetting
               enabled={notificationsEnabled(data.settings)}
               onChange={(enabled) => onSetting('notifications', enabled)}
@@ -448,6 +462,83 @@ function NotificationSetting({ enabled, onChange }: { enabled: boolean; onChange
       {problem && (
         <div className="inline-notice" role="status">
           {problem}
+        </div>
+      )}
+    </>
+  );
+}
+
+/** Opt-in automatic compaction (docs/specs/compaction.md); off by default. */
+function AutoCompactSetting({
+  enabled,
+  tokens,
+  onEnabled,
+  onTokens,
+}: {
+  enabled: boolean;
+  tokens: number;
+  onEnabled: (enabled: boolean) => void;
+  onTokens: (tokens: number) => void;
+}) {
+  const [draft, setDraft] = useState(String(tokens));
+  const [editing, setEditing] = useState(false);
+  const value = editing ? draft : String(tokens);
+  const parsed = Number(value);
+  const valid = Number.isInteger(parsed) && parsed >= AUTO_COMPACT_MIN_TOKENS && parsed <= AUTO_COMPACT_MAX_TOKENS;
+  const hintId = useId();
+  const labelId = useId();
+  const commit = () => {
+    setEditing(false);
+    if (valid && parsed !== tokens) onTokens(parsed);
+  };
+  return (
+    <>
+      <div className="setting-row">
+        <div>
+          <strong>Compactar automaticamente conversas longas</strong>
+          <span>
+            Antes da próxima mensagem, resume a conversa quando ela passar do limite. Faz uma chamada extra ao agente só
+            nesse caso.
+          </span>
+        </div>
+        <button
+          className={`toggle ${enabled ? 'on' : ''}`}
+          role="switch"
+          aria-checked={enabled}
+          aria-label="Compactar automaticamente conversas longas"
+          onClick={() => onEnabled(!enabled)}
+        >
+          <span />
+        </button>
+      </div>
+      {enabled && (
+        <div className="setting-row auto-compact-threshold">
+          <div>
+            <strong id={labelId}>Limite para compactar</strong>
+            <span id={hintId}>
+              Tokens de entrada da última execução, ou {CHARS_PER_TOKEN}× esse valor em caracteres de histórico quando o
+              agente não informa tokens.
+            </span>
+          </div>
+          <input
+            type="number"
+            inputMode="numeric"
+            min={AUTO_COMPACT_MIN_TOKENS}
+            max={AUTO_COMPACT_MAX_TOKENS}
+            step={1000}
+            value={value}
+            aria-labelledby={labelId}
+            aria-describedby={hintId}
+            aria-invalid={!valid}
+            onChange={(event) => {
+              setEditing(true);
+              setDraft(event.target.value);
+            }}
+            onBlur={commit}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') commit();
+            }}
+          />
         </div>
       )}
     </>

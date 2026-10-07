@@ -1979,3 +1979,17 @@ label.setting-row > input {
     flex: 1 1 auto;
   }
 }
+
+/* Automatic compaction threshold (docs/specs/compaction.md). */
+.auto-compact-threshold > input {
+  width: 140px;
+  max-width: 40%;
+  height: 34px;
+  font-size: var(--text-sm);
+}
+@container main-area (max-width: 560px) {
+  .auto-compact-threshold > input {
+    width: 100%;
+    max-width: none;
+  }
+}

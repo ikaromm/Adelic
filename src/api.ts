@@ -1,5 +1,6 @@
 import type {
   AttachmentMeta,
+  Compaction,
   ConversationSearchHit,
   Bootstrap,
   DelegatedTask,
@@ -190,6 +191,14 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(body),
     }),
+  // Conversation compaction (docs/specs/compaction.md).
+  compact: (sessionId: string) =>
+    request<{ runId: string }>(`/api/sessions/${encodeURIComponent(sessionId)}/compact`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    }),
+  compactions: (sessionId: string) =>
+    request<{ compactions: Compaction[] }>(`/api/sessions/${encodeURIComponent(sessionId)}/compactions`),
   // Plan mode (docs/specs/plan-mode.md).
   plans: (sessionId: string) => request<{ plans: Plan[] }>(`/api/sessions/${encodeURIComponent(sessionId)}/plans`),
   editPlan: (id: string, markdown: string) =>

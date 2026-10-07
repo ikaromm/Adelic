@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { randomUUID } from 'node:crypto';
-import type { SavedCommand } from '../../shared/commands.js';
+import { COMMAND_RESERVED, RESERVED_COMMAND_NAMES, type SavedCommand } from '../../shared/commands.js';
 import { CreateCommandSchema, PatchCommandSchema, parseBody } from '../../shared/schemas.js';
 import { listCommands } from '../commands.js';
 import { error } from './common.js';
@@ -23,6 +23,7 @@ export function commandsRoutes({ store }: BackendContext) {
     const parsed = parseBody(CreateCommandSchema, req.body, 'Comando inválido');
     if (!parsed.ok) return error(res, 400, parsed.message);
     const { name, description = '', template, mode, projectId = null } = parsed.data;
+    if (RESERVED_COMMAND_NAMES.includes(name)) return error(res, 400, COMMAND_RESERVED);
     if (projectId && !store.getProject(projectId)) return error(res, 404, 'Projeto não encontrado');
     if (taken(name, projectId)) return error(res, 409, DUPLICATE);
     const now = new Date().toISOString();
@@ -51,6 +52,7 @@ export function commandsRoutes({ store }: BackendContext) {
       template: patch.template ?? current.template,
       updatedAt: new Date().toISOString(),
     };
+    if (patch.name && RESERVED_COMMAND_NAMES.includes(patch.name)) return error(res, 400, COMMAND_RESERVED);
     if (patch.mode === null) delete next.mode;
     else if (patch.mode) next.mode = patch.mode;
     if (taken(next.name, next.projectId, next.id)) return error(res, 409, DUPLICATE);

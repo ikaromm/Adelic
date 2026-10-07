@@ -2390,3 +2390,159 @@
   line-height: 1.4;
   overflow-wrap: anywhere;
 }
+
+/* Conversation compaction (docs/specs/compaction.md). */
+.conversation-actions {
+  position: relative;
+}
+.conversation-actions-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: var(--z-popover);
+  width: min(300px, calc(100vw - 16px));
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-popover);
+}
+.conversation-actions-menu > button {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: 100%;
+  min-height: 44px;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  text-align: left;
+}
+.conversation-actions-menu > button > svg {
+  flex: none;
+  margin-top: 2px;
+  color: var(--accent);
+}
+.conversation-actions-menu > button:hover:not(:disabled),
+.conversation-actions-menu > button:focus-visible {
+  background: var(--row-hover);
+  color: var(--text);
+}
+.conversation-actions-menu > button:disabled {
+  opacity: 0.5;
+}
+.conversation-actions-menu b {
+  display: block;
+  color: var(--text);
+  font-size: var(--text-sm);
+  font-weight: 500;
+}
+.conversation-actions-menu small {
+  display: block;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  line-height: 1.4;
+}
+.timeline-compaction {
+  display: grid;
+  gap: 10px;
+}
+.compacted-messages {
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-md);
+  background: var(--canvas);
+}
+.compacted-messages > summary {
+  padding: 8px 12px;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+.compacted-messages > summary:hover {
+  color: var(--text);
+}
+.compacted-messages[open] {
+  display: grid;
+  gap: 12px;
+  padding-bottom: 12px;
+}
+.compacted-messages[open] > .timeline-message {
+  padding: 0 12px;
+  min-width: 0;
+}
+.compaction-card {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--accent-border);
+  border-radius: var(--radius-lg);
+  background: var(--accent-softer);
+  font-size: var(--text-sm);
+}
+.compaction-card.superseded {
+  border-color: var(--border);
+  background: var(--surface);
+}
+.compaction-card-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+}
+.compaction-card-header > div {
+  display: grid;
+  flex: 1;
+  gap: 2px;
+  min-width: 0;
+}
+.compaction-card-header strong {
+  color: var(--text);
+  font-size: var(--text-md);
+  font-weight: 600;
+}
+.compaction-card-header small {
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  overflow-wrap: anywhere;
+}
+.compaction-card-icon {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: var(--radius-sm);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.compaction-card-body > summary {
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.compacting-notice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+}
+.compacting-notice > svg {
+  color: var(--accent);
+}
+/* Narrow screens: the trigger is not at the edge, so pin the menu to the viewport. */
+@media (max-width: 480px) {
+  .conversation-actions-menu {
+    position: fixed;
+    top: calc(var(--topbar-height) + 4px);
+    right: 8px;
+    left: 8px;
+    width: auto;
+  }
+}

@@ -191,6 +191,21 @@ export interface Run {
   checkpoint?: RunCheckpoint;
   /** Plan mode: a read-only planning run, or the run of one task of an approved plan. */
   plan?: RunPlanRef;
+  /** A manual "Compactar conversa" run: one read-only summary call, no messages. */
+  compaction?: { auto: boolean };
+}
+/** Summary that replaces the older part of a conversation as context (docs/specs/compaction.md). */
+export interface Compaction {
+  id: string;
+  sessionId: string;
+  /** The compaction run (manual) or the message run it preceded (automatic). */
+  runId: string;
+  summary: string;
+  /** Last message covered by the summary; later messages are sent verbatim. */
+  upToMessageId: string;
+  createdAt: string;
+  /** Made by the automatic setting before a message. */
+  auto?: boolean;
 }
 export type RunPlanRef = { kind: 'plan' } | { kind: 'task'; planId: string; taskId: string };
 export type PlanStatus = 'draft' | 'approved' | 'rejected' | 'executing' | 'done';
@@ -318,6 +333,10 @@ export interface Settings {
   updateCheck?: boolean;
   /** System notification when a run finishes, fails or needs approval while the window is in the background. Absent: on in the desktop app, off in a browser. */
   notifications?: boolean;
+  /** Opt-in: compact long conversations before the next message (off by default). */
+  autoCompact?: boolean;
+  /** Input-token threshold of the last run for `autoCompact` (history chars: 4× this). */
+  autoCompactTokens?: number;
 }
 export interface Integration {
   id: string;
@@ -349,6 +368,8 @@ export interface SessionDetail {
   approvals: Approval[];
   runs: Run[];
   tasks?: DelegatedTask[];
+  /** Oldest first; the latest one is the context of the next runs. */
+  compactions?: Compaction[];
 }
 export interface MemoryScope {
   workspace: string;
@@ -390,6 +411,7 @@ export type StreamEvent =
   | { type: 'task'; task: DelegatedTask }
   | { type: 'queue'; queue: MessageQueue }
   | { type: 'plan'; plan: Plan }
+  | { type: 'compaction'; compaction: Compaction }
   | { type: 'refresh' };
 
 // Server-side provider contract. Each adapter owns its subprocess and pending approvals.
@@ -406,6 +428,11 @@ export interface RunInput {
   sandbox: Sandbox;
   approvalMode?: 'auto-safe' | 'manual';
   memoryContext?: string;
+  /**
+   * Latest conversation summary (docs/specs/compaction.md). It replaces the messages it
+   * covers: `history` then holds only the messages after it.
+   */
+  summary?: string;
   /**
    * Images attached to the current request, as absolute host paths. Text attachments are
    * not listed here: the orchestrator already inlined them into `prompt`.

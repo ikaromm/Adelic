@@ -52,7 +52,12 @@ export function noticeFor(event: StreamEvent, titleOf: (sessionId: string) => st
     const { run } = event;
     const conversation = clip(titleOf(run.sessionId) || 'Conversa', MAX_TITLE);
     if (run.status === 'completed')
-      return { key: `run:${run.id}:completed`, sessionId: run.sessionId, title: 'Resposta pronta', body: conversation };
+      return {
+        key: `run:${run.id}:completed`,
+        sessionId: run.sessionId,
+        title: run.compaction ? 'Conversa compactada' : 'Resposta pronta',
+        body: conversation,
+      };
     if (run.status === 'failed') {
       const reason = clip(run.failure?.reason || run.error || 'erro não informado', MAX_REASON);
       return {

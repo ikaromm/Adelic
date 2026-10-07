@@ -15,6 +15,7 @@ import {
   statusLabel,
 } from '../run-activity';
 import { useNow } from '../useNow';
+import { COMPACTING_TEXT } from '../../shared/compaction';
 import { MessageAttachments } from './ComposerAttachments';
 import { RunChanges } from './RunChanges';
 
@@ -125,7 +126,10 @@ export function RunActivityPanel({
       ? formatTokens((run.inputTokens ?? 0) + (run.outputTokens ?? 0))
       : undefined;
   const lastRetry = activity.retries.at(-1);
+  // Automatic compaction runs before the answer starts (docs/specs/compaction.md).
+  const compacting = running && activity.events.at(-1)?.text === COMPACTING_TEXT;
   const counts = [
+    compacting ? COMPACTING_TEXT : '',
     running && lastRetry ? `tentativa ${lastRetry.attempt}/${lastRetry.of}` : '',
     !running && activity.retries.length
       ? `${activity.retries.length} ${activity.retries.length === 1 ? 'nova tentativa' : 'novas tentativas'}`
@@ -250,7 +254,11 @@ export function RunActivityPanel({
           <span className="activity-headline">{headline}</span>
           {running && (
             <span className="activity-counts">
-              {lastRetry ? `tentativa ${lastRetry.attempt}/${lastRetry.of}` : 'Preparando resposta'}
+              {compacting
+                ? COMPACTING_TEXT
+                : lastRetry
+                  ? `tentativa ${lastRetry.attempt}/${lastRetry.of}`
+                  : 'Preparando resposta'}
             </span>
           )}
         </div>

@@ -6,6 +6,7 @@ import { attachmentMeta, decodeUpload } from '../attachments.js';
 import { supportsEffort } from '../../shared/reasoning.js';
 import {
   ApprovalDecisionSchema,
+  CompactSchema,
   CreateSessionSchema,
   PatchSessionSchema,
   QueueEditSchema,
@@ -256,6 +257,22 @@ export function sessionsRoutes({ store, orchestrator, providerList }: BackendCon
       const status = errorStatus(e) || 500;
       error(res, status, message(e));
     }
+  });
+  // Conversation compaction (docs/specs/compaction.md): one read-only summary call.
+  app.post('/api/sessions/:id/compact', async (req, res) => {
+    if (!store.getSession(req.params.id)) return error(res, 404, 'Conversa não encontrada');
+    const parsed = parseBody(CompactSchema, req.body, 'Compactar não aceita opções');
+    if (!parsed.ok) return error(res, 400, parsed.message);
+    try {
+      const { runId } = await orchestrator.compact(req.params.id);
+      res.status(202).json({ runId });
+    } catch (e) {
+      error(res, errorStatus(e) || 500, message(e));
+    }
+  });
+  app.get('/api/sessions/:id/compactions', (req, res) => {
+    if (!store.getSession(req.params.id)) return error(res, 404, 'Conversa não encontrada');
+    res.json({ compactions: store.listCompactions(req.params.id) });
   });
   app.post('/api/sessions/:id/cancel', async (req, res) => {
     if (!store.getSession(req.params.id)) return error(res, 404, 'Conversa não encontrada');

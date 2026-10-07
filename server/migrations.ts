@@ -143,6 +143,18 @@ export const migrations: Migration[] = [
         CREATE INDEX IF NOT EXISTS plans_session ON plans(session_id);`);
     },
   },
+  // Version 7 is reserved for a parallel branch.
+  {
+    version: 8,
+    description: 'Compactação de conversas: resumos por conversa',
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS compactions(
+          id TEXT PRIMARY KEY, session_id TEXT NOT NULL, data TEXT NOT NULL,
+          FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE);
+        CREATE INDEX IF NOT EXISTS compactions_session ON compactions(session_id);`);
+    },
+  },
 ];
 
 export const schemaVersion = migrations.at(-1)!.version;

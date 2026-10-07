@@ -72,6 +72,7 @@ export function MessageCard({
               <UserText content={message.content} />
             </div>
             <div className="message-meta">
+              {message.automationId && <span className="automation-badge">Automação</span>}
               <time dateTime={message.createdAt}>{timeLabel(message.createdAt)}</time>
               <CopyButton text={message.content} label="Copiar mensagem" />
               {actions}

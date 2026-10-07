@@ -26,6 +26,7 @@ import {
   QUEUE_LIMIT,
 } from '../shared/contracts.js';
 import type { SavedCommand } from '../shared/commands.js';
+import type { Automation } from '../shared/automations.js';
 import { migrate, type MigrationResult } from './migrations.js';
 
 const defaults: Settings = {
@@ -701,6 +702,24 @@ export class Store {
   deleteCommand(id: string) {
     return Number(this.db.prepare('DELETE FROM commands WHERE id=?').run(id).changes) > 0;
   }
+  /** Scheduled automations (docs/specs/automations.md), oldest first. */
+  listAutomations() {
+    return this.rows<Automation>('automations', 'ORDER BY rowid');
+  }
+  getAutomation(id: string) {
+    return this.get<Automation>('automations', id);
+  }
+  putAutomation(automation: Automation) {
+    this.db
+      .prepare(
+        'INSERT INTO automations(id,project_id,data) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id,data=excluded.data',
+      )
+      .run(automation.id, automation.projectId, JSON.stringify(automation));
+    return automation;
+  }
+  deleteAutomation(id: string) {
+    return Number(this.db.prepare('DELETE FROM automations WHERE id=?').run(id).changes) > 0;
+  }
   exportData() {
     return {
       projects: this.listProjects(),
@@ -713,6 +732,7 @@ export class Store {
       settings: this.getSettings(),
       skills: this.listSkills(),
       commands: this.rows<SavedCommand>('commands', 'ORDER BY rowid'),
+      automations: this.listAutomations(),
     };
   }
 }

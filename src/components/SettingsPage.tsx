@@ -76,7 +76,8 @@ export function SettingsPage({
       | 'autoCompact'
       | 'autoCompactTokens'
       | 'voiceDictation'
-      | 'terminalRemote',
+      | 'terminalRemote'
+      | 'automations',
     value: string | boolean | number,
   ) => void;
   onSkill: (id: string, enabled: boolean) => void;
@@ -232,6 +233,23 @@ export function SettingsPage({
               enabled={data.settings.voiceDictation !== false}
               onChange={(enabled) => onSetting('voiceDictation', enabled)}
             />
+            <div className="setting-row">
+              <div>
+                <strong>Automações ativadas</strong>
+                <span>
+                  Permite que as automações agendadas rodem, só enquanto o Adelic está aberto. Desligado, nada roda.
+                </span>
+              </div>
+              <button
+                className={`toggle ${data.settings.automations ? 'on' : ''}`}
+                role="switch"
+                aria-checked={data.settings.automations === true}
+                aria-label="Automações ativadas"
+                onClick={() => onSetting('automations', !data.settings.automations)}
+              >
+                <span />
+              </button>
+            </div>
           </section>
           <section className="settings-card">
             <div className="settings-card-heading">

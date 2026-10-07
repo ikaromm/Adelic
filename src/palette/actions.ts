@@ -12,6 +12,7 @@ export type PaletteIcon =
   | 'search'
   | 'settings'
   | 'activity'
+  | 'automations'
   | 'memory'
   | 'sidebar'
   | 'export'
@@ -20,7 +21,7 @@ export type PaletteIcon =
   | 'agent'
   | 'mode'
   | 'command';
-export type PalettePage = 'chat' | 'activity' | 'memory' | 'settings';
+export type PalettePage = 'chat' | 'activity' | 'automations' | 'memory' | 'settings';
 
 export interface PaletteAction {
   /** Stable id, also what the recents list stores (never titles or content). */
@@ -126,6 +127,15 @@ export function buildActions(state: PaletteState, cb: PaletteCallbacks): Palette
       icon: 'activity',
       current: state.page === 'activity',
       run: () => cb.goTo('activity'),
+    },
+    {
+      id: 'action:automations',
+      group: 'Ações',
+      label: 'Abrir automações',
+      keywords: 'agendamento agenda tarefas agendadas',
+      icon: 'automations',
+      current: state.page === 'automations',
+      run: () => cb.goTo('automations'),
     },
     {
       id: 'action:memory',

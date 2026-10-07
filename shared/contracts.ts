@@ -175,6 +175,8 @@ export interface Message {
    * Later runs see this summary plus the messages after it (docs/specs/provider-handoff.md).
    */
   handoff?: MessageHandoff;
+  /** Sent by a scheduled automation (docs/specs/automations.md), not typed by the user. */
+  automationId?: string;
 }
 export type HandoffSummaryMode = 'model' | 'local' | 'none';
 export interface MessageHandoff {
@@ -385,6 +387,8 @@ export interface Settings {
   voiceDictation?: boolean;
   /** "Permitir terminal pelo acesso remoto": off unless set (docs/specs/terminal-preview.md). */
   terminalRemote?: boolean;
+  /** Global switch of scheduled automations (off by default): nothing runs while it is off. */
+  automations?: boolean;
 }
 export interface Integration {
   id: string;
@@ -460,6 +464,8 @@ export type StreamEvent =
   | { type: 'queue'; queue: MessageQueue }
   | { type: 'plan'; plan: Plan }
   | { type: 'compaction'; compaction: Compaction }
+  /** An automation changed (created, edited, ran, finished); clients reload the list. */
+  | { type: 'automations' }
   | { type: 'refresh' };
 
 // Server-side provider contract. Each adapter owns its subprocess and pending approvals.

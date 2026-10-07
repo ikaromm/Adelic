@@ -155,6 +155,18 @@ export const migrations: Migration[] = [
         CREATE INDEX IF NOT EXISTS compactions_session ON compactions(session_id);`);
     },
   },
+  // Version 9 is reserved for a parallel branch.
+  {
+    version: 10,
+    description: 'Automações agendadas: uma linha por automação, ligada ao projeto',
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS automations(
+          id TEXT PRIMARY KEY, project_id TEXT NOT NULL, data TEXT NOT NULL,
+          FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE);
+        CREATE INDEX IF NOT EXISTS automations_project ON automations(project_id);`);
+    },
+  },
 ];
 
 export const schemaVersion = migrations.at(-1)!.version;

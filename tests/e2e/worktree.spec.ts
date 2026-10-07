@@ -49,7 +49,7 @@ test('works in an isolated copy, shows its changes and applies them with a merge
 
   await input.fill('[escrever] 1');
   await input.press('Enter');
-  await expect(page.getByText('Arquivos alterados.')).toBeVisible();
+  await expect(page.locator('.markdown-content', { hasText: 'Arquivos alterados.' }).last()).toBeVisible();
   await expect(panel).toContainText('2 arquivos alterados em relação a');
   expect(git(repo, 'status', '--porcelain')).toBe('');
   expect(readFileSync(join(repo, 'README.md'), 'utf8')).toBe('# Projeto\n\nlinha original\n');

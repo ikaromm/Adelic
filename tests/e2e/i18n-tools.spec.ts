@@ -24,6 +24,9 @@ test.beforeEach(async ({ request }) => {
   expect((await request.patch('/api/settings', { data: { language: 'en' } })).ok()).toBe(true);
   repo = realpathSync(mkdtempSync(join(tmpdir(), 'adelic-e2e-i18n-tools-')));
   git(repo, 'init', '-q', '-b', 'main');
+  // The Git panel commits with the repository identity and never sets one (CI has none).
+  git(repo, 'config', 'user.name', 'Pessoa E2E');
+  git(repo, 'config', 'user.email', 'e2e@example.invalid');
   writeFileSync(join(repo, 'README.md'), '# Projeto\n\nlinha original\n');
   git(repo, 'add', '-A');
   git(repo, ...ID, 'commit', '-qm', 'init');

@@ -207,6 +207,16 @@ async function secretFreeTree(
   }
   return true;
 }
+/**
+ * Distribution aliases of the same tool: Debian and Ubuntu install `which` as an alternatives
+ * symlink to `which.debianutils`. Only exact, known pairs are accepted; any other name mismatch
+ * (a binary renamed behind a symlink) still asks.
+ */
+const SYSTEM_ALIASES: Record<string, readonly string[]> = { which: ['which.debianutils'] };
+/** Exported for tests only. */
+export const sameToolForTests = (name: string, real: string) => sameTool(name, real);
+const sameTool = (name: string, real: string) =>
+  path.basename(real) === name || (SYSTEM_ALIASES[name] ?? []).includes(path.basename(real));
 async function executable(name: string, cwd = process.cwd()): Promise<string | null> {
   if (!path.isAbsolute(name) && name.includes('/')) return null;
   if (path.isAbsolute(name)) {
@@ -224,7 +234,7 @@ async function executable(name: string, cwd = process.cwd()): Promise<string | n
     try {
       await access(candidate, constants.X_OK);
       const real = await realpath(candidate);
-      if ((real.startsWith('/usr/bin/') || real.startsWith('/bin/')) && path.basename(real) === name) return real;
+      if ((real.startsWith('/usr/bin/') || real.startsWith('/bin/')) && sameTool(name, real)) return real;
       return null;
     } catch {
       /* continue */

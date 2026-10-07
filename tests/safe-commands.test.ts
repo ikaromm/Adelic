@@ -5,6 +5,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, writeFile, symlink, rm, chmod, realpath } from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { classifyApproval, type ApprovalInput } from '../server/approval-policy';
 import { parseShell } from '../server/shell-grammar';
@@ -394,6 +395,23 @@ const binariesOf = (raw: string) =>
     .map((part) => part.trim().split(/\s+/)[0])
     .filter((name): name is string => Boolean(name) && !name.includes('{{') && !name.includes('/'));
 const missingBinary = (raw: string) => binariesOf(raw).find((name) => !hasSystemBinary(name));
+
+describe('system binary aliases', () => {
+  it('accepts which → which.debianutils (Debian/Ubuntu alternatives) but no other renamed binary', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'adelic-alias-'));
+    try {
+      await writeFile(path.join(dir, 'which.debianutils'), '#!/bin/sh\n');
+      await chmod(path.join(dir, 'which.debianutils'), 0o755);
+      await symlink(path.join(dir, 'which.debianutils'), path.join(dir, 'which'));
+      const { sameToolForTests } = await import('../server/approval-policy');
+      expect(sameToolForTests('which', path.join(dir, 'which.debianutils'))).toBe(true);
+      expect(sameToolForTests('which', path.join(dir, 'rm'))).toBe(false);
+      expect(sameToolForTests('cat', path.join(dir, 'which.debianutils'))).toBe(false);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
 
 describe('safe-command classifier table', () => {
   for (const raw of AUTO)

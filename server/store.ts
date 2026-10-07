@@ -21,6 +21,7 @@ import {
   type MessageQueue,
   type QueuePause,
   type QueuedMessage,
+  type Plan,
   QUEUE_LIMIT,
 } from '../shared/contracts.js';
 import { migrate, type MigrationResult } from './migrations.js';
@@ -103,6 +104,16 @@ export class Store {
         'INSERT INTO message_queue_state(session_id,data) SELECT DISTINCT session_id, ? FROM message_queue WHERE session_id NOT IN (SELECT session_id FROM message_queue_state)',
       )
       .run(JSON.stringify({ reason: 'interrupted', at: new Date().toISOString() } satisfies QueuePause));
+    // A plan whose task run was cut by the restart waits for the user; its task did not finish.
+    for (const plan of this.rows<Plan>('plans', "WHERE json_extract(data,'$.status')='executing'")) {
+      const tasks = plan.tasks.map((task) =>
+        task.status === 'running'
+          ? { ...task, status: 'pending' as const, error: 'Interrompida por reinício do Adelic' }
+          : task,
+      );
+      const { executionMode: _mode, stopRequested: _stop, ...rest } = plan;
+      this.putPlan({ ...rest, status: 'approved', tasks, updatedAt: new Date().toISOString() });
+    }
   }
   close() {
     this.db.close();
@@ -526,6 +537,18 @@ export class Store {
         )
         .run(sessionId, JSON.stringify(pause));
     else this.db.prepare('DELETE FROM message_queue_state WHERE session_id=?').run(sessionId);
+  }
+  putPlan(plan: Plan) {
+    this.db
+      .prepare('INSERT INTO plans(id,session_id,data) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data')
+      .run(plan.id, plan.sessionId, JSON.stringify(plan));
+    return plan;
+  }
+  getPlan(id: string) {
+    return this.get<Plan>('plans', id);
+  }
+  listPlans(sessionId: string) {
+    return this.rows<Plan>('plans', 'WHERE session_id=? ORDER BY rowid', [sessionId]);
   }
   exportData() {
     return {

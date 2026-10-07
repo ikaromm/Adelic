@@ -12,6 +12,7 @@ import type {
   MemoryScope,
   FileChange,
   MessageQueue,
+  Plan,
   Project,
   QueuedMessage,
   ProjectCoordination,
@@ -77,8 +78,8 @@ function serializeProjectPatch(data: ProjectPatch) {
   return JSON.stringify({ ...data, orchestration });
 }
 
-/** Error from the API; `conflicts` lists files that blocked an undo (409). */
-export type ApiError = Error & { status: number; conflicts?: string[] };
+/** Error from the API; `conflicts` lists files that blocked an undo (409), `exists` a file not overwritten. */
+export type ApiError = Error & { status: number; conflicts?: string[]; exists?: boolean };
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
@@ -86,10 +87,15 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     headers: { 'Content-Type': 'application/json', ...init?.headers },
   });
   if (!response.ok) {
-    const body = (await response.json().catch(() => ({}))) as { error?: string; conflicts?: string[] };
+    const body = (await response.json().catch(() => ({}))) as {
+      error?: string;
+      conflicts?: string[];
+      exists?: boolean;
+    };
     const error = new Error(body.error || `Falha na solicitação (${response.status})`) as ApiError;
     error.status = response.status;
     if (Array.isArray(body.conflicts)) error.conflicts = body.conflicts;
+    if (body.exists === true) error.exists = true;
     throw error;
   }
   if (response.status === 204) return undefined as T;
@@ -130,7 +136,7 @@ export const api = {
   }) => request<Session>('/api/sessions', { method: 'POST', body: JSON.stringify(data) }),
   updateSession: (
     id: string,
-    data: Partial<Pick<Session, 'title' | 'providerId' | 'mode' | 'projectId' | 'thinking'>> & {
+    data: Partial<Pick<Session, 'title' | 'providerId' | 'mode' | 'projectId' | 'thinking' | 'planFirst'>> & {
       model?: string | null;
     },
   ) => request<Session>(`/api/sessions/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(data) }),
@@ -182,6 +188,29 @@ export const api = {
     request<{ queue: MessageQueue }>(`/api/sessions/${encodeURIComponent(id)}/send-now`, {
       method: 'POST',
       body: JSON.stringify(body),
+    }),
+  // Plan mode (docs/specs/plan-mode.md).
+  plans: (sessionId: string) => request<{ plans: Plan[] }>(`/api/sessions/${encodeURIComponent(sessionId)}/plans`),
+  editPlan: (id: string, markdown: string) =>
+    request<Plan>(`/api/plans/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ markdown }) }),
+  approvePlan: (id: string, mode: 'all' | 'next') =>
+    request<{ plan: Plan; started: { runId: string; messageId: string } }>(
+      `/api/plans/${encodeURIComponent(id)}/approve`,
+      { method: 'POST', body: JSON.stringify({ mode }) },
+    ),
+  planTask: (id: string, taskId: string, status: 'skipped' | 'pending') =>
+    request<Plan>(`/api/plans/${encodeURIComponent(id)}/tasks/${encodeURIComponent(taskId)}`, {
+      method: 'POST',
+      body: JSON.stringify({ status }),
+    }),
+  stopPlan: (id: string) =>
+    request<Plan>(`/api/plans/${encodeURIComponent(id)}/stop`, { method: 'POST', body: JSON.stringify({}) }),
+  discardPlan: (id: string) =>
+    request<Plan>(`/api/plans/${encodeURIComponent(id)}/discard`, { method: 'POST', body: JSON.stringify({}) }),
+  savePlan: (id: string, overwrite = false) =>
+    request<{ path: string; plan: Plan }>(`/api/plans/${encodeURIComponent(id)}/save`, {
+      method: 'POST',
+      body: JSON.stringify(overwrite ? { overwrite } : {}),
     }),
   cancel: (id: string) => request<void>(`/api/sessions/${encodeURIComponent(id)}/cancel`, { method: 'POST' }),
   runChanges: (id: string) =>

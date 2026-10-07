@@ -87,6 +87,7 @@ export const PatchSessionSchema = z.object({
   model: optional(z.union([z.null(), text(120)]), 'model inválido'),
   mode: optional(ModeSchema, 'mode inválido'),
   thinking: optional(effort, 'thinking inválido'),
+  planFirst: optional(z.boolean(), 'planFirst deve ser booleano'),
 });
 
 export const AttachmentIdsSchema = z
@@ -150,6 +151,21 @@ export const SettingsPatchSchema = z.object({
 });
 export const RestoreRunSchema = z.object({
   confirm: required(z.literal(true), 'confirm: true é obrigatório para desfazer alterações'),
+});
+/** Plan mode (docs/specs/plan-mode.md). */
+// The global JSON body limit is 128 KB; this keeps a plan with accents well under it.
+export const PLAN_MARKDOWN_MAX = 60_000;
+export const PlanEditSchema = z.object({
+  markdown: required(text(PLAN_MARKDOWN_MAX), `markdown obrigatório (máximo ${PLAN_MARKDOWN_MAX} caracteres)`),
+});
+export const PlanApproveSchema = z.object({
+  mode: required(z.enum(['all', 'next']), 'mode deve ser all ou next'),
+});
+export const PlanTaskStatusSchema = z.object({
+  status: required(z.enum(['skipped', 'pending']), 'status deve ser skipped ou pending'),
+});
+export const PlanSaveSchema = z.object({
+  overwrite: optional(z.boolean(), 'overwrite deve ser booleano'),
 });
 export const SkillPatchSchema = z.object({ enabled: required(z.boolean(), 'enabled deve ser booleano') });
 

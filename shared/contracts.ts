@@ -134,6 +134,8 @@ export interface Session {
   updatedAt: string;
   activeRunId?: string;
   nativeSessionId?: string;
+  /** "Planejar antes": every message first produces a read-only plan to approve (docs/specs/plan-mode.md). */
+  planFirst?: boolean;
 }
 export interface RoutePlan {
   /** Availability for this phase; fast user turns may use tools while internal planning stays false. */
@@ -187,6 +189,49 @@ export interface Run {
   failure?: { kind: 'transient' | 'capacity' | 'permanent'; reason: string; retryable: boolean; why?: string };
   /** Snapshot of the project files around a run that could write; see docs/specs/checkpoints.md. */
   checkpoint?: RunCheckpoint;
+  /** Plan mode: a read-only planning run, or the run of one task of an approved plan. */
+  plan?: RunPlanRef;
+}
+export type RunPlanRef = { kind: 'plan' } | { kind: 'task'; planId: string; taskId: string };
+export type PlanStatus = 'draft' | 'approved' | 'rejected' | 'executing' | 'done';
+export type PlanTaskStatus = 'pending' | 'running' | 'done' | 'failed' | 'skipped';
+export interface PlanTask {
+  id: string;
+  /** First line of the checklist item (inline Markdown). */
+  text: string;
+  /** Nested lines under the item, dedented. */
+  details?: string;
+  status: PlanTaskStatus;
+  /** Run that last executed this task. */
+  runId?: string;
+  /** Why the last attempt did not finish (failed, cancelled, interrupted). */
+  error?: string;
+}
+/** A spec written by a read-only planning run, approved and executed one task per run. */
+export interface Plan {
+  id: string;
+  sessionId: string;
+  /** The planning run that produced it. */
+  runId: string;
+  title: string;
+  status: PlanStatus;
+  /** Markdown of the "Requisitos" section. */
+  requirements: string;
+  /** Markdown of the "Design" section (the whole text when no section was found). */
+  design: string;
+  tasks: PlanTask[];
+  /** Editable source; saving re-parses it. */
+  markdown: string;
+  /** While executing: 'all' runs every pending task, 'next' only one. */
+  executionMode?: 'all' | 'next';
+  /** "Parar após a tarefa atual": no new task starts after the running one. */
+  stopRequested?: boolean;
+  /** Last execution problem, shown on the card. */
+  error?: string;
+  /** Project-relative path of the last "Salvar no projeto". */
+  savedPath?: string;
+  createdAt: string;
+  updatedAt: string;
 }
 export interface FileChange {
   /** Path relative to the repository root, `/`-separated. */
@@ -344,6 +389,7 @@ export type StreamEvent =
   | { type: 'session'; session: Session }
   | { type: 'task'; task: DelegatedTask }
   | { type: 'queue'; queue: MessageQueue }
+  | { type: 'plan'; plan: Plan }
   | { type: 'refresh' };
 
 // Server-side provider contract. Each adapter owns its subprocess and pending approvals.

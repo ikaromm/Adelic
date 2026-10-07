@@ -130,9 +130,30 @@ describe('SQLite schema migrations', () => {
     );
     db.exec(`INSERT INTO sessions VALUES('s',NULL,'{}');`);
     const result = migrate(db, dir);
-    expect(result).toMatchObject({ from: 2, to: 4, applied: [3, 4] });
+    expect(result).toMatchObject({ from: 2, to: schemaVersion, applied: [3, 4, 6] });
     db.exec(`PRAGMA foreign_keys=ON; INSERT INTO message_queue VALUES('q','s',0,'{}'); DELETE FROM sessions;`);
     expect(tableRows(db, 'message_queue')).toEqual([]);
+    db.close();
+  });
+
+  it('upgrades a version 4 database to the plans table (6), skipping the reserved 5', () => {
+    const dir = tempDir();
+    const db = new DatabaseSync(join(dir, 'adelic.sqlite'));
+    migrate(
+      db,
+      dir,
+      migrations.filter((m) => m.version <= 4),
+    );
+    db.exec(`INSERT INTO sessions VALUES('s',NULL,'{}'); INSERT INTO message_queue VALUES('q','s',0,'{}');`);
+    const result = migrate(db, dir);
+    expect(result).toMatchObject({ from: 4, to: 6, applied: [6] });
+    expect(result.backupPath).toBeTruthy();
+    expect(tableRows(db, 'message_queue')).toHaveLength(1);
+    expect(migrations.some((m) => m.version === 5)).toBe(false);
+    db.exec(`PRAGMA foreign_keys=ON; INSERT INTO plans VALUES('p','s','{}');`);
+    expect(() => db.exec(`INSERT INTO plans VALUES('x','missing','{}')`)).toThrow();
+    db.exec(`DELETE FROM sessions;`);
+    expect(tableRows(db, 'plans')).toEqual([]);
     db.close();
   });
 });

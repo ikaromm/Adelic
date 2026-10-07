@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import { Activity, ChevronDown, Code2, FileText, LoaderCircle, RotateCcw, Sparkles, X } from 'lucide-react';
 import type { Bootstrap, DelegatedTask, Message, Run, SessionDetail } from '../../shared/contracts';
 import { CopyButton, Markdown } from '../Markdown';
@@ -17,7 +18,16 @@ import { useNow } from '../useNow';
 import { MessageAttachments } from './ComposerAttachments';
 import { RunChanges } from './RunChanges';
 
-export function MessageCard({ message, providerName }: { message: Message; providerName: string }) {
+export function MessageCard({
+  message,
+  providerName,
+  body,
+}: {
+  message: Message;
+  providerName: string;
+  /** Replaces the rendered answer (plan mode shows the plan card instead of its Markdown). */
+  body?: ReactNode;
+}) {
   if (message.role === 'user')
     return (
       <div className="message-row user-row">
@@ -45,7 +55,7 @@ export function MessageCard({ message, providerName }: { message: Message; provi
         )}
         <time dateTime={message.createdAt}>{timeLabel(message.createdAt)}</time>
       </div>
-      {content && <Markdown>{content}</Markdown>}
+      {body ?? (content && <Markdown>{content}</Markdown>)}
       {message.status === 'failed' && (
         <div className="message-error">
           <X size={13} /> Execução falhou

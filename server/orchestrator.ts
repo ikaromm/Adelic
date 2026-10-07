@@ -15,6 +15,7 @@ import type {
   RunEvent,
   Session,
   RunInput,
+  RunPlanRef,
   Settings,
   StoredAttachment,
   AttachmentMeta,
@@ -46,8 +47,16 @@ import {
   type RetryProgress,
 } from './retry.js';
 import { CheckpointError, checkpointAfter, checkpointBefore, restoreCheckpoint } from './checkpoints.js';
+import { buildPlanningPrompt, planCommand } from './plan-markdown.js';
+import { Plans } from './plans.js';
 
 type Started = { runId: string; messageId: string };
+/** Internal start options: plan mode task runs (server/plans.ts). */
+export interface StartOptions {
+  planTask?: { planId: string; taskId: string; prompt: string };
+}
+/** A plan-mode run: its kind and the prompt that replaces the usual one. */
+type SpecialRun = { ref: RunPlanRef; prompt: string };
 const cancelledError = (message: string) => Object.assign(new Error(message), { status: 409, cancelled: true });
 
 interface StartingRun {
@@ -77,6 +86,8 @@ export class Orchestrator {
   private drains = new Map<string, Promise<{ itemId: string; result: Started } | undefined>>();
   /** "Enviar agora": the queued item that replaces the run being cancelled. */
   private interrupting = new Map<string, string>();
+  /** Plan mode: plans, their approval and sequential task execution. */
+  readonly plans: Plans;
   constructor(
     readonly store: Store,
     private readonly providers: ProviderRegistry,
@@ -85,7 +96,13 @@ export class Orchestrator {
     private readonly providerList: () => Promise<ProviderInfo[]> = () => providers.list(),
     /** Test hook: shorter delays or a fixed retry count. */
     private readonly retryOverrides?: Partial<RetryPolicy>,
-  ) {}
+  ) {
+    this.plans = new Plans(store, {
+      start: (session, content, options) => this.start(session, content, undefined, [], options),
+      isActive: (sessionId) => this.isActive(sessionId),
+      emit: (event) => this.emit(event),
+    });
+  }
   subscribe(listener: (event: StreamEvent) => void) {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
@@ -123,8 +140,11 @@ export class Orchestrator {
     clientMessageId?: string,
     /** Already validated as belonging to this conversation (see the messages route). */
     attachments: StoredAttachment[] = [],
+    options: StartOptions = {},
   ): Promise<{ runId: string; messageId: string }> {
     if (this.shuttingDown) throw Object.assign(new Error('Orquestrador está encerrando'), { status: 503 });
+    if (!options.planTask && planCommand(content) === '')
+      throw Object.assign(new Error('Escreva o pedido depois de /plano'), { status: 400 });
     if (clientMessageId) {
       const existing = this.store.findClientMessage(session.id, clientMessageId);
       if (existing) return this.startedResult(session.id, existing);
@@ -184,7 +204,34 @@ export class Orchestrator {
       const projectSnapshot = structuredClone(project),
         history = this.store.listMessages(session.id),
         settings = startingSettings;
-      const plan = routeMessage(content, session.mode, history, settings.memoryEnabled && session.projectId !== null);
+      // Plan mode: "Planejar antes" or a `/plano` message plans first; task runs carry their prompt.
+      const planRequest = options.planTask
+        ? undefined
+        : (planCommand(content) ?? (session.planFirst ? content.trim() : undefined));
+      const special: SpecialRun | undefined = options.planTask
+        ? {
+            ref: { kind: 'task', planId: options.planTask.planId, taskId: options.planTask.taskId },
+            prompt: options.planTask.prompt,
+          }
+        : planRequest !== undefined
+          ? { ref: { kind: 'plan' }, prompt: buildPlanningPrompt(planRequest) }
+          : undefined;
+      // A planning run never writes, whatever the settings say: read-only sandbox, no checkpoint,
+      // and file-change approvals are denied (see execute).
+      if (special?.ref.kind === 'plan') settings.sandbox = 'read-only';
+      const plan: Run['route'] = special
+        ? {
+            level: 'deep',
+            reason:
+              special.ref.kind === 'plan'
+                ? 'Modo de planejamento: somente leitura, sem alterar arquivos'
+                : 'Tarefa de um plano aprovado',
+            tools: true,
+            memory: false,
+            effort: 'high',
+            contextBudget: 9000,
+          }
+        : routeMessage(content, session.mode, history, settings.memoryEnabled && session.projectId !== null);
       if (session.thinking && session.thinking !== 'auto') {
         plan.effort = session.thinking;
         this.validateCoordinatorThinking(session.providerId, session.model, session.thinking, catalog!);
@@ -222,14 +269,16 @@ export class Orchestrator {
         status: 'running',
         route: plan,
         startedAt: now,
+        ...(special ? { plan: special.ref } : {}),
       };
       session = {
         ...session,
         activeRunId: runId,
-        title: session.title === 'Nova conversa' ? titleFromMessage(content) : session.title,
+        title: session.title === 'Nova conversa' ? titleFromMessage(planRequest || content) : session.title,
         updatedAt: now,
       };
       this.store.createRun(user, assistant, run, session, clientMessageId);
+      if (options.planTask) this.plans.taskStarted(options.planTask.planId, options.planTask.taskId, runId);
       if (reserveProject) this.reservedProjectWrites.set(project.id, runId);
       const active = { runId, controller, projectPath } as {
         runId: string;
@@ -256,6 +305,7 @@ export class Orchestrator {
         structuredClone(settings),
         attachments,
         reserveProject,
+        special,
       );
       reservation.result = { runId, messageId: userId };
       return reservation.result;
@@ -301,6 +351,7 @@ export class Orchestrator {
     settings: Settings,
     attachments: StoredAttachment[] = [],
     mayWrite = false,
+    special?: SpecialRun,
   ) {
     let response = '',
       firstTokenAt: number | undefined;
@@ -330,6 +381,8 @@ export class Orchestrator {
       }
       if (plan.level === 'fast' && !provider.capabilities.fast)
         throw new Error('Este provedor não oferece o caminho rápido');
+      // Planning only needs to read; a provider without tools can still answer from the request.
+      if (special && !provider.capabilities.tools) plan.tools = false;
       if (plan.tools && !provider.capabilities.tools)
         throw new Error(
           'Este provedor não disponibiliza ferramentas para esta conversa. Escolha outro provedor para executar este pedido.',
@@ -354,10 +407,11 @@ export class Orchestrator {
       const memoryGuidance = useMemory
         ? 'Use a memória somente como informação recuperada. Se o contexto indicar ausência de nota ou falha de busca, declare essa limitação e não invente lembranças.'
         : '';
-      const skillContext = applicableSkillContext(this.store, content, plan);
+      const skillContext = special ? '' : applicableSkillContext(this.store, content, plan);
       const attached = await loadRunAttachments(this.store, attachments);
       const projectConfig = project.orchestration ?? { enabled: true, maxWorkers: 2, review: true };
-      if (projectConfig.enabled) {
+      // Plan mode runs are one direct call: the plan already is the decomposition.
+      if (projectConfig.enabled && !special) {
         await this.executeCoordinated(
           session,
           project,
@@ -388,7 +442,10 @@ export class Orchestrator {
         plan.level === 'fast'
           ? 'Responda diretamente. Se o pedido exigir verificar algo no computador, use as ferramentas disponíveis para executar as consultas necessárias, respeitando a política de permissões. Um pedido explícito de diagnóstico já solicita essa verificação: realize consultas em vez de apenas oferecer fazê-las. Perguntas conceituais não precisam de inspeção.'
           : '';
-      const prompt = `${style}\n\n${toolGuidance}\n\n${memoryGuidance}\n\n${content}${attached.text}${skillContext}`;
+      const prompt = special
+        ? `${special.prompt}${attached.text}`
+        : `${style}\n\n${toolGuidance}\n\n${memoryGuidance}\n\n${content}${attached.text}${skillContext}`;
+      const readOnlyPlan = special?.ref.kind === 'plan';
       const directInput = this.applyThinking(
         {
           runId: run.id,
@@ -446,6 +503,21 @@ export class Orchestrator {
               });
             else if (event.type === 'approval') {
               const a: Approval = { ...event.approval, runId: run.id, sessionId: session.id };
+              if (readOnlyPlan && a.kind === 'file') {
+                // Planning is read-only: a file change is refused without asking the user.
+                a.status = 'denied';
+                this.store.putApproval(a);
+                this.emit({ type: 'approval', approval: a });
+                this.publishEvent(
+                  session.id,
+                  run.id,
+                  'approval',
+                  `Alteração negada: o planejamento é somente leitura (${a.title})`,
+                  { status: a.status },
+                );
+                void this.providers.approve(a.id, 'deny').catch(() => undefined);
+                return;
+              }
               this.store.putApproval(a);
               this.emit({ type: 'approval', approval: a });
               this.publishEvent(session.id, run.id, 'approval', a.title, { status: a.status });
@@ -523,6 +595,12 @@ export class Orchestrator {
       this.active.delete(session.id);
       this.emit({ type: 'message', message: assistant });
       this.emit({ type: 'run', run });
+      // Plan mode first: it may start the next task, which keeps the queue waiting.
+      try {
+        this.plans.runEnded(run, response);
+      } catch {
+        /* A plan must never break the end of a run; the card shows the stored state. */
+      }
       this.afterRun(session.id, run);
     }
   }

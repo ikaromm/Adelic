@@ -8,6 +8,8 @@
 //   [medio]   → streams for about two seconds, then completes (message queue flows)
 //   [normal] or no marker → streams a short Markdown answer with a code block
 //   [anexos]  → lists the images it received and the text files inlined in the prompt
+// Plan mode: a planning prompt answers a fixed spec with two tasks (a planning prompt with
+// [falhar-tarefa] adds a third task whose run fails); task runs answer "Tarefa concluída".
 import { createServer } from 'node:http';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -17,6 +19,7 @@ import type { ProviderInfo, ProviderRegistry } from '../../shared/contracts.js';
 import { createBackend } from '../../server/index.js';
 import { Store } from '../../server/store.js';
 import { emitApproval } from '../../server/providers/common.js';
+import { PLAN_PROMPT_MARKER, TASK_PROMPT_MARKER } from '../../server/plan-markdown.js';
 import { startFakeMemory } from './fake-memory.js';
 
 const port = Number(process.env.E2E_PORT || 4399);
@@ -49,6 +52,25 @@ const providers: ProviderRegistry = {
     return [codex];
   },
   async run(input, emit, signal) {
+    if (input.prompt.startsWith(PLAN_PROMPT_MARKER)) {
+      // Records what the planning run received, so the E2E can check it was read-only.
+      const extra = input.prompt.includes('[falhar-tarefa]') ? '\n- [ ] Tarefa que falha' : '';
+      const spec = `# Exportar relatório\n\n## Requisitos\n1. O relatório sai em CSV.\n2. Sandbox do planejamento: ${input.sandbox}.\n\n## Design\nGerar o CSV em \`src/report.ts\`.\n\n## Tarefas\n- [ ] Criar o gerador de CSV\n- [ ] Ligar o botão Exportar${extra}\n`;
+      await sleep(150, signal).catch(() => undefined);
+      emit({ type: 'delta', text: spec });
+      return { text: spec, stopReason: signal.aborted ? 'cancelled' : 'completed' };
+    }
+    if (input.prompt.startsWith(TASK_PROMPT_MARKER)) {
+      const current = /Tarefa atual: (.*)/.exec(input.prompt)?.[1] ?? '';
+      try {
+        await sleep(400, signal);
+      } catch {
+        return { text: '', stopReason: 'cancelled' };
+      }
+      if (current.includes('falha')) throw new Error('A tarefa de teste falhou');
+      emit({ type: 'delta', text: 'Tarefa concluída' });
+      return { text: 'Tarefa concluída', stopReason: 'completed' };
+    }
     // The prompt also carries earlier messages after the current one ("Pedido atual: …"
     // then "Mensagens recentes"), so read the marker from the current request only.
     // Coordinated runs: a planner asks for a JSON task list.

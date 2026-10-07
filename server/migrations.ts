@@ -121,6 +121,18 @@ export const migrations: Migration[] = [
           FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE);`);
     },
   },
+  // Version 5 is reserved for a parallel branch; pending versions run in order.
+  {
+    version: 6,
+    description: 'Modo de planejamento: planos por conversa',
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS plans(
+          id TEXT PRIMARY KEY, session_id TEXT NOT NULL, data TEXT NOT NULL,
+          FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE);
+        CREATE INDEX IF NOT EXISTS plans_session ON plans(session_id);`);
+    },
+  },
 ];
 
 export const schemaVersion = migrations.at(-1)!.version;

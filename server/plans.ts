@@ -1,0 +1,279 @@
+import { randomUUID } from 'node:crypto';
+import { lstatSync, mkdirSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
+import { join, relative, sep } from 'node:path';
+import type { Plan, Run, Session, StreamEvent } from '../shared/contracts.js';
+import type { Store } from './store.js';
+import type { StartOptions } from './orchestrator.js';
+import { titleFromMessage } from './router.js';
+import { buildTaskPrompt, mergeTasks, parsePlanMarkdown, planCommand, planSlug, taskLabel } from './plan-markdown.js';
+
+// Plan mode (docs/specs/plan-mode.md): plans written by read-only planning runs, edited and
+// approved by the user, then executed one task per run, in order. A task is done only when
+// its run completed; a failure or a cancel stops the plan with the task back for the user.
+
+type Deps = {
+  start: (session: Session, content: string, options: StartOptions) => Promise<{ runId: string; messageId: string }>;
+  isActive: (sessionId: string) => boolean;
+  emit: (event: StreamEvent) => void;
+};
+const httpError = (message: string, status: number, extra: Record<string, unknown> = {}) =>
+  Object.assign(new Error(message), { status, ...extra });
+export const NO_TASKS = 'Não encontrei tarefas; edite o plano';
+
+export class Plans {
+  constructor(
+    private readonly store: Store,
+    private readonly deps: Deps,
+  ) {}
+  list(sessionId: string) {
+    return this.store.listPlans(sessionId);
+  }
+  private require(planId: string) {
+    const plan = this.store.getPlan(planId);
+    if (!plan) throw httpError('Plano não encontrado', 404);
+    return plan;
+  }
+  private session(plan: Plan) {
+    const session = this.store.getSession(plan.sessionId);
+    if (!session) throw httpError('Conversa não encontrada', 404);
+    return session;
+  }
+  /** Mutations wait for the conversation to be idle (the stop request is the exception). */
+  private requireIdle(plan: Plan) {
+    const session = this.session(plan);
+    if (session.activeRunId || this.deps.isActive(session.id))
+      throw httpError('Há uma execução em andamento nesta conversa; aguarde ou cancele antes', 409);
+    return session;
+  }
+  private save(plan: Plan) {
+    plan.updatedAt = new Date().toISOString();
+    this.store.putPlan(plan);
+    this.deps.emit({ type: 'plan', plan });
+    return plan;
+  }
+  /** Status after a change to the tasks: done once nothing is left to run. */
+  private settle(plan: Plan) {
+    if (plan.status === 'rejected' || plan.status === 'draft') return;
+    const left = plan.tasks.some((t) => t.status !== 'done' && t.status !== 'skipped');
+    plan.status = plan.tasks.length && !left ? 'done' : 'approved';
+  }
+
+  edit(planId: string, markdown: string) {
+    const plan = this.require(planId);
+    this.requireIdle(plan);
+    if (plan.status === 'executing' || plan.status === 'rejected')
+      throw httpError(plan.status === 'rejected' ? 'Este plano foi descartado' : 'O plano está em execução', 409);
+    const parsed = parsePlanMarkdown(markdown);
+    plan.markdown = markdown;
+    plan.requirements = parsed.requirements;
+    plan.design = parsed.design;
+    plan.tasks = mergeTasks(plan.tasks, parsed.tasks);
+    if (parsed.title) plan.title = parsed.title.slice(0, 160);
+    delete plan.error;
+    this.settle(plan);
+    return this.save(plan);
+  }
+
+  async approve(planId: string, mode: 'all' | 'next') {
+    const plan = this.require(planId);
+    this.requireIdle(plan);
+    if (plan.status === 'rejected') throw httpError('Este plano foi descartado', 409);
+    if (plan.status === 'executing') throw httpError('O plano já está em execução', 409);
+    if (!plan.tasks.length) throw httpError(NO_TASKS, 409);
+    if (!plan.tasks.some((t) => t.status === 'pending' || t.status === 'failed'))
+      throw httpError('Não há tarefas pendentes neste plano', 409);
+    const previous = plan.status;
+    plan.status = 'executing';
+    plan.executionMode = mode;
+    delete plan.stopRequested;
+    delete plan.error;
+    this.save(plan);
+    try {
+      return { plan: this.store.getPlan(plan.id)!, started: await this.startNext(plan) };
+    } catch (error) {
+      const latest = this.store.getPlan(plan.id) ?? plan;
+      latest.status = previous === 'draft' ? 'draft' : 'approved';
+      delete latest.executionMode;
+      latest.error = error instanceof Error ? error.message : String(error);
+      this.save(latest);
+      throw error;
+    }
+  }
+
+  /** Starts the first pending (or failed, i.e. retried) task. */
+  private async startNext(plan: Plan) {
+    const task = plan.tasks.find((t) => t.status === 'pending' || t.status === 'failed');
+    if (!task) throw httpError('Não há tarefas pendentes neste plano', 409);
+    return this.deps.start(this.session(plan), taskLabel(plan, task), {
+      planTask: { planId: plan.id, taskId: task.id, prompt: buildTaskPrompt(plan, task) },
+    });
+  }
+
+  /** Called by the orchestrator once the run of a task exists. */
+  taskStarted(planId: string, taskId: string, runId: string) {
+    const plan = this.store.getPlan(planId);
+    const task = plan?.tasks.find((t) => t.id === taskId);
+    if (!plan || !task) return;
+    task.status = 'running';
+    task.runId = runId;
+    delete task.error;
+    this.save(plan);
+  }
+
+  /** "Parar após a tarefa atual": the running task finishes, nothing else starts. */
+  stop(planId: string) {
+    const plan = this.require(planId);
+    if (plan.status !== 'executing') throw httpError('O plano não está em execução', 409);
+    plan.stopRequested = true;
+    return this.save(plan);
+  }
+
+  setTaskStatus(planId: string, taskId: string, status: 'skipped' | 'pending') {
+    const plan = this.require(planId);
+    this.requireIdle(plan);
+    if (plan.status === 'rejected') throw httpError('Este plano foi descartado', 409);
+    const task = plan.tasks.find((t) => t.id === taskId);
+    if (!task) throw httpError('Tarefa não encontrada neste plano', 404);
+    if (task.status === 'done' || task.status === 'running')
+      throw httpError(task.status === 'done' ? 'A tarefa já foi concluída' : 'A tarefa está em execução', 409);
+    task.status = status;
+    if (status === 'skipped') delete task.error;
+    if (plan.status !== 'draft' && plan.status !== 'executing') this.settle(plan);
+    return this.save(plan);
+  }
+
+  discard(planId: string) {
+    const plan = this.require(planId);
+    this.requireIdle(plan);
+    if (plan.status === 'rejected') throw httpError('Este plano já foi descartado', 409);
+    plan.status = 'rejected';
+    delete plan.executionMode;
+    delete plan.stopRequested;
+    return this.save(plan);
+  }
+
+  /**
+   * Writes the plan to `<project>/.adelic/specs/<slug>.md`. Refuses detached conversations,
+   * paths that leave the project through a symlink, and an existing file unless `overwrite`
+   * (409 with `exists: true`, so the UI can ask first).
+   */
+  saveToProject(planId: string, overwrite = false) {
+    const plan = this.require(planId);
+    if (plan.status === 'draft' || plan.status === 'rejected')
+      throw httpError('Aprove o plano antes de salvá-lo no projeto', 409);
+    const session = this.session(plan);
+    const project = session.projectId === null ? undefined : this.store.getProject(session.projectId);
+    if (!project) throw httpError('Esta conversa não está vinculada a um projeto', 409);
+    let root: string;
+    try {
+      root = realpathSync(project.path);
+    } catch {
+      throw httpError('A pasta do projeto não existe mais', 409);
+    }
+    const dir = join(root, '.adelic', 'specs');
+    mkdirSync(dir, { recursive: true });
+    const realDir = realpathSync(dir);
+    if (realDir !== dir || !within(root, realDir))
+      throw httpError('A pasta .adelic/specs sai do projeto por um link simbólico; nada foi salvo', 409);
+    const target = join(realDir, `${planSlug(plan.title)}.md`);
+    const path = relative(root, target).split(sep).join('/');
+    let existing: ReturnType<typeof lstatSync> | undefined;
+    try {
+      existing = lstatSync(target);
+    } catch {
+      existing = undefined;
+    }
+    if (existing?.isSymbolicLink() || (existing && !existing.isFile()))
+      throw httpError(`${path} não é um arquivo comum; nada foi salvo`, 409);
+    if (existing && !overwrite) throw httpError(`${path} já existe`, 409, { exists: true, path });
+    const body = plan.markdown.endsWith('\n') ? plan.markdown : `${plan.markdown}\n`;
+    if (existing) {
+      const temp = join(realDir, `.${randomUUID()}.tmp`);
+      writeFileSync(temp, body, { flag: 'wx' });
+      renameSync(temp, target);
+    } else {
+      // `wx` fails if the file appeared meanwhile: never overwrites without the flag.
+      try {
+        writeFileSync(target, body, { flag: 'wx' });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'EEXIST')
+          throw httpError(`${path} já existe`, 409, { exists: true, path });
+        throw error;
+      }
+    }
+    plan.savedPath = path;
+    this.save(plan);
+    return { path, plan };
+  }
+
+  /** End of any run: creates the plan of a planning run, or advances the task of a task run. */
+  runEnded(run: Run, response: string) {
+    if (run.plan?.kind === 'plan') {
+      if (run.status === 'completed' && response.trim()) this.createFromRun(run, response);
+      return;
+    }
+    if (run.plan?.kind !== 'task') return;
+    const plan = this.store.getPlan(run.plan.planId);
+    const task = plan?.tasks.find((t) => t.id === (run.plan as { taskId: string }).taskId);
+    if (!plan || !task || task.runId !== run.id) return;
+    if (run.status === 'completed') {
+      task.status = 'done';
+      delete task.error;
+    } else if (run.status === 'failed') {
+      task.status = 'failed';
+      task.error = run.error || 'A execução falhou';
+    } else {
+      task.status = 'pending';
+      task.error = run.status === 'cancelled' ? 'Cancelada pelo usuário' : 'Execução interrompida';
+    }
+    const next = plan.tasks.find((t) => t.status === 'pending' || t.status === 'failed');
+    const keepGoing =
+      run.status === 'completed' && plan.status === 'executing' && plan.executionMode === 'all' && !plan.stopRequested;
+    if (keepGoing && next) {
+      this.save(plan);
+      void this.startNext(plan).catch((error: unknown) => {
+        const latest = this.store.getPlan(plan.id);
+        if (!latest) return;
+        latest.status = 'approved';
+        delete latest.executionMode;
+        latest.error = `Não foi possível iniciar a próxima tarefa: ${error instanceof Error ? error.message : String(error)}`;
+        this.save(latest);
+      });
+      return;
+    }
+    if (run.status === 'failed')
+      plan.error = `A tarefa ${plan.tasks.indexOf(task) + 1} falhou. Tente de novo ou pule-a para continuar.`;
+    plan.status = 'approved';
+    delete plan.executionMode;
+    delete plan.stopRequested;
+    this.settle(plan);
+    this.save(plan);
+  }
+
+  private createFromRun(run: Run, response: string) {
+    const parsed = parsePlanMarkdown(response);
+    const request = this.store.listMessages(run.sessionId).find((m) => m.runId === run.id && m.role === 'user');
+    const asked = request ? (planCommand(request.content) ?? request.content) : '';
+    const now = new Date().toISOString();
+    const plan: Plan = {
+      id: randomUUID(),
+      sessionId: run.sessionId,
+      runId: run.id,
+      title: (parsed.title || titleFromMessage(asked) || 'Plano').slice(0, 160),
+      status: 'draft',
+      requirements: parsed.requirements,
+      design: parsed.design,
+      tasks: mergeTasks([], parsed.tasks),
+      markdown: response.trim(),
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.store.putPlan(plan);
+    this.deps.emit({ type: 'plan', plan });
+    return plan;
+  }
+}
+
+function within(root: string, path: string) {
+  return path === root || path.startsWith(root + sep);
+}

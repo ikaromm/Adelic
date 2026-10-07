@@ -2,6 +2,7 @@
 
 ## Não publicado
 
+- Modo de planejamento: **Planejar antes** ou `/plano` gera, em modo somente leitura, um plano com requisitos, design e tarefas; o cartão permite editar, aprovar e executar uma tarefa por execução (com checkpoint), parar, pular, tentar de novo e salvar em `.adelic/specs/`. Veja [modo de planejamento](docs/specs/plan-mode.md).
 - Notificações do sistema quando uma resposta fica pronta, uma execução falha ou uma aprovação é necessária, só com a janela em segundo plano, e contador no título da aba. Ligado por padrão no desktop; no navegador, pede permissão. Veja [notificações](docs/specs/notifications.md).
 - Anexos nas mensagens: imagens (PNG, JPEG, WebP, GIF até 10 MB) para Codex e Kiro, e arquivos de texto (até 512 KB) para todos os agentes, pelo clipe, colando ou arrastando, até 5 por mensagem; veja [anexos](docs/specs/attachments.md).
 - Cada execução que pode escrever num projeto git mostra os arquivos que alterou ("Alterou 3 arquivos (+12 −4)"), o diff de cada um e **Desfazer alterações desta execução**, que é recusado se algum arquivo mudou depois. HEAD, branches, índice e stash nunca são tocados; veja [checkpoints](docs/specs/checkpoints.md).

@@ -492,6 +492,8 @@ export class KiroProvider {
           mcp.map((server) => server.command),
           input.cwd,
         ),
+        // User-owned copies of root-owned client configs (ssh), removed with KIRO_HOME.
+        { systemShims: { dir: path.join(isolatedHome, 'system-shims') } },
       );
     } catch (error) {
       await rm(isolatedHome, { recursive: true, force: true });

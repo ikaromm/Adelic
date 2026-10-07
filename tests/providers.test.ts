@@ -1097,6 +1097,32 @@ rl.on('line', (line) => {
     }
   });
 
+  it('asks the sandbox for system config shims inside the Codex run scratch', async () => {
+    const base = path.join(process.cwd(), '.adelic/test-tmp');
+    await mkdir(base, { recursive: true });
+    const fixture = await mkdtemp(path.join(base, 'codex-shims-'));
+    temporaryDirectories.push(fixture);
+    const binary = await fakeServer();
+    let captured: { scratch?: string; options?: unknown } = {};
+    const provider = new CodexProvider(
+      async () => binary,
+      undefined,
+      undefined,
+      path.join(fixture, 'data'),
+      async (command, args, _cwd, _sandbox, runtime = [], _readonly, options) => {
+        captured = { scratch: runtime[0], options };
+        return { command, args };
+      },
+    );
+    try {
+      await provider.run(runInput('shims'), () => undefined, new AbortController().signal);
+    } finally {
+      await provider.shutdown();
+    }
+    expect(captured.scratch).toContain(`${path.sep}codex-tmp${path.sep}adelic-codex-`);
+    expect(captured.options).toEqual({ systemShims: { dir: path.join(captured.scratch!, 'system-shims') } });
+  });
+
   it('preserves a Codex item ID across tool lifecycle events', async () => {
     const previous = process.env.FAKE_SCENARIO;
     process.env.FAKE_SCENARIO = 'tool-event';

@@ -75,6 +75,8 @@ export async function runCheck(check: AfterEditCheck, cwd: string, options: Chec
   if (options.signal.aborted) return { ...base, status: 'cancelled', detail: abortReason(options.signal) };
   let wrapped: Awaited<ReturnType<typeof bubblewrap>>;
   try {
+    // System config shims stay on (the default) for parity with the agents' sandbox, although
+    // ssh itself is moot here: the network is off and no ssh-agent socket is bound.
     wrapped = await (options.wrap ?? bubblewrap)('/bin/sh', ['-c', check.command], cwd, options.sandbox, [], [], {
       network: false,
     });

@@ -1,4 +1,4 @@
-import type { DelegatedTask, RunEvent, RunStatus } from '../shared/contracts';
+import type { DelegatedTask, FileChange, RunEvent, RunStatus } from '../shared/contracts';
 
 export interface RunActivity {
   tasks: DelegatedTask[];
@@ -112,4 +112,32 @@ function isActionInProgress(status?: string): boolean {
 export function runStatusLabel(status?: RunStatus): string | null {
   if (!status || status === 'completed') return null;
   return { running: 'Em andamento', cancelled: 'Cancelada', interrupted: 'Interrompida', failed: 'Falhou' }[status];
+}
+
+/** "Alterou 3 arquivos (+12 −4)"; counts include files beyond the listed ones when known. */
+export function changesSummary(files: FileChange[], omitted = 0): string {
+  const count = files.length + omitted;
+  const additions = files.reduce((sum, f) => sum + f.additions, 0);
+  const deletions = files.reduce((sum, f) => sum + f.deletions, 0);
+  return `Alterou ${count} ${count === 1 ? 'arquivo' : 'arquivos'} (+${additions} \u2212${deletions})`;
+}
+
+export type DiffLineKind = 'add' | 'del' | 'hunk' | 'meta' | 'context';
+/** Classifies a unified diff line for coloring; `---`/`+++` headers before a hunk are metadata. */
+export function diffLines(diff: string): { text: string; kind: DiffLineKind }[] {
+  let inHunk = false;
+  return diff
+    .replace(/\n$/, '')
+    .split('\n')
+    .map((text) => {
+      let kind: DiffLineKind = 'context';
+      if (text.startsWith('diff --git')) inHunk = false;
+      if (text.startsWith('@@')) {
+        inHunk = true;
+        kind = 'hunk';
+      } else if (!inHunk || text.startsWith('\\')) kind = 'meta';
+      else if (text.startsWith('+')) kind = 'add';
+      else if (text.startsWith('-')) kind = 'del';
+      return { text, kind };
+    });
 }

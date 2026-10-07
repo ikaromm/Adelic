@@ -159,6 +159,31 @@ export interface Run {
   retries?: number;
   /** Set on failures: whether repeating may help, and why it was not repeated automatically. */
   failure?: { kind: 'transient' | 'capacity' | 'permanent'; reason: string; retryable: boolean; why?: string };
+  /** Snapshot of the project files around a run that could write; see docs/specs/checkpoints.md. */
+  checkpoint?: RunCheckpoint;
+}
+export interface FileChange {
+  /** Path relative to the repository root, `/`-separated. */
+  path: string;
+  status: 'added' | 'modified' | 'deleted';
+  additions: number;
+  deletions: number;
+  binary?: boolean;
+}
+export interface RunCheckpoint {
+  /** False when no checkpoint could be taken (not a git repository, too large, git failed). */
+  available: boolean;
+  reason?: string;
+  /** Real path of the snapshotted folder. */
+  root?: string;
+  /** Commit ids under refs/adelic/checkpoints/<runId>/{before,after}. */
+  before?: string;
+  after?: string;
+  /** Present once the run finished; empty when it changed nothing. */
+  files?: FileChange[];
+  /** Changed files beyond the listed ones. */
+  omitted?: number;
+  restoredAt?: string;
 }
 export interface Approval {
   id: string;

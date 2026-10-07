@@ -9,8 +9,10 @@ import type {
   MemoryListing,
   MemoryPage,
   MemoryScope,
+  FileChange,
   Project,
   ProjectCoordination,
+  Run,
   Session,
   SessionDetail,
   Settings,
@@ -72,15 +74,19 @@ function serializeProjectPatch(data: ProjectPatch) {
   return JSON.stringify({ ...data, orchestration });
 }
 
+/** Error from the API; `conflicts` lists files that blocked an undo (409). */
+export type ApiError = Error & { status: number; conflicts?: string[] };
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
     ...init,
     headers: { 'Content-Type': 'application/json', ...init?.headers },
   });
   if (!response.ok) {
-    const body = (await response.json().catch(() => ({}))) as { error?: string };
-    const error = new Error(body.error || `Falha na solicitação (${response.status})`) as Error & { status: number };
+    const body = (await response.json().catch(() => ({}))) as { error?: string; conflicts?: string[] };
+    const error = new Error(body.error || `Falha na solicitação (${response.status})`) as ApiError;
     error.status = response.status;
+    if (Array.isArray(body.conflicts)) error.conflicts = body.conflicts;
     throw error;
   }
   if (response.status === 204) return undefined as T;
@@ -132,6 +138,19 @@ export const api = {
       body: JSON.stringify({ content, clientMessageId }),
     }),
   cancel: (id: string) => request<void>(`/api/sessions/${encodeURIComponent(id)}/cancel`, { method: 'POST' }),
+  runChanges: (id: string) =>
+    request<{ available: boolean; reason?: string; files: FileChange[]; omitted?: number; restoredAt?: string }>(
+      `/api/runs/${encodeURIComponent(id)}/changes`,
+    ),
+  runDiff: (id: string, path: string) =>
+    request<{ path: string; diff: string; truncated: boolean }>(
+      `/api/runs/${encodeURIComponent(id)}/diff?path=${encodeURIComponent(path)}`,
+    ),
+  restoreRun: (id: string) =>
+    request<{ restored: string[]; run: Run }>(`/api/runs/${encodeURIComponent(id)}/restore`, {
+      method: 'POST',
+      body: JSON.stringify({ confirm: true }),
+    }),
   approve: (id: string, decision: 'approve' | 'deny') =>
     request<void>(`/api/approvals/${encodeURIComponent(id)}`, { method: 'POST', body: JSON.stringify({ decision }) }),
   settings: (data: Partial<Settings>) =>

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { mkdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdirSync, realpathSync } from 'node:fs';
+import { join, sep } from 'node:path';
 import type {
   Approval,
   DelegatedTask,
@@ -39,6 +39,7 @@ import {
   type RetryPolicy,
   type RetryProgress,
 } from './retry.js';
+import { CheckpointError, checkpointAfter, checkpointBefore, restoreCheckpoint } from './checkpoints.js';
 
 interface StartingRun {
   clientMessageId?: string;
@@ -50,7 +51,12 @@ interface StartingRun {
 }
 
 export class Orchestrator {
-  private active = new Map<string, { runId: string; controller: AbortController; done?: Promise<void> }>();
+  private active = new Map<
+    string,
+    { runId: string; controller: AbortController; done?: Promise<void>; projectPath?: string }
+  >();
+  /** Real paths of project folders being restored to a checkpoint; runs there cannot start. */
+  private restoring = new Set<string>();
   private starting = new Map<string, StartingRun>();
   private shuttingDown = false;
   private deciding = new Set<string>();
@@ -159,6 +165,11 @@ export class Orchestrator {
       if (!project) throw Object.assign(new Error('Projeto não encontrado'), { status: 404 });
       if (this.writingProjects.has(project.id) || this.reservedProjectWrites.has(project.id))
         throw Object.assign(new Error('Já há uma execução alterando este projeto'), { status: 409 });
+      const projectPath = realPath(project.path);
+      if ([...this.restoring].some((path) => overlaps(path, projectPath)))
+        throw Object.assign(new Error('As alterações de uma execução estão sendo desfeitas neste projeto'), {
+          status: 409,
+        });
       const projectSnapshot = structuredClone(project),
         history = this.store.listMessages(session.id),
         settings = startingSettings;
@@ -201,7 +212,12 @@ export class Orchestrator {
       };
       this.store.createRun(user, assistant, run, session, clientMessageId);
       if (reserveProject) this.reservedProjectWrites.set(project.id, runId);
-      const active = { runId, controller } as { runId: string; controller: AbortController; done?: Promise<void> };
+      const active = { runId, controller, projectPath } as {
+        runId: string;
+        controller: AbortController;
+        done?: Promise<void>;
+        projectPath?: string;
+      };
       this.active.set(session.id, active);
       this.starting.delete(session.id);
       reservation.finish();
@@ -219,6 +235,7 @@ export class Orchestrator {
         assistant,
         controller,
         structuredClone(settings),
+        reserveProject,
       );
       reservation.result = { runId, messageId: userId };
       return reservation.result;
@@ -256,12 +273,21 @@ export class Orchestrator {
     assistant: Message,
     controller: AbortController,
     settings: Settings,
+    mayWrite = false,
   ) {
     let response = '',
       firstTokenAt: number | undefined;
     const started = Date.parse(run.startedAt);
     let memoryContext: string | undefined;
     try {
+      // The project is reserved for this run, so nothing else writes there until `after`.
+      if (mayWrite) {
+        run.checkpoint = await checkpointBefore(project.path, run.id, {
+          requireToplevel: session.projectId === null,
+        });
+        this.store.putRun(run);
+        this.emit({ type: 'run', run });
+      }
       const providerCatalog = await this.providerList();
       const provider = providerCatalog.find((p) => p.id === session.providerId);
       if (controller.signal.aborted) throw new Error('Execução cancelada');
@@ -441,6 +467,7 @@ export class Orchestrator {
         this.emit({ type: 'task', task: { ...task, output: undefined } });
       }
     } finally {
+      if (run.checkpoint) run.checkpoint = await checkpointAfter(run.id, run.checkpoint);
       run.completedAt = new Date().toISOString();
       run.durationMs = Date.now() - started;
       if (response) assistant.content = response;
@@ -1075,6 +1102,45 @@ export class Orchestrator {
         .map((t) => ({ ...t, output: undefined, instructions: t.instructions.slice(0, 600) })),
     };
   }
+  /** True while a run is active (or starting) in a folder that overlaps `path`. */
+  private busyAt(path: string) {
+    if ([...this.active.values()].some((item) => item.projectPath && overlaps(item.projectPath, path))) return true;
+    for (const sessionId of this.starting.keys()) {
+      const session = this.store.getSession(sessionId);
+      const project =
+        session?.projectId === null
+          ? join(this.store.dataDir, 'conversations', sessionId)
+          : session && this.store.getProject(session.projectId)?.path;
+      if (!project || overlaps(realPath(project), path)) return true;
+    }
+    return false;
+  }
+  /**
+   * Puts back the files a finished run changed (see server/checkpoints.ts). Refused while any
+   * run is active in that folder, and new runs there wait for 409 until it finishes.
+   */
+  async restoreRun(runId: string) {
+    const run = this.store.getRun(runId);
+    if (!run) throw Object.assign(new Error('Execução não encontrada'), { status: 404 });
+    if (run.status === 'running') throw new CheckpointError('A execução ainda está em andamento');
+    const root = run.checkpoint?.root;
+    if (!run.checkpoint?.available || !root || !run.checkpoint.after)
+      throw new CheckpointError('Esta execução não tem alterações registradas para desfazer', 404);
+    if (run.checkpoint.restoredAt) throw new CheckpointError('As alterações desta execução já foram desfeitas');
+    if (this.busyAt(root) || [...this.restoring].some((path) => overlaps(path, root)))
+      throw new CheckpointError('Há uma execução em andamento neste projeto; aguarde ou cancele antes de desfazer');
+    this.restoring.add(root);
+    try {
+      const result = await restoreCheckpoint(run.id, run.checkpoint);
+      const latest = this.store.getRun(run.id) ?? run;
+      latest.checkpoint = { ...run.checkpoint, restoredAt: new Date().toISOString() };
+      this.store.putRun(latest);
+      this.emit({ type: 'run', run: latest });
+      return { ...result, run: latest };
+    } finally {
+      this.restoring.delete(root);
+    }
+  }
   async cancel(sessionId: string) {
     const item = this.active.get(sessionId);
     if (item) {
@@ -1142,6 +1208,17 @@ export class Orchestrator {
       ...active.map((item) => item.done).filter((p): p is Promise<void> => Boolean(p)),
     ]);
   }
+}
+function realPath(path: string) {
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
+  }
+}
+/** Same folder, or one inside the other. */
+function overlaps(a: string, b: string) {
+  return a === b || a.startsWith(b + sep) || b.startsWith(a + sep);
 }
 /** Failure details for the UI: from withRetry when it ran, else classified here. */
 function failureOf(e: unknown): Run['failure'] {

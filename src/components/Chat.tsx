@@ -14,6 +14,7 @@ import {
   statusLabel,
 } from '../run-activity';
 import { useNow } from '../useNow';
+import { RunChanges } from './RunChanges';
 
 export function MessageCard({ message, providerName }: { message: Message; providerName: string }) {
   if (message.role === 'user')
@@ -67,6 +68,7 @@ export function RunActivityPanel({
   taskOutputs,
   loadingTaskOutputs,
   onLoadTaskOutput,
+  busy = false,
 }: {
   runId: string;
   run?: Run;
@@ -77,13 +79,21 @@ export function RunActivityPanel({
   taskOutputs: Record<string, string | null>;
   loadingTaskOutputs: Set<string>;
   onLoadTaskOutput: (task: DelegatedTask) => Promise<void>;
+  /** A run is active in this conversation: undo is disabled meanwhile. */
+  busy?: boolean;
 }) {
   const activity = activityForRun(runId, tasks, events);
   const runStatus = run?.status;
   const running = runStatus === 'running' || (!runStatus && active);
   const now = useNow(1000, running);
   const outcome = runStatusLabel(runStatus) || (active ? 'Em andamento' : null);
-  if (!activityIsVisible(activity) && !outcome) return null;
+  const changes = run && <RunChanges run={run} busy={busy || active} />;
+  if (!activityIsVisible(activity) && !outcome)
+    return run?.checkpoint?.files?.length ? (
+      <section className={`run-activity ${run.status}`} aria-label="Atividade desta execução">
+        {changes}
+      </section>
+    ) : null;
   const startedAt = run?.startedAt ? new Date(run.startedAt).getTime() : Number.NaN;
   const elapsed = formatDuration(
     running ? (Number.isFinite(startedAt) ? Math.max(0, now - startedAt) : undefined) : run?.durationMs,
@@ -233,6 +243,7 @@ export function RunActivityPanel({
           )}
         </div>
       )}
+      {changes}
     </section>
   );
 }

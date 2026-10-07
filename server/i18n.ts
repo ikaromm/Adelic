@@ -14,16 +14,24 @@ import {
   negotiateLocale,
   translate,
   type Locale,
+  type PluralBase,
   type Vars,
 } from '../shared/i18n.js';
 import * as areas from './i18n/messages/index.js';
 
 type Areas = typeof areas;
-export type ServerKey = { [A in keyof Areas]: keyof Areas[A]['pt-BR'] & string }[keyof Areas];
+type CatalogKey = { [A in keyof Areas]: keyof Areas[A]['pt-BR'] & string }[keyof Areas];
+/** A catalog key, or the base of a plural (`x` for `x.one` / `x.other`, called with `count`). */
+export type ServerKey = CatalogKey | PluralBase<CatalogKey>;
 
 const catalogs = mergeAreas(areas);
-const keys = new Set(Object.keys(catalogs[DEFAULT_LOCALE]));
-/** True for a key of the server catalog (sentences never match: keys have no spaces). */
+const keys = new Set(
+  Object.keys(catalogs[DEFAULT_LOCALE]).flatMap((key) => {
+    const plural = /^(.+)\.(zero|one|two|few|many|other)$/.exec(key);
+    return plural ? [key, plural[1]] : [key];
+  }),
+);
+/** True for a key (or plural base) of the server catalog (sentences never match: keys have no spaces). */
 export const isServerKey = (value: string): value is ServerKey => keys.has(value);
 /** Every key, for tests. */
 export const serverCatalogs = catalogs;
@@ -85,3 +93,20 @@ export class LocalizedError extends Error {
 export function resolveMessage(value: string | Translatable | LocalizedError, locale: Locale): string {
   return typeof value === 'string' ? value : tr(locale, value.key, value.vars);
 }
+
+/**
+ * Gives any error (CheckpointError, VoiceError…) a catalog key: its message becomes the pt-BR
+ * text and `failure()` / `error()` / `message(e, locale)` translate it per request.
+ */
+export function localize<E extends Error>(e: E, key: ServerKey, vars?: Vars): E {
+  e.message = tr(DEFAULT_LOCALE, key, vars);
+  return Object.assign(e, { key, vars });
+}
+/** Key and vars carried by a thrown error (LocalizedError or `localize()`), if any. */
+export function errorKey(e: unknown): Translatable | undefined {
+  const key = (e as { key?: unknown } | null)?.key;
+  return typeof key === 'string' && isServerKey(key) ? { key, vars: (e as { vars?: Vars }).vars } : undefined;
+}
+/** An error with a status code and a catalog key (`Object.assign(new Error(text), { status })` before). */
+export const httpError = (status: number, key: ServerKey, vars?: Vars, extra: Record<string, unknown> = {}) =>
+  Object.assign(new LocalizedError(key, vars, status), extra);

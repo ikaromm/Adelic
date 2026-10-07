@@ -140,7 +140,7 @@ export function remoteAccessRoutes(store: Store, access: AccessControl, funnel: 
   };
   app.put('/api/remote-access/account', async (req, res) => {
     if (!local(req, res)) return;
-    const parsed = parseBody(RemoteAccountSchema, req.body, 'remote.invalidAccount');
+    const parsed = parseBody(RemoteAccountSchema, req.body, 'remote.invalidAccount', req.locale);
     if (!parsed.ok) return error(res, 400, parsed.message);
     try {
       await access.accounts.setAccount(parsed.data.username, parsed.data.password);
@@ -179,7 +179,7 @@ export function remoteAccessRoutes(store: Store, access: AccessControl, funnel: 
   });
   app.put('/api/remote-access/funnel', async (req, res) => {
     if (!local(req, res)) return;
-    const parsed = parseBody(RemoteFunnelSchema, req.body, 'remote.enabledBoolean');
+    const parsed = parseBody(RemoteFunnelSchema, req.body, 'remote.enabledBoolean', req.locale);
     if (!parsed.ok) return error(res, 400, parsed.message);
     try {
       const tailscale = parsed.data.enabled ? await funnel.enable() : await funnel.disable();

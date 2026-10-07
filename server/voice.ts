@@ -8,7 +8,9 @@ import { constants } from 'node:fs';
 import { access, chmod, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { delimiter, isAbsolute, join } from 'node:path';
-import { VOICE_BUSY, VOICE_REMOTE_REFUSAL, type VoiceMime, type VoiceStatus } from '../shared/voice.js';
+import { VOICE_REMOTE_REFUSAL, type VoiceMime, type VoiceStatus } from '../shared/voice.js';
+import type { Vars } from '../shared/i18n.js';
+import { localize, tr, type ServerKey, type Translatable } from './i18n.js';
 
 export interface RunOptions {
   timeout: number;
@@ -45,7 +47,22 @@ const SECRET_ENV = /^(VOXTYPE_.*(KEY|TOKEN)|SONIOX_.*|OPENAI_.*)$/i;
 const DEMUXER: Record<VoiceMime, string> = { 'audio/webm': 'webm', 'audio/ogg': 'ogg', 'audio/mp4': 'mp4' };
 const EXTENSION: Record<VoiceMime, string> = { 'audio/webm': 'webm', 'audio/ogg': 'ogg', 'audio/mp4': 'm4a' };
 
-const unavailable = (reason: string): VoiceStatus => ({ available: false, reason });
+/**
+ * Keys of the `reason` texts (pt-BR, as before): kept beside the status objects, which tests and
+ * the UI compare as plain `{ available, reason }`, so the route can translate them (voiceStatusIn).
+ */
+const reasons = new WeakMap<VoiceStatus, Translatable>();
+const why = (key: ServerKey, vars?: Vars): Translatable => ({ key, vars });
+const unavailable = (reason: Translatable): VoiceStatus => {
+  const status: VoiceStatus = { available: false, reason: tr(undefined, reason.key, reason.vars) };
+  reasons.set(status, reason);
+  return status;
+};
+/** The status with its `reason` in `locale`. */
+export function voiceStatusIn(status: VoiceStatus, locale?: Parameters<typeof tr>[0]): VoiceStatus {
+  const reason = reasons.get(status);
+  return reason && locale ? { ...status, reason: tr(locale, reason.key, reason.vars) } : status;
+}
 
 /** Error carrying the HTTP status the route answers with. */
 export class VoiceError extends Error {
@@ -54,6 +71,10 @@ export class VoiceError extends Error {
     message: string,
   ) {
     super(message);
+  }
+  /** A VoiceError whose message is a catalog key, translated per request. */
+  static of(status: number, reason: Translatable) {
+    return localize(new VoiceError(status, ''), reason.key, reason.vars);
   }
 }
 
@@ -102,26 +123,29 @@ export function parseConfigText(stdout: string): ConfigMap | undefined {
 }
 
 export type EngineCheck =
-  { ok: true; engine: string; model?: string; whisperMode?: string } | { ok: false; reason: string };
+  | { ok: true; engine: string; model?: string; whisperMode?: string }
+  | { ok: false; reason: string; why?: Translatable };
+const refuse = (reason: Translatable): EngineCheck => ({
+  ok: false,
+  reason: tr(undefined, reason.key, reason.vars),
+  why: reason,
+});
+// The remote refusal keeps its historical shape (`{ ok: false, reason }`); its key is known.
+const REMOTE: EngineCheck = { ok: false, reason: VOICE_REMOTE_REFUSAL };
 
 /** Decides from the resolved configuration whether transcription stays on this machine. */
 export function checkEngine(config: ConfigMap): EngineCheck {
   const engine = lower(config.engine);
-  if (!engine) return { ok: false, reason: 'Ditado indisponível: não foi possível ler o motor do voxtype' };
-  if (REMOTE_ENGINES.has(engine)) return { ok: false, reason: VOICE_REMOTE_REFUSAL };
-  if (!LOCAL_ENGINES.has(engine))
-    return { ok: false, reason: `Ditado indisponível: motor do voxtype não reconhecido (${engine.slice(0, 40)})` };
+  if (!engine) return refuse(why('voice.engineUnreadable'));
+  if (REMOTE_ENGINES.has(engine)) return { ...REMOTE };
+  if (!LOCAL_ENGINES.has(engine)) return refuse(why('voice.engineUnknown', { engine: engine.slice(0, 40) }));
   const model = typeof config[`${engine}.model`] === 'string' ? (config[`${engine}.model`] as string) : undefined;
   if (engine !== 'whisper') return { ok: true, engine, model };
   const mode = lower(config['whisper.mode'] ?? config['whisper.backend']);
   // A remote mode, or a remote endpoint with an unconfirmed mode, means an OpenAI-compatible API.
   if (mode === 'remote' || mode === 'api' || (!mode && present(config['whisper.remote_endpoint'])))
-    return { ok: false, reason: VOICE_REMOTE_REFUSAL };
-  if (!mode || !LOCAL_WHISPER_MODES.has(mode))
-    return {
-      ok: false,
-      reason: 'Ditado indisponível: não foi possível confirmar que o voxtype usa um modelo local',
-    };
+    return { ...REMOTE };
+  if (!mode || !LOCAL_WHISPER_MODES.has(mode)) return refuse(why('voice.notLocal'));
   return { ok: true, engine, model, whisperMode: mode };
 }
 
@@ -260,17 +284,17 @@ export class VoiceService {
   /** Reads the voxtype setup and builds the transcription arguments, or explains why not. */
   private async inspect(): Promise<Ready> {
     const [voxtype, ffmpeg] = await Promise.all([this.find('voxtype'), this.find('ffmpeg')]);
-    if (!voxtype) return { status: unavailable('Ditado indisponível: voxtype não encontrado no PATH') };
-    if (!ffmpeg) return { status: unavailable('Ditado indisponível: ffmpeg não encontrado no PATH') };
+    if (!voxtype) return { status: unavailable(why('voice.noVoxtype')) };
+    if (!ffmpeg) return { status: unavailable(why('voice.noFfmpeg')) };
     const json = await this.query(voxtype, ['config', 'get', '--json']);
     let config = json === undefined ? undefined : parseConfigJson(json);
     if (!config) {
       const text = await this.query(voxtype, ['config']);
       config = text === undefined ? undefined : parseConfigText(text);
     }
-    if (!config) return { status: unavailable('Ditado indisponível: não foi possível ler a configuração do voxtype') };
+    if (!config) return { status: unavailable(why('voice.configUnreadable')) };
     const engine = checkEngine(config);
-    if (!engine.ok) return { status: unavailable(engine.reason) };
+    if (!engine.ok) return { status: unavailable(engine.why ?? why('voice.remoteRefusal')) };
 
     const [engines, models, help] = await Promise.all([
       this.query(voxtype, ['info', 'engines', '--json']),
@@ -278,23 +302,23 @@ export class VoiceService {
       this.query(voxtype, ['--help']),
     ]);
     if (engines !== undefined && parseEngineCompiled(engines, engine.engine) === false)
-      return { status: unavailable(`Ditado indisponível: o motor ${engine.engine} não está compilado neste voxtype`) };
+      return { status: unavailable(why('voice.engineNotCompiled', { engine: engine.engine })) };
     const installed = models === undefined ? undefined : parseInstalledModels(models, engine.engine);
     if (engine.model && isAbsolute(engine.model)) {
       const exists = await stat(engine.model).then(
         (s) => s.isFile() || s.isDirectory(),
         () => false,
       );
-      if (!exists) return { status: unavailable('Ditado indisponível: o arquivo de modelo do voxtype não existe') };
+      if (!exists) return { status: unavailable(why('voice.modelFileMissing')) };
     } else if (!installed) {
-      return { status: unavailable('Ditado indisponível: não foi possível listar os modelos do voxtype') };
+      return { status: unavailable(why('voice.modelsUnlisted')) };
     } else if (!installed.length) {
       return {
-        status: unavailable('Ditado indisponível: nenhum modelo local do voxtype instalado (voxtype setup model)'),
+        status: unavailable(why('voice.noModels')),
       };
     } else if (engine.model && !installed.includes(engine.model)) {
       return {
-        status: unavailable(`Ditado indisponível: o modelo ${engine.model.slice(0, 60)} do voxtype não está instalado`),
+        status: unavailable(why('voice.modelMissing', { model: engine.model.slice(0, 60) })),
       };
     }
 
@@ -315,14 +339,14 @@ export class VoiceService {
    * private temp folder is removed whatever happens.
    */
   async transcribe(audio: Buffer, mime: VoiceMime, signal?: AbortSignal): Promise<{ text: string }> {
-    if (this.busy) throw new VoiceError(409, VOICE_BUSY);
+    if (this.busy) throw VoiceError.of(409, why('voice.busy'));
     this.busy = true;
     let dir: string | undefined;
     try {
       this.cached = { at: Date.now(), ready: this.inspect() };
       const ready = await this.cached.ready;
       if (!ready.status.available || !ready.voxtype || !ready.ffmpeg || !ready.args)
-        throw new VoiceError(503, ready.status.reason ?? 'Ditado indisponível');
+        throw VoiceError.of(503, reasons.get(ready.status) ?? why('voice.unavailable'));
       dir = await mkdtemp(join(this.tmpRoot, 'adelic-voice-'));
       await chmod(dir, 0o700);
       const input = join(dir, `in.${EXTENSION[mime]}`);
@@ -338,16 +362,16 @@ export class VoiceService {
         ],
         FFMPEG_TIMEOUT_MS,
         signal,
-        'Não foi possível converter o áudio',
-        'A conversão do áudio passou de 60 s',
+        'voice.convert',
+        'voice.convertTimeout',
       );
       const { stdout } = await this.step(
         ready.voxtype,
         [...ready.args, 'transcribe', output],
         VOXTYPE_TIMEOUT_MS,
         signal,
-        'O voxtype não conseguiu transcrever o áudio',
-        'A transcrição passou de 120 s',
+        'voice.transcribe',
+        'voice.transcribeTimeout',
       );
       return { text: parseTranscript(stdout) };
     } finally {
@@ -361,18 +385,19 @@ export class VoiceService {
     args: string[],
     timeout: number,
     signal: AbortSignal | undefined,
-    failure: string,
-    timedOut: string,
+    failure: 'voice.convert' | 'voice.transcribe',
+    timedOut: ServerKey,
   ) {
-    if (signal?.aborted) throw new VoiceError(499, 'Ditado cancelado');
+    if (signal?.aborted) throw VoiceError.of(499, why('voice.cancelled'));
     try {
       return await this.run(binary, args, { timeout, signal });
     } catch (e) {
       const err = e as { name?: string; killed?: boolean; code?: unknown; stderr?: string };
-      if (signal?.aborted || err.name === 'AbortError') throw new VoiceError(499, 'Ditado cancelado');
-      if (err.killed || err.code === 'ETIMEDOUT') throw new VoiceError(504, timedOut);
+      if (signal?.aborted || err.name === 'AbortError') throw VoiceError.of(499, why('voice.cancelled'));
+      if (err.killed || err.code === 'ETIMEDOUT') throw VoiceError.of(504, why(timedOut));
       const detail = (err.stderr ?? '').trim().split('\n').at(-1)?.slice(0, 200);
-      throw new VoiceError(502, detail ? `${failure}: ${detail}` : failure);
+      // The tool's own stderr stays as is; only the sentence around it is translated.
+      throw VoiceError.of(502, detail ? why(`${failure}.failedDetail`, { detail }) : why(`${failure}.failed`));
     }
   }
 }

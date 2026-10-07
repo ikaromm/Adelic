@@ -6,6 +6,7 @@ import {
   GitPushSchema,
   GitStageSchema,
   parseBody,
+  vmsg,
 } from '../../shared/schemas.js';
 import type { Project } from '../../shared/contracts.js';
 import { CheckpointError } from '../checkpoints.js';
@@ -22,18 +23,19 @@ import {
   gitUnstage,
   isGitRepo,
 } from '../git-panel.js';
-import { error, errorStatus, message } from './common.js';
+import { error, errorStatus } from './common.js';
 import type { BackendContext } from './context.js';
+import { tr } from '../i18n.js';
 
 /** Git panel of a project (docs/specs/git-panel.md). */
 export function gitRoutes({ store, orchestrator }: BackendContext) {
   const app = Router();
   const base = '/api/projects/:id/git';
   const fail = (res: Response, e: unknown) =>
-    error(res, e instanceof CheckpointError ? e.status : errorStatus(e) || 500, message(e));
+    error(res, e instanceof CheckpointError ? e.status : errorStatus(e) || 500, e as Error);
   const projectOf = (id: string, res: Response): Project | undefined => {
     const project = store.getProject(id);
-    if (!project) error(res, 404, 'Projeto não encontrado');
+    if (!project) error(res, 404, 'common.projectNotFound');
     return project;
   };
   /** Mutations: refused with 409 while a run writes there, an undo runs or another git operation runs. */
@@ -49,7 +51,8 @@ export function gitRoutes({ store, orchestrator }: BackendContext) {
     const project = projectOf(req.params.id, res);
     if (!project) return;
     try {
-      res.json(await gitStatus(project, orchestrator.gitBlock(project.path)));
+      const blocked = orchestrator.gitBlockReason(project.path);
+      res.json(await gitStatus(project, blocked && tr(req.locale, blocked.key)));
     } catch (e) {
       fail(res, e);
     }
@@ -57,7 +60,12 @@ export function gitRoutes({ store, orchestrator }: BackendContext) {
   app.get(`${base}/diff`, async (req, res) => {
     const project = projectOf(req.params.id, res);
     if (!project) return;
-    const query = parseBody(GitDiffQuerySchema, req.query, 'path obrigatório');
+    const query = parseBody(
+      GitDiffQuerySchema,
+      req.query,
+      vmsg('validation.requiredField', { field: 'path' }),
+      req.locale,
+    );
     if (!query.ok) return error(res, 400, query.message);
     try {
       const staged = query.data.staged === '1' || query.data.staged === 'true';
@@ -96,7 +104,7 @@ export function gitRoutes({ store, orchestrator }: BackendContext) {
   app.post(`${base}/stage`, async (req, res) => {
     const project = projectOf(req.params.id, res);
     if (!project) return;
-    const body = parseBody(GitStageSchema, req.body, 'Informe paths ou all: true');
+    const body = parseBody(GitStageSchema, req.body, 'validation.gitPaths', req.locale);
     if (!body.ok) return error(res, 400, body.message);
     try {
       await mutate(project, () => gitStage(project, body.data));
@@ -108,7 +116,7 @@ export function gitRoutes({ store, orchestrator }: BackendContext) {
   app.post(`${base}/unstage`, async (req, res) => {
     const project = projectOf(req.params.id, res);
     if (!project) return;
-    const body = parseBody(GitStageSchema, req.body, 'Informe paths ou all: true');
+    const body = parseBody(GitStageSchema, req.body, 'validation.gitPaths', req.locale);
     if (!body.ok) return error(res, 400, body.message);
     try {
       await mutate(project, () => gitUnstage(project, body.data));
@@ -120,7 +128,7 @@ export function gitRoutes({ store, orchestrator }: BackendContext) {
   app.post(`${base}/discard`, async (req, res) => {
     const project = projectOf(req.params.id, res);
     if (!project) return;
-    const body = parseBody(GitDiscardSchema, req.body, 'confirm: true é obrigatório para descartar alterações');
+    const body = parseBody(GitDiscardSchema, req.body, 'validation.confirm.discard', req.locale);
     if (!body.ok) return error(res, 400, body.message);
     try {
       await mutate(project, () => gitDiscard(project, body.data));
@@ -132,7 +140,7 @@ export function gitRoutes({ store, orchestrator }: BackendContext) {
   app.post(`${base}/commit`, async (req, res) => {
     const project = projectOf(req.params.id, res);
     if (!project) return;
-    const body = parseBody(GitCommitSchema, req.body, 'Mensagem obrigatória');
+    const body = parseBody(GitCommitSchema, req.body, 'git.messageRequired', req.locale);
     if (!body.ok) return error(res, 400, body.message);
     try {
       const hash = await mutate(project, () => gitCommit(project, body.data.message));
@@ -144,7 +152,7 @@ export function gitRoutes({ store, orchestrator }: BackendContext) {
   app.post(`${base}/push`, async (req, res) => {
     const project = projectOf(req.params.id, res);
     if (!project) return;
-    const body = parseBody(GitPushSchema, req.body, 'confirm: true é obrigatório para enviar');
+    const body = parseBody(GitPushSchema, req.body, 'validation.confirm.push', req.locale);
     if (!body.ok) return error(res, 400, body.message);
     try {
       res.json(await mutate(project, () => gitPush(project)));

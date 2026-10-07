@@ -8,6 +8,9 @@ import { findProviderBinary, type ProviderTool } from '../providers/discovery.js
 import { memoryServiceUrl, serviceRequest } from '../memory-service.js';
 import { schemaVersion, userVersion } from '../migrations.js';
 import type { BackendContext } from './context.js';
+import type { Locale } from '../../shared/i18n.js';
+import { localeOf, tr } from '../i18n.js';
+import { message } from './common.js';
 // Static import: esbuild inlines it into the desktop bundle, where package.json is not on disk.
 import pkg from '../../package.json' with { type: 'json' };
 
@@ -16,31 +19,31 @@ const run = promisify(execFile);
 /** Replaces the home directory with `~` so reports can be shared without the username. */
 const tidy = (value: string) => (value.startsWith(homedir()) ? `~${value.slice(homedir().length)}` : value);
 
-async function versionOf(binary: string | undefined, args = ['--version']) {
+async function versionOf(binary: string | undefined, locale: Locale, args = ['--version']) {
   if (!binary) return undefined;
   try {
     const { stdout, stderr } = await run(binary, args, { timeout: 3000, env: { ...process.env, NO_COLOR: '1' } });
     return (stdout || stderr).trim().split('\n')[0]?.slice(0, 120);
   } catch {
-    return 'não respondeu a --version';
+    return tr(locale, 'diagnostics.noVersion');
   }
 }
 
-async function memoryStatus() {
+async function memoryStatus(locale: Locale) {
   const url = (() => {
     try {
       return memoryServiceUrl();
     } catch (e) {
-      return `inválida: ${(e as Error).message}`;
+      return tr(locale, 'diagnostics.invalidUrl', { detail: message(e, locale) });
     }
   })();
   try {
     const status = await serviceRequest('/admin/status', {}, 2000);
     const data = status.data as { version?: string; counts?: { pages_latest?: number } } | undefined;
-    if (status.status === 404) return { url, reachable: true, detail: 'sem /admin/status' };
+    if (status.status === 404) return { url, reachable: true, detail: tr(locale, 'diagnostics.noStatusRoute') };
     return { url, reachable: true, version: data?.version, notes: data?.counts?.pages_latest };
   } catch (e) {
-    return { url, reachable: false, detail: (e as Error).message };
+    return { url, reachable: false, detail: message(e, locale) };
   }
 }
 
@@ -66,15 +69,18 @@ function backups(dataDir: string) {
  */
 export function diagnosticsRoutes({ store, providerList }: BackendContext) {
   const app = Router();
-  app.get('/api/diagnostics', async (_req, res) => {
+  app.get('/api/diagnostics', async (req, res) => {
+    const locale = localeOf(req);
     const tools: ProviderTool[] = ['codex', 'claude', 'kiro', 'opencode'];
     const [providers, memory, binaries] = await Promise.all([
       providerList().catch(() => []),
-      memoryStatus(),
+      memoryStatus(locale),
       Promise.all(tools.map(async (tool) => [tool, await findProviderBinary(tool)] as const)),
     ]);
-    const versions = await Promise.all(binaries.map(async ([tool, path]) => [tool, await versionOf(path)] as const));
-    const bwrap = await versionOf('/usr/bin/bwrap');
+    const versions = await Promise.all(
+      binaries.map(async ([tool, path]) => [tool, await versionOf(path, locale)] as const),
+    );
+    const bwrap = await versionOf('/usr/bin/bwrap', locale);
     const count = (table: string) =>
       Number((store.db.prepare(`SELECT COUNT(*) n FROM ${table}`).get() as { n: number }).n);
     res.json({

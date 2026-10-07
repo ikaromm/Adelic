@@ -25,6 +25,8 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import type { FileChange, RunCheckpoint } from '../shared/contracts.js';
+import type { Vars } from '../shared/i18n.js';
+import { localize, type ServerKey } from './i18n.js';
 
 export const REF_PREFIX = 'refs/adelic/checkpoints';
 export const NOT_GIT = 'não é um repositório git';
@@ -93,6 +95,16 @@ export class CheckpointError extends Error {
     readonly conflicts?: string[],
   ) {
     super(message);
+  }
+  /** A CheckpointError whose message is a catalog key, translated per request (docs/i18n.md). */
+  static of<T extends CheckpointError>(
+    this: new (message: string, status?: number, conflicts?: string[]) => T,
+    key: ServerKey,
+    vars?: Vars,
+    status = 409,
+    conflicts?: string[],
+  ): T {
+    return localize(new this('', status, conflicts), key, vars);
   }
 }
 
@@ -386,16 +398,14 @@ export async function changedFiles(repo: Repo, before: string, after: string): P
 /** Opens the repository that holds a finished checkpoint and checks its refs are intact. */
 async function openCheckpoint(runId: string, checkpoint: RunCheckpoint | undefined) {
   if (!checkpoint?.available || !checkpoint.root || !checkpoint.before || !checkpoint.after)
-    throw new CheckpointError('Esta execução não tem alterações registradas', 404);
+    throw CheckpointError.of('checkpoints.noChanges', undefined, 404);
   const repo = await openRepo(checkpoint.root, false);
-  if (!repo || repo.root !== checkpoint.root)
-    throw new CheckpointError('O repositório do checkpoint não existe mais', 410);
+  if (!repo || repo.root !== checkpoint.root) throw CheckpointError.of('checkpoints.repoGone', undefined, 410);
   for (const kind of ['before', 'after'] as const) {
     const id = await git(repo.top, ['rev-parse', '--verify', '-q', refFor(runId, kind)], { repo })
       .then((b) => b.toString().trim())
       .catch(() => '');
-    if (id !== checkpoint[kind])
-      throw new CheckpointError('O checkpoint desta execução foi removido do repositório', 410);
+    if (id !== checkpoint[kind]) throw CheckpointError.of('checkpoints.refsGone', undefined, 410);
   }
   return { repo, before: checkpoint.before, after: checkpoint.after };
 }
@@ -403,7 +413,7 @@ async function openCheckpoint(runId: string, checkpoint: RunCheckpoint | undefin
 /** Unified diff of one changed file, bounded to LIMITS.diffBytes. */
 export async function checkpointDiff(runId: string, checkpoint: RunCheckpoint | undefined, path: string) {
   if (!checkpoint?.files?.some((f) => f.path === path))
-    throw new CheckpointError('Arquivo não foi alterado por esta execução', 404);
+    throw CheckpointError.of('checkpoints.fileNotChanged', undefined, 404);
   const { repo, before, after } = await openCheckpoint(runId, checkpoint);
   const out = await git(
     repo.top,
@@ -436,9 +446,9 @@ export async function checkpointDiff(runId: string, checkpoint: RunCheckpoint | 
 async function safeTarget(repo: Repo, path: string) {
   const parts = path.split('/');
   if (!path || path.startsWith('/') || parts.some((p) => !p || p === '.' || p === '..' || p.toLowerCase() === '.git'))
-    throw new CheckpointError(`Caminho inválido no checkpoint: ${path}`, 422);
+    throw CheckpointError.of('checkpoints.invalidPath', { path }, 422);
   const target = resolve(repo.top, path);
-  if (!target.startsWith(repo.root + sep)) throw new CheckpointError(`Caminho fora do projeto: ${path}`, 422);
+  if (!target.startsWith(repo.root + sep)) throw CheckpointError.of('checkpoints.outsidePath', { path }, 422);
   let current = repo.top;
   let fileParent: string | undefined;
   for (const part of parts.slice(0, -1)) {
@@ -469,7 +479,7 @@ async function matches(repo: Repo, target: string, mode: string, id: string) {
  * matches the run's `after` state; otherwise nothing is written and the conflicts are reported.
  */
 export async function restoreCheckpoint(runId: string, checkpoint: RunCheckpoint | undefined) {
-  if (checkpoint?.restoredAt) throw new CheckpointError('As alterações desta execução já foram desfeitas', 409);
+  if (checkpoint?.restoredAt) throw CheckpointError.of('orchestrator.alreadyRestored');
   const { repo, before, after } = await openCheckpoint(runId, checkpoint);
   const changes = await changedFiles(repo, before, after);
   const plan: { change: RawChange; target: string }[] = [];
@@ -485,12 +495,7 @@ export async function restoreCheckpoint(runId: string, checkpoint: RunCheckpoint
     if (!ok) conflicts.push(change.path);
     else plan.push({ change, target });
   }
-  if (conflicts.length)
-    throw new CheckpointError(
-      `${conflicts.length === 1 ? 'Um arquivo foi alterado' : `${conflicts.length} arquivos foram alterados`} depois desta execução; nada foi desfeito.`,
-      409,
-      conflicts,
-    );
+  if (conflicts.length) throw CheckpointError.of('checkpoints.conflicts', { count: conflicts.length }, 409, conflicts);
   // Read every blob first, so a missing object cannot leave a half-restored tree.
   const contents = new Map<string, Buffer>();
   for (const { change } of plan)

@@ -3,7 +3,7 @@ import { validReasoningEffort } from './reasoning.js';
 import { MAX_ATTACHMENTS_PER_MESSAGE, MAX_IMAGE_BYTES } from './attachments.js';
 import {
   COMMAND_DESCRIPTION_MAX,
-  COMMAND_MESSAGES,
+  COMMAND_MESSAGE_KEYS,
   COMMAND_NAME,
   COMMAND_TEMPLATE_MAX,
   commandModes,
@@ -18,7 +18,7 @@ import {
   MCP_ENV_MAX,
   MCP_ENV_NAME,
   MCP_ENV_VALUE_MAX,
-  MCP_MESSAGES,
+  MCP_MESSAGE_KEYS as MCP_MESSAGES,
   MCP_NAME,
   MCP_PROJECT_MAX,
   MCP_TOOL_NAME,
@@ -45,9 +45,13 @@ import {
   HOOK_TIMEOUT_MIN,
 } from './hooks.js';
 import { PASSWORD_MAX, PASSWORD_MIN, USERNAME_MAX, USERNAME_MIN, usernameProblem } from './remote-access.js';
+import type { Locale, Vars } from './i18n.js';
+import { isValidationKey, validationText, vmsg, type ValidationMessage } from './validation-messages.js';
 
 // Request schemas shared by the server routes (and usable by the UI). Each field keeps
-// the exact error message the API returned before zod, so clients see no change.
+// the exact error message the API returned before zod, so clients see no change. Messages are
+// catalog keys (shared/validation-messages.ts): `parseBody(…, locale)` answers in the request's
+// language, pt-BR by default.
 // Strings follow the API's convention: trimmed, non-empty and length-bounded.
 
 export const providerIds = ['codex', 'claude', 'kiro', 'opencode'] as const;
@@ -63,15 +67,24 @@ export const text = (max = 200) =>
     .transform((value) => value.trim());
 const effort = z.string().refine((value) => value === 'auto' || validReasoningEffort(value));
 
-// Issues carrying an API message are tagged so routes can tell them from zod's defaults.
-const apiIssue = (ctx: z.RefinementCtx, message: string) =>
-  ctx.addIssue({ code: 'custom', message, params: { api: true } });
+// Issues carrying an API message are tagged so routes can tell them from zod's defaults; the
+// key and variables travel in `params` so parseBody can translate them.
+const apiIssue = (ctx: z.RefinementCtx, message: ValidationMessage) =>
+  ctx.addIssue({
+    code: 'custom',
+    message: message.text,
+    params: { api: true, key: message.key, ...(message.vars ? { vars: message.vars } : {}) },
+  });
+const invalid = (field: string) => vmsg('validation.invalidField', { field });
+const boolean = (field: string) => vmsg('validation.booleanField', { field });
+const texts = <K extends string>(messages: Record<K, ValidationMessage>) =>
+  Object.fromEntries(Object.entries<ValidationMessage>(messages).map(([k, m]) => [k, m.text])) as Record<K, string>;
 
 /**
  * Optional field: `undefined` means "not sent"; anything else must match `schema`.
  * The outer `.optional()` matters: in zod 4 a transformed field is otherwise required.
  */
-const optional = <T extends z.ZodType>(schema: T, message: string) =>
+const optional = <T extends z.ZodType>(schema: T, message: ValidationMessage) =>
   z
     .unknown()
     .superRefine((value, ctx) => {
@@ -80,7 +93,7 @@ const optional = <T extends z.ZodType>(schema: T, message: string) =>
     .transform((value) => (value === undefined ? undefined : (schema.parse(value) as z.output<T>)))
     .optional();
 /** Required field with its own message. */
-const required = <T extends z.ZodType>(schema: T, message: string) =>
+const required = <T extends z.ZodType>(schema: T, message: ValidationMessage) =>
   z
     .unknown()
     .superRefine((value, ctx) => {
@@ -107,8 +120,7 @@ export const GraphifyConfigSchema = z.object({ enabled: z.boolean() }).strict();
 // Usage limits (docs/specs/spend-limits.md): `null` clears a limit, absent keeps it.
 export const SpendTokensSchema = z.number().int().min(0).max(SPEND_TOKENS_MAX);
 export const SpendCostSchema = z.number().min(0).max(SPEND_COST_MAX).refine(hasCents);
-export const SPEND_LIMITS_MESSAGE =
-  'spendLimits inválido (tokens: inteiros não negativos; custo: dólares não negativos com até 2 casas; null remove o limite)';
+export const SPEND_LIMITS_MESSAGE = validationText('validation.spendLimits');
 export const SpendLimitsPatchSchema = z
   .object({
     enabled: z.boolean(),
@@ -127,7 +139,7 @@ export const ProjectSpendLimitsPatchSchema = z.union([
     .strict(),
 ]);
 /** "Continuar mesmo assim": skip the usage limits for this one request (never stored). */
-const overrideLimit = () => optional(z.boolean(), 'overrideLimit deve ser booleano');
+const overrideLimit = () => optional(z.boolean(), boolean('overrideLimit'));
 
 /** An ai-memory scope, with the same rules as a project's memoryWorkspace/memoryProject. */
 export const MemoryScopeSchema = z.object({ workspace: text(100), project: text(100) }).strict();
@@ -139,38 +151,38 @@ export const CreateProjectSchema = z.object({
   memoryProject: text(100),
 });
 export const PatchProjectSchema = z.object({
-  name: optional(text(), 'Campos de projeto inválidos'),
-  git: optional(z.object({ runHooks: z.boolean() }).strict(), 'git inválido'),
-  memoryWorkspace: optional(text(100), 'Campos de projeto inválidos'),
-  memoryProject: optional(text(100), 'Campos de projeto inválidos'),
-  spendLimits: optional(
-    ProjectSpendLimitsPatchSchema,
-    'spendLimits inválido (monthlyTokens inteiro não negativo, monthlyCostUsd com até 2 casas; null remove)',
-  ),
+  name: optional(text(), vmsg('validation.projectFields')),
+  git: optional(z.object({ runHooks: z.boolean() }).strict(), invalid('git')),
+  memoryWorkspace: optional(text(100), vmsg('validation.projectFields')),
+  memoryProject: optional(text(100), vmsg('validation.projectFields')),
+  spendLimits: optional(ProjectSpendLimitsPatchSchema, vmsg('validation.projectSpendLimits')),
 });
 
 const projectRef = z.union([z.null(), text()]);
 export const CreateSessionSchema = z.object({
-  projectId: optional(projectRef, 'projectId inválido'),
-  providerId: optional(ProviderIdSchema, 'providerId inválido'),
-  mode: optional(ModeSchema, 'mode inválido'),
-  model: optional(text(120), 'model inválido'),
-  thinking: optional(effort, 'thinking inválido'),
+  projectId: optional(projectRef, invalid('projectId')),
+  providerId: optional(ProviderIdSchema, invalid('providerId')),
+  mode: optional(ModeSchema, invalid('mode')),
+  model: optional(text(120), invalid('model')),
+  thinking: optional(effort, invalid('thinking')),
 });
 export const PatchSessionSchema = z.object({
-  projectId: optional(projectRef, 'projectId inválido'),
-  title: optional(text(160), 'title inválido'),
-  providerId: optional(ProviderIdSchema, 'providerId inválido'),
-  model: optional(z.union([z.null(), text(120)]), 'model inválido'),
-  mode: optional(ModeSchema, 'mode inválido'),
-  thinking: optional(effort, 'thinking inválido'),
-  planFirst: optional(z.boolean(), 'planFirst deve ser booleano'),
+  projectId: optional(projectRef, invalid('projectId')),
+  title: optional(text(160), invalid('title')),
+  providerId: optional(ProviderIdSchema, invalid('providerId')),
+  model: optional(z.union([z.null(), text(120)]), invalid('model')),
+  mode: optional(ModeSchema, invalid('mode')),
+  thinking: optional(effort, invalid('thinking')),
+  planFirst: optional(z.boolean(), boolean('planFirst')),
 });
 /** POST /api/sessions/:id/handoff (docs/specs/provider-handoff.md). */
 export const HandoffSchema = z.object({
-  providerId: required(ProviderIdSchema, 'providerId inválido'),
-  model: optional(text(120), 'model inválido'),
-  summary: required(z.enum(['model', 'local', 'none']), 'summary deve ser model, local ou none'),
+  providerId: required(ProviderIdSchema, invalid('providerId')),
+  model: optional(text(120), invalid('model')),
+  summary: required(
+    z.enum(['model', 'local', 'none']),
+    vmsg('validation.oneOf3', { field: 'summary', a: 'model', b: 'local', c: 'none' }),
+  ),
   overrideLimit: overrideLimit(),
 });
 
@@ -179,41 +191,38 @@ export const AttachmentIdsSchema = z
   .max(MAX_ATTACHMENTS_PER_MESSAGE)
   .refine((ids) => new Set(ids).size === ids.length);
 export const SendMessageSchema = z.object({
-  content: required(text(32000), 'content obrigatório (máximo 32000 caracteres)'),
-  clientMessageId: optional(text(128), 'clientMessageId inválido'),
+  content: required(text(32000), vmsg('validation.content', { max: 32000 })),
+  clientMessageId: optional(text(128), invalid('clientMessageId')),
   // Ownership (each id belongs to this conversation) is checked by the route against the store.
-  attachmentIds: optional(
-    AttachmentIdsSchema,
-    `attachmentIds inválido (até ${MAX_ATTACHMENTS_PER_MESSAGE} anexos, sem repetição)`,
-  ),
+  attachmentIds: optional(AttachmentIdsSchema, vmsg('validation.attachmentIds', { max: MAX_ATTACHMENTS_PER_MESSAGE })),
   overrideLimit: overrideLimit(),
 });
 /** Edit and resend a user message (docs/specs/edit-branch.md); omitted attachmentIds keep the message's own. */
 export const EditMessageSchema = SendMessageSchema;
 /** "Ramificar daqui": copy the conversation up to and including `messageId`. */
 export const BranchSessionSchema = z.object({
-  messageId: required(text(128), 'messageId obrigatório'),
+  messageId: required(text(128), vmsg('validation.requiredField', { field: 'messageId' })),
 });
 /** Upload: file content in base64 (the route raises the JSON limit only for itself). */
 export const UploadAttachmentSchema = z.object({
-  name: required(text(200), 'name obrigatório (até 200 caracteres)'),
-  mime: optional(z.string().max(100), 'mime inválido'),
+  name: required(text(200), vmsg('validation.attachmentName', { max: 200 })),
+  mime: optional(z.string().max(100), invalid('mime')),
   data: required(
     z
       .string()
       .min(1)
       .max(Math.ceil((MAX_IMAGE_BYTES * 4) / 3) + 4)
       .regex(/^[A-Za-z0-9+/]*={0,2}$/),
-    'data deve ser o conteúdo do arquivo em base64',
+    vmsg('validation.attachmentData'),
   ),
 });
 const attachmentIdsField = optional(
   AttachmentIdsSchema,
-  `attachmentIds inválido (até ${MAX_ATTACHMENTS_PER_MESSAGE} anexos, sem repetição)`,
+  vmsg('validation.attachmentIds', { max: MAX_ATTACHMENTS_PER_MESSAGE }),
 );
 export const QueueMessageSchema = z.object({
-  content: required(text(32000), 'content obrigatório (máximo 32000 caracteres)'),
-  clientId: optional(text(128), 'clientId inválido'),
+  content: required(text(32000), vmsg('validation.content', { max: 32000 })),
+  clientId: optional(text(128), invalid('clientId')),
   attachmentIds: attachmentIdsField,
   /** Applies only when the message starts right away (the conversation was idle). */
   overrideLimit: overrideLimit(),
@@ -221,18 +230,21 @@ export const QueueMessageSchema = z.object({
 /** "Retomar fila"; with `overrideLimit`, only the next message passes the usage limits. */
 export const QueueResumeSchema = z.object({ overrideLimit: overrideLimit() });
 export const QueueEditSchema = z.object({
-  content: required(text(32000), 'content obrigatório (máximo 32000 caracteres)'),
+  content: required(text(32000), vmsg('validation.content', { max: 32000 })),
 });
 /** "Enviar agora": new text (`content`) or a queued item (`itemId`); the route requires exactly one. */
 export const SendNowSchema = z.object({
-  content: optional(text(32000), 'content obrigatório (máximo 32000 caracteres)'),
-  clientId: optional(text(128), 'clientId inválido'),
-  itemId: optional(text(128), 'itemId inválido'),
+  content: optional(text(32000), vmsg('validation.content', { max: 32000 })),
+  clientId: optional(text(128), invalid('clientId')),
+  itemId: optional(text(128), invalid('itemId')),
   attachmentIds: attachmentIdsField,
   overrideLimit: overrideLimit(),
 });
 export const ApprovalDecisionSchema = z.object({
-  decision: required(z.enum(['approve', 'deny']), 'decision deve ser approve ou deny'),
+  decision: required(
+    z.enum(['approve', 'deny']),
+    vmsg('validation.oneOf2', { field: 'decision', a: 'approve', b: 'deny' }),
+  ),
 });
 export const MODEL_FALLBACK_MAX = 3;
 /** Settings › "Trocar de modelo se o atual estiver sobrecarregado": up to 3 distinct models. */
@@ -247,65 +259,75 @@ export const ModelFallbackSchema = z
   .strict();
 /** "Tentar com outro modelo": the run is repeated with this provider and/or model. */
 export const RetryRunSchema = z.object({
-  providerId: optional(ProviderIdSchema, 'providerId inválido'),
-  model: optional(text(120), 'model inválido'),
+  providerId: optional(ProviderIdSchema, invalid('providerId')),
+  model: optional(text(120), invalid('model')),
   overrideLimit: overrideLimit(),
 });
 /** Self-update channel of a git checkout (docs/specs/self-update.md). */
 export const UpdateChannelSchema = z.enum(['master', 'develop']);
 export const UpdateCheckSchema = z
-  .object({ channel: optional(UpdateChannelSchema, 'channel deve ser master ou develop') })
+  .object({
+    channel: optional(UpdateChannelSchema, vmsg('validation.oneOf2', { field: 'channel', a: 'master', b: 'develop' })),
+  })
   .strict();
 /** "Atualizar agora": always an explicit confirmation. */
 export const UpdateApplySchema = z
   .object({
-    confirm: required(z.literal(true), 'confirm: true é obrigatório para atualizar'),
-    channel: optional(UpdateChannelSchema, 'channel deve ser master ou develop'),
+    confirm: required(z.literal(true), vmsg('validation.confirm.update')),
+    channel: optional(UpdateChannelSchema, vmsg('validation.oneOf2', { field: 'channel', a: 'master', b: 'develop' })),
     /** The commit or version the confirmation showed; refused if it changed since. */
-    target: optional(z.string().regex(/^[0-9a-f]{7,64}$|^\d+\.\d+\.\d+$/), 'target inválido'),
+    target: optional(z.string().regex(/^[0-9a-f]{7,64}$|^\d+\.\d+\.\d+$/), invalid('target')),
   })
   .strict();
 export const SettingsPatchSchema = z.object({
-  defaultProviderId: optional(ProviderIdSchema, 'defaultProviderId inválido'),
-  defaultMode: optional(ModeSchema, 'defaultMode inválido'),
-  memoryEnabled: optional(z.boolean(), 'memoryEnabled deve ser booleano'),
-  detachedMemory: optional(
-    z.union([z.null(), MemoryScopeSchema]),
-    'detachedMemory deve ser null ou { workspace, project } (até 100 caracteres cada)',
+  defaultProviderId: optional(ProviderIdSchema, invalid('defaultProviderId')),
+  defaultMode: optional(ModeSchema, invalid('defaultMode')),
+  memoryEnabled: optional(z.boolean(), boolean('memoryEnabled')),
+  detachedMemory: optional(z.union([z.null(), MemoryScopeSchema]), vmsg('validation.detachedMemory')),
+  sandbox: optional(z.enum(['read-only', 'workspace-write']), invalid('sandbox')),
+  responseStyle: optional(z.enum(['concise', 'balanced']), invalid('responseStyle')),
+  approvalMode: optional(z.enum(['auto-safe', 'manual']), invalid('approvalMode')),
+  updateCheck: optional(z.boolean(), boolean('updateCheck')),
+  updateChannel: optional(
+    UpdateChannelSchema,
+    vmsg('validation.oneOf2', { field: 'updateChannel', a: 'master', b: 'develop' }),
   ),
-  sandbox: optional(z.enum(['read-only', 'workspace-write']), 'sandbox inválido'),
-  responseStyle: optional(z.enum(['concise', 'balanced']), 'responseStyle inválido'),
-  approvalMode: optional(z.enum(['auto-safe', 'manual']), 'approvalMode inválido'),
-  updateCheck: optional(z.boolean(), 'updateCheck deve ser booleano'),
-  updateChannel: optional(UpdateChannelSchema, 'updateChannel deve ser master ou develop'),
-  autoRetry: optional(z.boolean(), 'autoRetry deve ser booleano'),
-  notifications: optional(z.boolean(), 'notifications deve ser booleano'),
-  modelFallback: optional(
-    ModelFallbackSchema,
-    `modelFallback inválido (até ${MODEL_FALLBACK_MAX} modelos diferentes, cada um com providerId e model)`,
-  ),
-  autoCompact: optional(z.boolean(), 'autoCompact deve ser booleano'),
-  voiceDictation: optional(z.boolean(), 'voiceDictation deve ser booleano'),
+  autoRetry: optional(z.boolean(), boolean('autoRetry')),
+  notifications: optional(z.boolean(), boolean('notifications')),
+  modelFallback: optional(ModelFallbackSchema, vmsg('validation.modelFallback', { max: MODEL_FALLBACK_MAX })),
+  autoCompact: optional(z.boolean(), boolean('autoCompact')),
+  voiceDictation: optional(z.boolean(), boolean('voiceDictation')),
   autoCompactTokens: optional(
     z.number().int().min(AUTO_COMPACT_MIN_TOKENS).max(AUTO_COMPACT_MAX_TOKENS),
-    `autoCompactTokens deve ser um inteiro entre ${AUTO_COMPACT_MIN_TOKENS} e ${AUTO_COMPACT_MAX_TOKENS}`,
+    vmsg('validation.intRange', {
+      field: 'autoCompactTokens',
+      min: AUTO_COMPACT_MIN_TOKENS,
+      max: AUTO_COMPACT_MAX_TOKENS,
+    }),
   ),
-  terminalRemote: optional(z.boolean(), 'terminalRemote deve ser booleano'),
-  internetManualApproval: optional(z.boolean(), 'internetManualApproval deve ser booleano'),
-  automations: optional(z.boolean(), 'automations deve ser booleano'),
-  spendLimits: optional(SpendLimitsPatchSchema, SPEND_LIMITS_MESSAGE),
-  language: optional(z.enum(['auto', 'pt-BR', 'en']), 'language deve ser auto, pt-BR ou en'),
+  terminalRemote: optional(z.boolean(), boolean('terminalRemote')),
+  internetManualApproval: optional(z.boolean(), boolean('internetManualApproval')),
+  automations: optional(z.boolean(), boolean('automations')),
+  spendLimits: optional(SpendLimitsPatchSchema, vmsg('validation.spendLimits')),
+  language: optional(
+    z.enum(['auto', 'pt-BR', 'en']),
+    vmsg('validation.oneOf3', { field: 'language', a: 'auto', b: 'pt-BR', c: 'en' }),
+  ),
 });
 /** POST /api/projects/:id/terminal (docs/specs/terminal-preview.md). */
 export const TerminalRunSchema = z
   .object({
     command: required(
       z.string().refine((value) => value.trim().length > 0 && value.length <= TERMINAL_COMMAND_MAX),
-      `command obrigatório (máximo ${TERMINAL_COMMAND_MAX} caracteres)`,
+      vmsg('validation.terminalCommand', { max: TERMINAL_COMMAND_MAX }),
     ),
     timeoutSec: optional(
       z.number().int().min(TERMINAL_TIMEOUT_MIN_SEC).max(TERMINAL_TIMEOUT_MAX_SEC),
-      `timeoutSec deve ser um inteiro entre ${TERMINAL_TIMEOUT_MIN_SEC} e ${TERMINAL_TIMEOUT_MAX_SEC}`,
+      vmsg('validation.intRange', {
+        field: 'timeoutSec',
+        min: TERMINAL_TIMEOUT_MIN_SEC,
+        max: TERMINAL_TIMEOUT_MAX_SEC,
+      }),
     ),
   })
   .strict();
@@ -315,31 +337,34 @@ export const CompactSchema = z.object({ overrideLimit: z.boolean().optional() })
 /** Isolated worktree per conversation (docs/specs/worktrees.md). */
 export const CreateWorktreeSchema = z.object({}).strict();
 export const ApplyWorktreeSchema = z.object({
-  confirm: required(z.literal(true), 'confirm: true é obrigatório para aplicar no projeto'),
+  confirm: required(z.literal(true), vmsg('validation.confirm.applyWorktree')),
 });
 export const DiscardWorktreeSchema = z.object({
-  deleteBranch: optional(z.boolean(), 'deleteBranch deve ser booleano'),
+  deleteBranch: optional(z.boolean(), boolean('deleteBranch')),
 });
 export const RestoreRunSchema = z.object({
-  confirm: required(z.literal(true), 'confirm: true é obrigatório para desfazer alterações'),
+  confirm: required(z.literal(true), vmsg('validation.confirm.restore')),
 });
 /** Plan mode (docs/specs/plan-mode.md). */
 // The global JSON body limit is 128 KB; this keeps a plan with accents well under it.
 export const PLAN_MARKDOWN_MAX = 60_000;
 export const PlanEditSchema = z.object({
-  markdown: required(text(PLAN_MARKDOWN_MAX), `markdown obrigatório (máximo ${PLAN_MARKDOWN_MAX} caracteres)`),
+  markdown: required(text(PLAN_MARKDOWN_MAX), vmsg('validation.planMarkdown', { max: PLAN_MARKDOWN_MAX })),
 });
 export const PlanApproveSchema = z.object({
-  mode: required(z.enum(['all', 'next']), 'mode deve ser all ou next'),
+  mode: required(z.enum(['all', 'next']), vmsg('validation.oneOf2', { field: 'mode', a: 'all', b: 'next' })),
   overrideLimit: overrideLimit(),
 });
 export const PlanTaskStatusSchema = z.object({
-  status: required(z.enum(['skipped', 'pending']), 'status deve ser skipped ou pending'),
+  status: required(
+    z.enum(['skipped', 'pending']),
+    vmsg('validation.oneOf2', { field: 'status', a: 'skipped', b: 'pending' }),
+  ),
 });
 export const PlanSaveSchema = z.object({
-  overwrite: optional(z.boolean(), 'overwrite deve ser booleano'),
+  overwrite: optional(z.boolean(), boolean('overwrite')),
 });
-export const SkillPatchSchema = z.object({ enabled: required(z.boolean(), 'enabled deve ser booleano') });
+export const SkillPatchSchema = z.object({ enabled: required(z.boolean(), boolean('enabled')) });
 
 // Saved commands (docs/specs/saved-commands.md).
 const commandName = z.string().regex(COMMAND_NAME);
@@ -348,13 +373,13 @@ const commandDescription = z
   .max(COMMAND_DESCRIPTION_MAX)
   .transform((value) => value.trim());
 const commandTemplate = text(COMMAND_TEMPLATE_MAX);
-const commandMessages = COMMAND_MESSAGES;
+const commandMessages = COMMAND_MESSAGE_KEYS;
 export const CreateCommandSchema = z.object({
   name: required(commandName, commandMessages.name),
   description: optional(commandDescription, commandMessages.description),
   template: required(commandTemplate, commandMessages.template),
   mode: optional(z.enum(commandModes), commandMessages.mode),
-  projectId: optional(projectRef, 'projectId inválido'),
+  projectId: optional(projectRef, invalid('projectId')),
 });
 /** `mode: null` removes the override. The scope (global or project) cannot change. */
 export const PatchCommandSchema = z.object({
@@ -365,14 +390,19 @@ export const PatchCommandSchema = z.object({
 });
 
 // Scheduled automations (docs/specs/automations.md).
-export const AUTOMATION_MESSAGES = {
-  name: `Nome obrigatório (até ${AUTOMATION_NAME_MAX} caracteres)`,
-  prompt: `Pedido obrigatório (até ${AUTOMATION_PROMPT_MAX} caracteres)`,
-  projectId: 'projectId obrigatório: automações rodam sempre num projeto',
-  schedule: `Agenda inválida: diária ou semanal com horário HH:MM (semanal com ao menos um dia de 0 a 6), ou intervalo de ${AUTOMATION_INTERVAL_MIN_HOURS} a ${AUTOMATION_INTERVAL_MAX_HOURS} horas`,
-  timezone: 'Fuso horário desconhecido (use um nome IANA, como America/Sao_Paulo)',
-  deny: `denyApprovalsAfterMinutes deve ser null ou um inteiro de 1 a ${AUTOMATION_DENY_MAX_MINUTES}`,
-} as const;
+const AUTOMATION_MESSAGE_KEYS = {
+  name: vmsg('validation.automation.name', { max: AUTOMATION_NAME_MAX }),
+  prompt: vmsg('validation.automation.prompt', { max: AUTOMATION_PROMPT_MAX }),
+  projectId: vmsg('validation.automation.projectId'),
+  schedule: vmsg('validation.automation.schedule', {
+    min: AUTOMATION_INTERVAL_MIN_HOURS,
+    max: AUTOMATION_INTERVAL_MAX_HOURS,
+  }),
+  timezone: vmsg('validation.automation.timezone'),
+  deny: vmsg('validation.automation.deny', { max: AUTOMATION_DENY_MAX_MINUTES }),
+};
+/** The pt-BR texts of the automation messages (the API's historical text). */
+export const AUTOMATION_MESSAGES = texts(AUTOMATION_MESSAGE_KEYS);
 const automationTime = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/);
 export const AutomationScheduleSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('daily'), time: automationTime }).strict(),
@@ -398,35 +428,35 @@ export const AutomationScheduleSchema = z.discriminatedUnion('kind', [
 const timeZone = z.string().refine(isValidTimeZone);
 const denyMinutes = z.union([z.null(), z.number().int().min(1).max(AUTOMATION_DENY_MAX_MINUTES)]);
 export const CreateAutomationSchema = z.object({
-  name: required(text(AUTOMATION_NAME_MAX), AUTOMATION_MESSAGES.name),
-  prompt: required(text(AUTOMATION_PROMPT_MAX), AUTOMATION_MESSAGES.prompt),
-  projectId: required(text(), AUTOMATION_MESSAGES.projectId),
-  providerId: optional(ProviderIdSchema, 'providerId inválido'),
-  model: optional(text(120), 'model inválido'),
-  mode: optional(ModeSchema, 'mode inválido'),
-  schedule: required(AutomationScheduleSchema, AUTOMATION_MESSAGES.schedule),
-  timezone: optional(timeZone, AUTOMATION_MESSAGES.timezone),
-  enabled: optional(z.boolean(), 'enabled deve ser booleano'),
-  catchUp: optional(z.boolean(), 'catchUp deve ser booleano'),
-  denyApprovalsAfterMinutes: optional(denyMinutes, AUTOMATION_MESSAGES.deny),
+  name: required(text(AUTOMATION_NAME_MAX), AUTOMATION_MESSAGE_KEYS.name),
+  prompt: required(text(AUTOMATION_PROMPT_MAX), AUTOMATION_MESSAGE_KEYS.prompt),
+  projectId: required(text(), AUTOMATION_MESSAGE_KEYS.projectId),
+  providerId: optional(ProviderIdSchema, invalid('providerId')),
+  model: optional(text(120), invalid('model')),
+  mode: optional(ModeSchema, invalid('mode')),
+  schedule: required(AutomationScheduleSchema, AUTOMATION_MESSAGE_KEYS.schedule),
+  timezone: optional(timeZone, AUTOMATION_MESSAGE_KEYS.timezone),
+  enabled: optional(z.boolean(), boolean('enabled')),
+  catchUp: optional(z.boolean(), boolean('catchUp')),
+  denyApprovalsAfterMinutes: optional(denyMinutes, AUTOMATION_MESSAGE_KEYS.deny),
 });
 /** `null` on providerId, model or mode goes back to the defaults. */
 export const PatchAutomationSchema = z.object({
-  name: optional(text(AUTOMATION_NAME_MAX), AUTOMATION_MESSAGES.name),
-  prompt: optional(text(AUTOMATION_PROMPT_MAX), AUTOMATION_MESSAGES.prompt),
-  projectId: optional(text(), AUTOMATION_MESSAGES.projectId),
-  providerId: optional(ProviderIdSchema.nullable(), 'providerId inválido'),
-  model: optional(text(120).nullable(), 'model inválido'),
-  mode: optional(ModeSchema.nullable(), 'mode inválido'),
-  schedule: optional(AutomationScheduleSchema, AUTOMATION_MESSAGES.schedule),
-  timezone: optional(timeZone, AUTOMATION_MESSAGES.timezone),
-  enabled: optional(z.boolean(), 'enabled deve ser booleano'),
-  catchUp: optional(z.boolean(), 'catchUp deve ser booleano'),
-  denyApprovalsAfterMinutes: optional(denyMinutes, AUTOMATION_MESSAGES.deny),
+  name: optional(text(AUTOMATION_NAME_MAX), AUTOMATION_MESSAGE_KEYS.name),
+  prompt: optional(text(AUTOMATION_PROMPT_MAX), AUTOMATION_MESSAGE_KEYS.prompt),
+  projectId: optional(text(), AUTOMATION_MESSAGE_KEYS.projectId),
+  providerId: optional(ProviderIdSchema.nullable(), invalid('providerId')),
+  model: optional(text(120).nullable(), invalid('model')),
+  mode: optional(ModeSchema.nullable(), invalid('mode')),
+  schedule: optional(AutomationScheduleSchema, AUTOMATION_MESSAGE_KEYS.schedule),
+  timezone: optional(timeZone, AUTOMATION_MESSAGE_KEYS.timezone),
+  enabled: optional(z.boolean(), boolean('enabled')),
+  catchUp: optional(z.boolean(), boolean('catchUp')),
+  denyApprovalsAfterMinutes: optional(denyMinutes, AUTOMATION_MESSAGE_KEYS.deny),
 });
 /** Query of GET /api/usage. */
 export const UsageQuerySchema = z.object({
-  projectId: optional(text(200), 'projectId inválido'),
+  projectId: optional(text(200), invalid('projectId')),
 });
 // Per-project hooks (docs/specs/project-hooks.md).
 const AfterEditCheckSchema = z
@@ -437,15 +467,25 @@ const AfterEditCheckSchema = z
     enabled: z.boolean().default(true),
   })
   .strict();
-export const HOOKS_MESSAGES = {
-  afterEdit: `afterEdit inválido: até ${HOOK_CHECKS_MAX} verificações com name (até ${HOOK_NAME_MAX} caracteres), command (até ${HOOK_COMMAND_MAX}), timeoutSec de ${HOOK_TIMEOUT_MIN} a ${HOOK_TIMEOUT_MAX} e enabled`,
-  blockedCommands: `blockedCommands inválido: até ${BLOCKED_COMMANDS_MAX} padrões de até ${BLOCKED_PATTERN_MAX} caracteres, sem repetição`,
-  autoFix: 'autoFix deve ser booleano',
+const HOOKS_MESSAGE_KEYS = {
+  afterEdit: vmsg('validation.hooks.afterEdit', {
+    max: HOOK_CHECKS_MAX,
+    nameMax: HOOK_NAME_MAX,
+    commandMax: HOOK_COMMAND_MAX,
+    timeoutMin: HOOK_TIMEOUT_MIN,
+    timeoutMax: HOOK_TIMEOUT_MAX,
+  }),
+  blockedCommands: vmsg('validation.hooks.blockedCommands', {
+    max: BLOCKED_COMMANDS_MAX,
+    patternMax: BLOCKED_PATTERN_MAX,
+  }),
+  autoFix: boolean('autoFix'),
 };
+export const HOOKS_MESSAGES = texts(HOOKS_MESSAGE_KEYS);
 /** PUT /api/projects/:id/hooks replaces the whole configuration; absent fields become empty/off. */
 export const ProjectHooksSchema = z
   .object({
-    afterEdit: optional(z.array(AfterEditCheckSchema).max(HOOK_CHECKS_MAX), HOOKS_MESSAGES.afterEdit).transform(
+    afterEdit: optional(z.array(AfterEditCheckSchema).max(HOOK_CHECKS_MAX), HOOKS_MESSAGE_KEYS.afterEdit).transform(
       (value) => value ?? [],
     ),
     blockedCommands: optional(
@@ -453,9 +493,9 @@ export const ProjectHooksSchema = z
         .array(text(BLOCKED_PATTERN_MAX).transform((value) => value.replace(/\s+/g, ' ')))
         .max(BLOCKED_COMMANDS_MAX)
         .refine((items) => new Set(items).size === items.length),
-      HOOKS_MESSAGES.blockedCommands,
+      HOOKS_MESSAGE_KEYS.blockedCommands,
     ).transform((value) => value ?? []),
-    autoFix: optional(z.boolean(), HOOKS_MESSAGES.autoFix).transform((value) => value ?? false),
+    autoFix: optional(z.boolean(), HOOKS_MESSAGE_KEYS.autoFix).transform((value) => value ?? false),
   })
   .strict();
 /** POST /api/projects/:id/hooks/test runs one configured check now. */
@@ -466,7 +506,7 @@ export const HookTestSchema = z.object({
       .int()
       .min(0)
       .max(HOOK_CHECKS_MAX - 1),
-    'index inválido',
+    invalid('index'),
   ),
 });
 
@@ -474,7 +514,7 @@ export const HookTestSchema = z.object({
 export const ProjectFilesQuerySchema = z.object({
   query: optional(
     z.string().max(MENTION_PATH_MAX),
-    `query deve ser um texto de até ${MENTION_PATH_MAX} caracteres`,
+    vmsg('validation.mentionQuery', { max: MENTION_PATH_MAX }),
   ).transform((value) => value ?? ''),
   limit: optional(
     z
@@ -482,23 +522,38 @@ export const ProjectFilesQuerySchema = z.object({
       .regex(/^\d{1,3}$/)
       .transform(Number)
       .refine((n) => n >= 1 && n <= 200),
-    'limit deve ser um inteiro de 1 a 200',
+    vmsg('validation.intFromTo', { field: 'limit', min: 1, max: 200 }),
   ).transform((value) => value ?? 50),
   /** The conversation asking: with a worktree, its files are listed instead of the project's. */
-  sessionId: optional(text(128), 'sessionId inválido'),
+  sessionId: optional(text(128), invalid('sessionId')),
 });
 
 export type ParseResult<T> = { ok: true; data: T } | { ok: false; message: string };
 /**
- * Parses a request body. Missing bodies count as `{}`. On failure returns the first
- * API message from the schema, or `fallback` when the failure has none of its own.
+ * Parses a request body. Missing bodies count as `{}`. On failure returns the first API
+ * message from the schema in `locale` (pt-BR by default), or `fallback` when the failure has
+ * none of its own. A fallback that is a validation key is translated too; any other fallback
+ * (plain text, a server catalog key) is returned as is, for `error()` to translate.
  */
-export function parseBody<T extends z.ZodType>(schema: T, body: unknown, fallback: string): ParseResult<z.output<T>> {
+export function parseBody<T extends z.ZodType>(
+  schema: T,
+  body: unknown,
+  fallback: string | ValidationMessage,
+  locale?: Locale,
+): ParseResult<z.output<T>> {
   const result = schema.safeParse(body ?? {});
   if (result.success) return { ok: true, data: result.data };
   const issue = result.error.issues.find((item) => item.code === 'custom' && item.params?.api);
-  return { ok: false, message: issue?.message ?? fallback };
+  const params =
+    issue?.code === 'custom'
+      ? (issue.params as { key?: unknown; vars?: Vars } | undefined)
+      : typeof fallback === 'string'
+        ? { key: fallback }
+        : fallback;
+  if (isValidationKey(params?.key)) return { ok: false, message: validationText(params.key, params.vars, locale) };
+  return { ok: false, message: issue?.message ?? (typeof fallback === 'string' ? fallback : fallback.text) };
 }
+export { vmsg } from './validation-messages.js';
 
 /** Relative `.md` note path inside a memory scope (no absolute paths, `..` or backslashes). */
 export const memoryPath = text(500).refine(
@@ -591,26 +646,29 @@ export const ProjectMcpSchema = z.object({
 export const GIT_COMMIT_MESSAGE_MAX = 5000;
 const gitPaths = z.array(z.string().min(1).max(4096)).max(1000);
 export const GitStageSchema = z
-  .object({ paths: optional(gitPaths, 'paths inválido'), all: optional(z.boolean(), 'all inválido') })
-  .refine((v) => v.all === true || (v.paths?.length ?? 0) > 0, { message: 'Informe paths ou all: true' });
+  .object({ paths: optional(gitPaths, invalid('paths')), all: optional(z.boolean(), invalid('all')) })
+  .refine((v) => v.all === true || (v.paths?.length ?? 0) > 0, {
+    message: validationText('validation.gitPaths'),
+    params: { api: true, key: 'validation.gitPaths' },
+  });
 export const GitDiscardSchema = z.object({
-  paths: required(gitPaths.min(1), 'paths obrigatório'),
-  confirm: required(z.literal(true), 'confirm: true é obrigatório para descartar alterações'),
+  paths: required(gitPaths.min(1), vmsg('validation.requiredField', { field: 'paths' })),
+  confirm: required(z.literal(true), vmsg('validation.confirm.discard')),
   /** Also confirms files that have staged changes too (those are kept). */
-  mixed: optional(z.boolean(), 'mixed inválido'),
+  mixed: optional(z.boolean(), invalid('mixed')),
 });
 export const GitCommitSchema = z.object({
   message: required(
     z.string().refine((m) => m.trim().length > 0 && m.length <= GIT_COMMIT_MESSAGE_MAX),
-    `Mensagem obrigatória, com até ${GIT_COMMIT_MESSAGE_MAX} caracteres`,
+    vmsg('validation.gitMessage', { max: GIT_COMMIT_MESSAGE_MAX }),
   ),
 });
 export const GitPushSchema = z.object({
-  confirm: required(z.literal(true), 'confirm: true é obrigatório para enviar'),
+  confirm: required(z.literal(true), vmsg('validation.confirm.push')),
 });
 export const GitDiffQuerySchema = z.object({
-  path: required(z.string().min(1).max(4096), 'path obrigatório'),
-  staged: optional(z.enum(['0', '1', 'true', 'false']), 'staged inválido'),
+  path: required(z.string().min(1).max(4096), vmsg('validation.requiredField', { field: 'path' })),
+  staged: optional(z.enum(['0', '1', 'true', 'false']), invalid('staged')),
 });
 
 // Remote login (docs/specs/remote-access.md). Only accepted from this computer.
@@ -618,12 +676,12 @@ export const RemoteAccountSchema = z
   .object({
     username: required(
       z.string().refine((value) => !usernameProblem(value)),
-      `username: ${USERNAME_MIN} a ${USERNAME_MAX} caracteres, só letras minúsculas, números, ponto, hífen e sublinhado`,
+      vmsg('validation.remoteUsername', { min: USERNAME_MIN, max: USERNAME_MAX }),
     ),
     password: required(
       z.string().min(PASSWORD_MIN).max(PASSWORD_MAX),
-      `password: de ${PASSWORD_MIN} a ${PASSWORD_MAX} caracteres`,
+      vmsg('validation.remotePassword', { min: PASSWORD_MIN, max: PASSWORD_MAX }),
     ),
   })
   .strict();
-export const RemoteFunnelSchema = z.object({ enabled: required(z.boolean(), 'enabled deve ser booleano') }).strict();
+export const RemoteFunnelSchema = z.object({ enabled: required(z.boolean(), boolean('enabled')) }).strict();

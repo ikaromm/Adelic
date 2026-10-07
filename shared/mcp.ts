@@ -1,6 +1,7 @@
 // Per-project MCP catalog (docs/specs/mcp-catalog.md): limits, names and the shapes shared
 // by the server routes, the providers and the Settings UI. Only local stdio servers exist in
 // this version; remote (HTTP/SSE) transports are intentionally not accepted.
+import { vmsg } from './validation-messages.js';
 
 /** Lowercase slug, 1–48 characters, valid as a Codex config key and an ACP server name. */
 export const MCP_NAME = /^[a-z0-9][a-z0-9_-]{0,47}$/;
@@ -76,21 +77,25 @@ export interface ProjectMcpReport {
   providers: McpProviderReport[];
 }
 
-/** Validation messages, identical in the API and the Settings form. */
-export const MCP_MESSAGES = {
-  name: 'Nome inválido: use de 1 a 48 letras minúsculas, números, _ ou -, começando por letra ou número',
-  description: `Descrição até ${MCP_DESCRIPTION_MAX} caracteres`,
-  command: 'Informe o comando: um caminho absoluto ou um nome encontrado no PATH',
-  args: `Até ${MCP_ARGS_MAX} argumentos, cada um com até ${MCP_ARG_MAX} caracteres`,
-  env: `Até ${MCP_ENV_MAX} variáveis com nomes válidos e sem repetição; valores literais até ${MCP_ENV_VALUE_MAX} caracteres`,
-  literal: 'Informe o valor da variável literal',
-  tools: `Lista de ferramentas: até ${MCP_TOOLS_MAX} nomes válidos, sem repetição`,
-  transport: 'Somente servidores locais (stdio) são aceitos nesta versão',
-  duplicate: 'Já existe um servidor MCP com esse nome',
-  notFound: 'Servidor MCP não encontrado',
-  unknownIds: 'Servidor MCP desconhecido no catálogo',
-  projectLimit: `Até ${MCP_PROJECT_MAX} servidores MCP por projeto, sem repetição`,
+/** Validation messages (catalog keys in shared/validation-messages.ts), identical in the API and the Settings form. */
+export const MCP_MESSAGE_KEYS = {
+  name: vmsg('validation.mcp.name'),
+  description: vmsg('validation.mcp.description', { max: MCP_DESCRIPTION_MAX }),
+  command: vmsg('validation.mcp.command'),
+  args: vmsg('validation.mcp.args', { max: MCP_ARGS_MAX, argMax: MCP_ARG_MAX }),
+  env: vmsg('validation.mcp.env', { max: MCP_ENV_MAX, valueMax: MCP_ENV_VALUE_MAX }),
+  literal: vmsg('validation.mcp.literal'),
+  tools: vmsg('validation.mcp.tools', { max: MCP_TOOLS_MAX }),
+  transport: vmsg('validation.mcp.transport'),
+  duplicate: vmsg('validation.mcp.duplicate'),
+  notFound: vmsg('validation.mcp.notFound'),
+  unknownIds: vmsg('validation.mcp.unknownIds'),
+  projectLimit: vmsg('validation.mcp.projectLimit', { max: MCP_PROJECT_MAX }),
 };
+/** Their pt-BR texts. */
+export const MCP_MESSAGES = Object.fromEntries(
+  Object.entries(MCP_MESSAGE_KEYS).map(([name, message]) => [name, message.text]),
+) as Record<keyof typeof MCP_MESSAGE_KEYS, string>;
 
 /** Splits the form's "one per line" fields, dropping blank lines. */
 export function mcpLines(value: string) {

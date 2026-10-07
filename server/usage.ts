@@ -1,4 +1,11 @@
-import type { ProjectSpendLimits, Run, SpendLimits, UsageReport, UsageTotals } from '../shared/contracts.js';
+import type {
+  ProjectSpendLimits,
+  Run,
+  SpendLimitKind,
+  SpendLimits,
+  UsageReport,
+  UsageTotals,
+} from '../shared/contracts.js';
 import {
   SPEND_LIMIT_CODE,
   dayBounds,
@@ -9,6 +16,7 @@ import {
   spendLimitStatuses,
 } from '../shared/spend-limits.js';
 import type { Store } from './store.js';
+import type { ServerKey } from './i18n.js';
 
 // Usage limits (docs/specs/spend-limits.md). Usage is aggregated on demand from the runs table
 // with one SQL scan per scope (see Store.usageTotals): every model call of Adelic is recorded on
@@ -113,12 +121,26 @@ export function usageReport(store: Store, projectId?: string, now = new Date()):
 /** Error thrown (409) when a configured limit is already reached before a model call. */
 export function spendLimitError(report: UsageReport) {
   const reached = report.reached[0];
-  return Object.assign(new Error(limitReachedMessage(reached)), {
+  // `.message` is limitReachedMessage (pt-BR, as before); the key translates the answer. The
+  // numbers keep their status format (`usedText` / `limitText`).
+  const error = Object.assign(new Error(limitReachedMessage(reached)), {
     status: 409,
     code: SPEND_LIMIT_CODE,
     limit: reached,
   });
+  return Object.assign(error, {
+    key: REACHED_KEYS[reached.kind],
+    vars: { used: reached.usedText, limit: reached.limitText },
+  });
 }
+const REACHED_KEYS: Record<SpendLimitKind, ServerKey> = {
+  'daily-tokens': 'spend.reached.dailyTokens',
+  'monthly-tokens': 'spend.reached.monthlyTokens',
+  'daily-cost': 'spend.reached.dailyCost',
+  'monthly-cost': 'spend.reached.monthlyCost',
+  'project-monthly-tokens': 'spend.reached.projectMonthlyTokens',
+  'project-monthly-cost': 'spend.reached.projectMonthlyCost',
+};
 
 /**
  * Refuses a new model call when a limit is reached. `projectId` null: a detached conversation,

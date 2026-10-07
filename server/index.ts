@@ -5,7 +5,7 @@ import { memoryIntegration, memoryIntegrationSnapshot } from './memory.js';
 import { Orchestrator } from './orchestrator.js';
 import { Store } from './store.js';
 import { GraphifyService, graphify, mountGraphifyRoutes } from './graphify.js';
-import { error, message, originGuard } from './http/common.js';
+import { error, originGuard } from './http/common.js';
 import { localeMiddleware } from './i18n.js';
 import type { BackendContext } from './http/context.js';
 import type { RetryPolicy } from './retry.js';
@@ -150,7 +150,7 @@ export function createBackend(
       const [providersResult] = await Promise.all([providerList(), memoryIntegration()]);
       res.json(store.bootstrap(providersResult, integrations()));
     } catch (e) {
-      error(res, 500, message(e));
+      error(res, 500, e as Error);
     }
   });
   // Scheduled automations run only inside this process; runtime.close() stops the timers.
@@ -182,7 +182,9 @@ export function createBackend(
   app.get('/api/export', (_req, res) => res.json(store.exportData()));
   mountGraphifyRoutes(app, store, graphifyService);
   app.use('/api', (req, res) => error(res, 404, 'common.notFound'));
-  app.use((e: unknown, _req: Request, res: Response, _next: NextFunction) => error(res, 400, message(e)));
+  app.use((e: unknown, _req: Request, res: Response, _next: NextFunction) =>
+    error(res, 400, e instanceof Error ? e : String(e)),
+  );
   automations.start();
   return { app, orchestrator, graphify: graphifyService, terminal, automations, access, funnel };
 }

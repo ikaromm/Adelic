@@ -8,7 +8,8 @@ import {
   type Automation,
 } from '../../shared/automations.js';
 import { CreateAutomationSchema, PatchAutomationSchema, parseBody } from '../../shared/schemas.js';
-import { error, errorStatus, message } from './common.js';
+import { error, errorStatus } from './common.js';
+import { resolveMessage } from '../i18n.js';
 import type { BackendContext } from './context.js';
 
 /** Scheduled automations (docs/specs/automations.md). */
@@ -25,12 +26,12 @@ export function automationsRoutes({ store, providerList, orchestrator, automatio
     res.json({ automations: service.list(), enabled: store.getSettings()?.automations === true });
   });
   app.post('/api/automations', async (req, res) => {
-    const parsed = parseBody(CreateAutomationSchema, req.body, 'Automação inválida');
+    const parsed = parseBody(CreateAutomationSchema, req.body, 'automations.invalid', req.locale);
     if (!parsed.ok) return error(res, 400, parsed.message);
     const body = parsed.data;
-    if (!store.getProject(body.projectId)) return error(res, 404, 'Projeto não encontrado');
+    if (!store.getProject(body.projectId)) return error(res, 404, 'common.projectNotFound');
     if (body.model && !(await knownModel(body.providerId ?? store.getSettings()!.defaultProviderId, body.model)))
-      return error(res, 400, 'Modelo não anunciado para este provedor');
+      return error(res, 400, 'common.modelNotAdvertised');
     const now = service.now();
     const at = new Date(now).toISOString();
     const automation: Automation = {
@@ -60,11 +61,11 @@ export function automationsRoutes({ store, providerList, orchestrator, automatio
   });
   app.patch('/api/automations/:id', async (req, res) => {
     const current = store.getAutomation(req.params.id);
-    if (!current) return error(res, 404, 'Automação não encontrada');
-    const parsed = parseBody(PatchAutomationSchema, req.body, 'Automação inválida');
+    if (!current) return error(res, 404, 'automations.notFound');
+    const parsed = parseBody(PatchAutomationSchema, req.body, 'automations.invalid', req.locale);
     if (!parsed.ok) return error(res, 400, parsed.message);
     const patch = parsed.data;
-    if (patch.projectId && !store.getProject(patch.projectId)) return error(res, 404, 'Projeto não encontrado');
+    if (patch.projectId && !store.getProject(patch.projectId)) return error(res, 404, 'common.projectNotFound');
     const now = service.now();
     const next: Automation = { ...current, updatedAt: new Date(now).toISOString() };
     if (patch.name !== undefined) next.name = patch.name;
@@ -83,7 +84,7 @@ export function automationsRoutes({ store, providerList, orchestrator, automatio
       delete next.model;
     if (next.model && (patch.model !== undefined || patch.providerId !== undefined))
       if (!(await knownModel(next.providerId ?? store.getSettings()!.defaultProviderId, next.model)))
-        return error(res, 400, 'Modelo não anunciado para este provedor');
+        return error(res, 400, 'common.modelNotAdvertised');
     if (patch.timezone !== undefined) next.timezone = patch.timezone;
     if (patch.catchUp !== undefined) next.catchUp = patch.catchUp;
     if (patch.denyApprovalsAfterMinutes !== undefined) next.denyApprovalsAfterMinutes = patch.denyApprovalsAfterMinutes;
@@ -109,7 +110,7 @@ export function automationsRoutes({ store, providerList, orchestrator, automatio
   });
   // The conversation stays: it is ordinary history the user can read or delete.
   app.delete('/api/automations/:id', (req, res) => {
-    if (!store.deleteAutomation(req.params.id)) return error(res, 404, 'Automação não encontrada');
+    if (!store.deleteAutomation(req.params.id)) return error(res, 404, 'automations.notFound');
     service.reschedule();
     orchestrator.publish({ type: 'automations' });
     res.status(204).end();
@@ -118,10 +119,14 @@ export function automationsRoutes({ store, providerList, orchestrator, automatio
   app.post('/api/automations/:id/run', async (req, res) => {
     try {
       const result = await service.fire(req.params.id, 'manual');
-      if (!result.ok) return res.status(result.status).json({ error: result.message, automation: result.automation });
+      if (!result.ok)
+        return res.status(result.status).json({
+          error: result.reason ? resolveMessage(result.reason, req.locale ?? 'pt-BR') : result.message,
+          automation: result.automation,
+        });
       res.status(202).json({ automation: result.automation, ...result.started });
     } catch (e) {
-      error(res, errorStatus(e) || 500, message(e));
+      error(res, errorStatus(e) || 500, e as Error);
     }
   });
   return app;

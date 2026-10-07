@@ -11,7 +11,7 @@ import type { BackendContext } from './context.js';
 export function settingsRoutes({ store, automations }: BackendContext) {
   const app = Router();
   app.patch('/api/settings', (req, res) => {
-    const parsed = parseBody(SettingsPatchSchema, req.body, 'Configuração inválida');
+    const parsed = parseBody(SettingsPatchSchema, req.body, 'settings.invalid', req.locale);
     if (!parsed.ok) return error(res, 400, parsed.message);
     // Remote-access options cannot be changed from the remote side itself; from the internet
     // the global automations switch is refused too (docs/specs/remote-access.md).
@@ -22,7 +22,7 @@ export function settingsRoutes({ store, automations }: BackendContext) {
     )
       return error(res, 403, LOCAL_ONLY);
     if (kind === 'internet' && parsed.data.automations !== undefined)
-      return error(res, 403, 'Automações não podem ser alteradas pelo acesso pela internet.');
+      return error(res, 403, 'settings.automationsInternet');
     // Unknown keys are ignored, as before; only defined fields change.
     const { spendLimits, ...rest } = parsed.data;
     const patch = Object.fromEntries(Object.entries(rest).filter(([, value]) => value !== undefined));
@@ -37,10 +37,10 @@ export function settingsRoutes({ store, automations }: BackendContext) {
   });
   // Usage today and this month (local time), the configured limits and those at 80% or more.
   app.get('/api/usage', (req, res) => {
-    const query = parseBody(UsageQuerySchema, req.query, 'Parâmetros inválidos');
+    const query = parseBody(UsageQuerySchema, req.query, 'common.invalidParams', req.locale);
     if (!query.ok) return error(res, 400, query.message);
     const projectId = query.data.projectId;
-    if (projectId && !store.getProject(projectId)) return error(res, 404, 'Projeto não encontrado');
+    if (projectId && !store.getProject(projectId)) return error(res, 404, 'common.projectNotFound');
     res.json(usageReport(store, projectId));
   });
   // Opt-in update check. `force` (manual "Verificar agora") works even when the automatic
@@ -52,8 +52,8 @@ export function settingsRoutes({ store, automations }: BackendContext) {
   });
   app.patch('/api/skills/:id', (req, res) => {
     const skill = store.getSkill(req.params.id);
-    if (!skill) return error(res, 404, 'Skill não encontrada');
-    const parsed = parseBody(SkillPatchSchema, req.body, 'enabled deve ser booleano');
+    if (!skill) return error(res, 404, 'settings.skillNotFound');
+    const parsed = parseBody(SkillPatchSchema, req.body, 'remote.enabledBoolean', req.locale);
     if (!parsed.ok) return error(res, 400, parsed.message);
     skill.enabled = parsed.data.enabled;
     res.json(store.setSkill(skill));

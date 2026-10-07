@@ -2,6 +2,7 @@ import { existsSync, realpathSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { GraphifyConfig, OrchestrationConfig } from '../../shared/contracts.js';
 import { GraphifyConfigSchema, OrchestrationPatchSchema } from '../../shared/schemas.js';
+import { LocalizedError } from '../i18n.js';
 
 const defaultOrchestration: OrchestrationConfig = { enabled: true, maxWorkers: 2, review: true };
 const optionalKeys = ['workerProviderId', 'workerModel', 'reviewerProviderId', 'reviewerModel'] as const;
@@ -19,9 +20,9 @@ export function graphifyConfig(value: unknown): GraphifyConfig | undefined {
   return parsed.success ? parsed.data : undefined;
 }
 export function projectPath(input: unknown) {
-  if (typeof input !== 'string' || !input.trim()) throw new Error('path obrigatório');
+  if (typeof input !== 'string' || !input.trim()) throw new LocalizedError('projects.pathRequired');
   const p = realpathSync(resolve(input));
-  if (!existsSync(p) || !statSync(p).isDirectory()) throw new Error('O caminho precisa ser uma pasta existente');
+  if (!existsSync(p) || !statSync(p).isDirectory()) throw new LocalizedError('projects.pathNotFolder');
   return p;
 }
 

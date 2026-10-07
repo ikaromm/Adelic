@@ -2,6 +2,7 @@
 // message that starts with `/name`, and template expansion. Shared by the server (which
 // expands) and the composer (which only suggests names).
 import type { Mode } from './contracts.js';
+import { validationText, vmsg } from './validation-messages.js';
 
 /** Lowercase letters, digits and hyphens, 1–32 characters, not starting with a hyphen. */
 export const COMMAND_NAME = /^[a-z0-9][a-z0-9-]{0,31}$/;
@@ -13,17 +14,24 @@ export const commandModes = ['fast', 'balanced', 'deep'] as const;
 export type CommandMode = (typeof commandModes)[number];
 export type CommandSource = 'builtin' | 'global' | 'repo' | 'project';
 
-/** Validation messages, identical in the API and the Settings form. */
+/** Validation messages (catalog keys in shared/validation-messages.ts), identical in the API and the Settings form. */
+export const COMMAND_MESSAGE_KEYS = {
+  name: vmsg('validation.command.name'),
+  description: vmsg('validation.command.description', { max: COMMAND_DESCRIPTION_MAX }),
+  template: vmsg('validation.command.template', { max: COMMAND_TEMPLATE_MAX }),
+  mode: vmsg('validation.command.mode'),
+};
+/** Their pt-BR texts. */
 export const COMMAND_MESSAGES = {
-  name: 'Nome inválido: use de 1 a 32 letras minúsculas, números ou hífens, começando por letra ou número',
-  description: `Descrição até ${COMMAND_DESCRIPTION_MAX} caracteres`,
-  template: `Modelo obrigatório (até ${COMMAND_TEMPLATE_MAX} caracteres)`,
-  mode: 'mode deve ser fast, balanced ou deep',
+  name: COMMAND_MESSAGE_KEYS.name.text,
+  description: COMMAND_MESSAGE_KEYS.description.text,
+  template: COMMAND_MESSAGE_KEYS.template.text,
+  mode: COMMAND_MESSAGE_KEYS.mode.text,
 };
 
 /** Built-in actions that are not templates: no saved command or repository file can take these names. */
 export const RESERVED_COMMAND_NAMES: readonly string[] = ['compactar'];
-export const COMMAND_RESERVED = 'Nome reservado para uma ação embutida do Adelic';
+export const COMMAND_RESERVED = validationText('validation.command.reserved');
 
 /** First problem with a command's editable fields, or '' when valid (the API checks again). */
 export function commandFieldsError(fields: { name: string; description: string; template: string }) {

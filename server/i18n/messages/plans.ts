@@ -1,0 +1,43 @@
+import { defineMessages } from '../../../shared/i18n.js';
+
+// Plan mode refusals (server/plans.ts, server/http/plans.ts). Keep pt-BR byte-identical.
+export default defineMessages(
+  {
+    'plans.notFound': 'Plano não encontrado',
+    'plans.discarded': 'Este plano foi descartado',
+    'plans.alreadyDiscarded': 'Este plano já foi descartado',
+    'plans.executing': 'O plano está em execução',
+    'plans.alreadyExecuting': 'O plano já está em execução',
+    'plans.noTasks': 'Não encontrei tarefas; edite o plano',
+    'plans.noPendingTasks': 'Não há tarefas pendentes neste plano',
+    'plans.notExecuting': 'O plano não está em execução',
+    'plans.taskNotFound': 'Tarefa não encontrada neste plano',
+    'plans.taskDone': 'A tarefa já foi concluída',
+    'plans.taskRunning': 'A tarefa está em execução',
+    'plans.approveBeforeSave': 'Aprove o plano antes de salvá-lo no projeto',
+    'plans.noProject': 'Esta conversa não está vinculada a um projeto',
+    'plans.projectGone': 'A pasta do projeto não existe mais',
+    'plans.specsSymlink': 'A pasta .adelic/specs sai do projeto por um link simbólico; nada foi salvo',
+    'plans.notRegularFile': '{path} não é um arquivo comum; nada foi salvo',
+    'plans.exists': '{path} já existe',
+  },
+  {
+    'plans.notFound': 'Plan not found',
+    'plans.discarded': 'This plan was discarded',
+    'plans.alreadyDiscarded': 'This plan was already discarded',
+    'plans.executing': 'The plan is running',
+    'plans.alreadyExecuting': 'The plan is already running',
+    'plans.noTasks': 'No tasks found; edit the plan',
+    'plans.noPendingTasks': 'There are no pending tasks in this plan',
+    'plans.notExecuting': 'The plan is not running',
+    'plans.taskNotFound': 'Task not found in this plan',
+    'plans.taskDone': 'The task is already done',
+    'plans.taskRunning': 'The task is running',
+    'plans.approveBeforeSave': 'Approve the plan before saving it to the project',
+    'plans.noProject': 'This conversation is not linked to a project',
+    'plans.projectGone': 'The project folder no longer exists',
+    'plans.specsSymlink': 'The .adelic/specs folder leaves the project through a symbolic link; nothing was saved',
+    'plans.notRegularFile': '{path} is not a regular file; nothing was saved',
+    'plans.exists': '{path} already exists',
+  },
+);

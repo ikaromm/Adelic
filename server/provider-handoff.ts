@@ -14,6 +14,7 @@ import { adaptEffort } from '../shared/reasoning.js';
 import { selectHistory } from './router.js';
 import type { Store } from './store.js';
 import { UsageMeter, applyUsage } from './usage.js';
+import { httpError } from './i18n.js';
 
 // "Continuar com outro agente" (docs/specs/provider-handoff.md): switch a conversation to
 // another provider, optionally carrying a summary. The summary is a visible `role: 'system'`
@@ -40,8 +41,6 @@ export interface HandoffResult {
   message?: Message;
 }
 
-const httpError = (message: string, status: number, extra: Record<string, unknown> = {}) =>
-  Object.assign(new Error(message), { status, ...extra });
 const roleLabel = { user: 'Usuário', assistant: 'Agente', system: 'Resumo anterior' } as const;
 const oneLine = (text: string, max: number) => {
   const flat = text.replace(/\s+/g, ' ').trim();
@@ -187,11 +186,11 @@ export interface HandoffDeps {
 /** Validates the target against the catalog; returns both providers. */
 function validateTarget(catalog: ProviderInfo[], session: Session, request: HandoffRequest) {
   const target = catalog.find((p) => p.id === request.providerId);
-  if (!target) throw httpError('Provedor não encontrado', 400);
-  if (request.providerId === session.providerId) throw httpError('Escolha um agente diferente do atual', 400);
-  if (!target.available) throw httpError(`${target.name} está indisponível neste computador`, 400);
+  if (!target) throw httpError(400, 'handoff.providerNotFound');
+  if (request.providerId === session.providerId) throw httpError(400, 'handoff.sameAgent');
+  if (!target.available) throw httpError(400, 'handoff.unavailable', { name: target.name });
   if (request.model && !target.models.some((m) => m.id === request.model))
-    throw httpError('Modelo não anunciado para este provedor', 400);
+    throw httpError(400, 'common.modelNotAdvertised');
   return { target, current: catalog.find((p) => p.id === session.providerId) };
 }
 
@@ -262,11 +261,11 @@ async function modelSummary(
       usage.result(result);
       if (!text.trim() && result.text) text = result.text;
     } catch (e) {
-      if (deps.signal.aborted) throw httpError('Passagem cancelada', 409, { cancelled: true });
+      if (deps.signal.aborted) throw httpError(409, 'handoff.cancelled', undefined, { cancelled: true });
       if (timeout.aborted) throw new Error('tempo esgotado', { cause: e });
       throw e;
     }
-    if (deps.signal.aborted) throw httpError('Passagem cancelada', 409, { cancelled: true });
+    if (deps.signal.aborted) throw httpError(409, 'handoff.cancelled', undefined, { cancelled: true });
     const summary = text.trim().slice(0, HANDOFF_SUMMARY_MAX);
     if (!summary) throw new Error('o agente não devolveu um resumo');
     run.status = 'completed';
@@ -344,7 +343,7 @@ export async function performHandoff(
     };
   }
   const latest = deps.store.getSession(session.id);
-  if (!latest) throw httpError('Conversa não encontrada', 404);
+  if (!latest) throw httpError(404, 'common.sessionNotFound');
   const next: Session = {
     ...latest,
     providerId: target.id,

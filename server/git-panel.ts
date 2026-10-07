@@ -35,7 +35,7 @@ export class GitPanelError extends CheckpointError {}
 /** Repository of a project (the project may sit below the top level). */
 export async function projectRepo(project: Pick<Project, 'path'>): Promise<Repo> {
   const repo = await openRepo(project.path, false);
-  if (!repo) throw new GitPanelError(`O projeto ${NOT_GIT}`, 409);
+  if (!repo) throw GitPanelError.of('git.notRepo');
   return repo;
 }
 
@@ -201,7 +201,7 @@ export async function gitDiff(project: Pick<Project, 'path'>, path: string, stag
   const status = await readStatus(repo);
   const area = staged ? ['staged'] : ['unstaged', 'untracked'];
   const entry = status.files.find((f) => f.path === path && area.includes(f.area));
-  if (!entry) throw new GitPanelError('Arquivo não está na lista de alterações', 404);
+  if (!entry) throw GitPanelError.of('git.fileNotListed', undefined, 404);
   // Read at most one byte over the cap: a huge file never fills memory.
   const opts = { maxBytes: LIMITS.diffBytes + 1, truncate: true };
   let out: Buffer;
@@ -244,7 +244,7 @@ function pick(files: GitFileEntry[], paths: string[], areas: GitFileEntry['area'
   const picked: GitFileEntry[] = [];
   for (const path of new Set(paths)) {
     const matches = files.filter((f) => f.path === path && areas.includes(f.area));
-    if (!matches.length) throw new GitPanelError(`Arquivo fora da lista de alterações: ${path}`, 400);
+    if (!matches.length) throw GitPanelError.of('git.fileOutsideList', { path }, 400);
     picked.push(...matches);
   }
   return picked;
@@ -278,15 +278,10 @@ export async function gitDiscard(project: Pick<Project, 'path'>, input: { paths:
   const status = await readStatus(repo);
   const entries = pick(status.files, input.paths, ['unstaged', 'untracked']);
   const conflicted = entries.filter((e) => e.letter === 'U').map((e) => e.path);
-  if (conflicted.length)
-    throw new GitPanelError(`Arquivos em conflito não podem ser descartados: ${conflicted.join(', ')}`, 409);
+  if (conflicted.length) throw GitPanelError.of('git.conflicted', { paths: conflicted.join(', ') });
   const staged = new Set(status.files.filter((f) => f.area === 'staged').map((f) => f.path));
   const mixed = entries.filter((e) => staged.has(e.path)).map((e) => e.path);
-  if (mixed.length && !input.mixed)
-    throw new GitPanelError(
-      `Estes arquivos também têm alterações no índice; confirme para descartar só as não staged: ${mixed.join(', ')}`,
-      409,
-    );
+  if (mixed.length && !input.mixed) throw GitPanelError.of('git.mixed', { paths: mixed.join(', ') });
   const tracked = entries.filter((e) => e.area === 'unstaged').map((e) => e.path);
   const untracked = entries.filter((e) => e.area === 'untracked').map((e) => e.path);
   // Validate every untracked target first, so nothing is deleted when one of them is refused.
@@ -294,10 +289,9 @@ export async function gitDiscard(project: Pick<Project, 'path'>, input: { paths:
   for (const path of untracked) {
     const target = resolve(repo.top, path);
     if (!target.startsWith(repo.top + sep) || path.split('/').some((p) => p === '..' || p.toLowerCase() === '.git'))
-      throw new GitPanelError(`Caminho inválido: ${path}`, 422);
+      throw GitPanelError.of('git.invalidPath', { path }, 422);
     const info = await lstat(target).catch(() => undefined);
-    if (info && !info.isFile() && !info.isSymbolicLink())
-      throw new GitPanelError(`Só arquivos podem ser descartados por aqui: ${path}`, 422);
+    if (info && !info.isFile() && !info.isSymbolicLink()) throw GitPanelError.of('git.onlyFiles', { path }, 422);
     targets.push(target);
   }
   if (tracked.length) await run(repo, ['restore', '--worktree', '--', ...tracked]).catch(rethrow);
@@ -314,10 +308,10 @@ export async function gitCommit(project: Pick<Project, 'path' | 'git'>, message:
   const repo = await projectRepo(project);
   for (const key of ['user.name', 'user.email']) {
     const value = await run(repo, ['config', '--get', key], { okCodes: [1] });
-    if (!value.toString().trim()) throw new GitPanelError('Configure user.name e user.email no git', 409);
+    if (!value.toString().trim()) throw GitPanelError.of('git.identity');
   }
   const status = await readStatus(repo);
-  if (!status.files.some((f) => f.area === 'staged')) throw new GitPanelError('Não há alterações staged', 409);
+  if (!status.files.some((f) => f.area === 'staged')) throw GitPanelError.of('git.nothingStaged');
   const hooks = project.git?.runHooks === true;
   await run(
     repo,
@@ -357,7 +351,7 @@ export async function gitPushTarget(project: Pick<Project, 'path'>) {
 export async function gitPush(project: Pick<Project, 'path'>) {
   const repo = await projectRepo(project);
   const target = await upstreamOf(repo);
-  if (!target) throw new GitPanelError('A branch atual não tem upstream; envie pelo terminal na primeira vez', 409);
+  if (!target) throw GitPanelError.of('git.noUpstream');
   const scoped = nulSplit(
     await git(repo.top, ['config', '-z', '--show-scope', '--name-only', '--list'], { repo, config: HARDENED_CONFIG }),
   );
@@ -365,11 +359,7 @@ export async function gitPush(project: Pick<Project, 'path'>) {
   for (let i = 0; i + 1 < scoped.length; i += 2)
     if ((scoped[i] === 'local' || scoped[i] === 'worktree') && PUSH_UNSAFE_LOCAL.test(scoped[i + 1]))
       unsafe.push(scoped[i + 1]);
-  if (unsafe.length)
-    throw new GitPanelError(
-      `A configuração do repositório define ${[...new Set(unsafe)].join(', ')}; por segurança o Adelic não envia com ela. Use git push no terminal.`,
-      409,
-    );
+  if (unsafe.length) throw GitPanelError.of('git.unsafeConfig', { keys: [...new Set(unsafe)].join(', ') });
   const sshCommand = (await run(repo, ['config', '--get', 'core.sshCommand'], { okCodes: [1] })).toString().trim();
   try {
     await run(
@@ -392,7 +382,7 @@ export async function gitPush(project: Pick<Project, 'path'>) {
       },
     );
   } catch (e) {
-    throw new GitPanelError(`O envio falhou: ${failure(e)}`, 502);
+    throw GitPanelError.of('git.pushFailed', { detail: failure(e) }, 502);
   }
   return { remote: target.remote, branch: target.branch, remoteBranch: target.merge.slice(11) };
 }
@@ -446,9 +436,9 @@ export function compareUrl(remoteUrl: string, base: string | undefined, branch: 
 export async function gitPullRequestUrl(project: Pick<Project, 'path'>) {
   const repo = await projectRepo(project);
   const status = await readStatus(repo);
-  if (!status.branch) throw new GitPanelError('HEAD está destacado; mude para uma branch', 409);
+  if (!status.branch) throw GitPanelError.of('git.detached');
   const origin = (await run(repo, ['config', '--get', 'remote.origin.url'], { okCodes: [1] })).toString().trim();
-  if (!origin) throw new GitPanelError('O repositório não tem o remote origin', 409);
+  if (!origin) throw GitPanelError.of('git.noOrigin');
   const head = (await run(repo, ['symbolic-ref', '-q', '--short', 'refs/remotes/origin/HEAD'], { okCodes: [1] }))
     .toString()
     .trim();
@@ -460,10 +450,9 @@ export async function gitPullRequestUrl(project: Pick<Project, 'path'>) {
     });
     if (found.toString().trim()) base = candidate;
   }
-  if (base === status.branch)
-    throw new GitPanelError(`Você está na branch padrão (${base}); crie outra branch para o pull request`, 409);
+  if (base === status.branch) throw GitPanelError.of('git.defaultBranch', { base: base ?? '' });
   const result = compareUrl(origin, base, status.branch);
-  if (!result) throw new GitPanelError('O remote origin não é do GitHub nem do GitLab', 422);
+  if (!result) throw GitPanelError.of('git.unknownHost', undefined, 422);
   return { ...result, base: base ?? null, branch: status.branch };
 }
 

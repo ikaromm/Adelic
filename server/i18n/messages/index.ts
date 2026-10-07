@@ -1,4 +1,26 @@
 // Server catalog areas (docs/i18n.md): exactly one line per area, kept alphabetical.
+export { default as attachments } from './attachments.js';
 export { default as auth } from './auth.js';
+export { default as automations } from './automations.js';
+export { default as checkpoints } from './checkpoints.js';
+export { default as commands } from './commands.js';
 export { default as common } from './common.js';
+export { default as compaction } from './compaction.js';
+export { default as diagnostics } from './diagnostics.js';
+export { default as git } from './git.js';
+export { default as graphify } from './graphify.js';
+export { default as handoff } from './handoff.js';
+export { default as mcp } from './mcp.js';
+export { default as memory } from './memory.js';
+export { default as orchestrator } from './orchestrator.js';
+export { default as plans } from './plans.js';
+export { default as projects } from './projects.js';
 export { default as remote } from './remote.js';
+export { default as sessions } from './sessions.js';
+export { default as settings } from './settings.js';
+export { default as spend } from './spend.js';
+export { default as terminal } from './terminal.js';
+export { default as update } from './update.js';
+export { default as validation } from './validation.js';
+export { default as voice } from './voice.js';
+export { default as worktrees } from './worktrees.js';

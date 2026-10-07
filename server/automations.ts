@@ -10,6 +10,7 @@ import {
 } from '../shared/automations.js';
 import type { Orchestrator } from './orchestrator.js';
 import type { Store } from './store.js';
+import { errorKey, httpError, type Translatable } from './i18n.js';
 
 /**
  * Scheduled automations (docs/specs/automations.md). Lives only inside the Adelic server
@@ -29,7 +30,7 @@ export const LATE_TOLERANCE_MS = 15 * 60_000;
 type Trigger = AutomationResult['trigger'];
 export type FireResult =
   | { ok: true; automation: Automation; started: { runId: string; messageId: string } }
-  | { ok: false; automation: Automation; status: number; message: string };
+  | { ok: false; automation: Automation; status: number; message: string; reason?: Translatable };
 
 export class AutomationService {
   private timer: ReturnType<typeof setTimeout> | undefined;
@@ -177,10 +178,20 @@ export class AutomationService {
    */
   async fire(id: string, trigger: Trigger): Promise<FireResult> {
     const automation = this.store.getAutomation(id);
-    if (!automation) throw Object.assign(new Error('Automação não encontrada'), { status: 404 });
-    if (!this.globalOn()) return { ok: false, automation, status: 409, message: AUTOMATION_GLOBAL_OFF };
+    if (!automation) throw httpError(404, 'automations.notFound');
+    if (!this.globalOn())
+      return {
+        ok: false,
+        automation,
+        status: 409,
+        message: AUTOMATION_GLOBAL_OFF,
+        reason: { key: 'automations.globalOff' },
+      };
     const project = this.store.getProject(automation.projectId);
-    if (!project) return this.record(automation, trigger, 'failed', 'Projeto não encontrado', 404);
+    if (!project)
+      return this.record(automation, trigger, 'failed', 'Projeto não encontrado', 404, {
+        key: 'common.projectNotFound',
+      });
     const existing = automation.conversationId ? this.store.getSession(automation.conversationId) : undefined;
     if (
       this.firing.has(id) ||
@@ -189,7 +200,9 @@ export class AutomationService {
           this.orchestrator.isActive(existing.id) ||
           this.store.listPlans(existing.id).some((plan) => plan.status === 'executing')))
     )
-      return this.record(automation, trigger, 'skipped', AUTOMATION_SKIPPED_ACTIVE, 409);
+      return this.record(automation, trigger, 'skipped', AUTOMATION_SKIPPED_ACTIVE, 409, {
+        key: 'automations.skippedActive',
+      });
     this.firing.add(id);
     try {
       const session = this.conversation(automation, existing);
@@ -215,8 +228,15 @@ export class AutomationService {
       if (!latest) throw error;
       // A conflict found by the orchestrator itself (a run started meanwhile) is a skip too.
       return status === 409 && /execução ativa/.test(String((error as Error).message))
-        ? this.record(latest, trigger, 'skipped', AUTOMATION_SKIPPED_ACTIVE, 409)
-        : this.record(latest, trigger, 'failed', (error as Error).message.slice(0, 300), status ?? 500);
+        ? this.record(latest, trigger, 'skipped', AUTOMATION_SKIPPED_ACTIVE, 409, { key: 'automations.skippedActive' })
+        : this.record(
+            latest,
+            trigger,
+            'failed',
+            (error as Error).message.slice(0, 300),
+            status ?? 500,
+            errorKey(error),
+          );
     } finally {
       this.firing.delete(id);
     }
@@ -233,11 +253,13 @@ export class AutomationService {
     status: 'skipped' | 'failed',
     detail: string,
     httpStatus: number,
+    /** The answer's catalog key; `detail` (pt-BR) is what the automation keeps as history. */
+    reason?: Translatable,
   ): FireResult {
     const at = new Date(this.now()).toISOString();
     const saved = this.save({ ...automation, lastResult: { status, at, trigger, detail } });
     this.emit();
-    return { ok: false, automation: saved, status: httpStatus, message: detail };
+    return { ok: false, automation: saved, status: httpStatus, message: detail, ...(reason ? { reason } : {}) };
   }
 
   /**

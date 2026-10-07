@@ -9,13 +9,12 @@ import {
 import type { Store } from '../store.js';
 import type { TerminalService } from '../terminal.js';
 import { requestKind } from './auth.js';
-import { error, errorStatus, message } from './common.js';
+import { error, errorStatus } from './common.js';
+import { tr } from '../i18n.js';
 import type { BackendContext } from './context.js';
 
-export const TERMINAL_REMOTE_DISABLED =
-  'O terminal está desativado no acesso remoto. Ative "Permitir terminal pelo acesso remoto" em Configurações, neste computador.';
-export const TERMINAL_INTERNET_DISABLED =
-  'O terminal nunca fica disponível pelo acesso pela internet (Tailscale Funnel). Use este computador ou a tailnet.';
+export const TERMINAL_REMOTE_DISABLED = tr(undefined, 'terminal.remoteDisabled');
+export const TERMINAL_INTERNET_DISABLED = tr(undefined, 'terminal.internetDisabled');
 
 /**
  * Tailnet clients may use the terminal only after the opt-in setting; internet clients
@@ -25,7 +24,7 @@ export function terminalAccess(req: Request, store: Store) {
   const kind = requestKind(req);
   const remote = kind !== 'local';
   const enabled = kind === 'local' || (kind === 'tailnet' && store.getSettings()?.terminalRemote === true);
-  const reason = kind === 'internet' ? TERMINAL_INTERNET_DISABLED : TERMINAL_REMOTE_DISABLED;
+  const reason = tr(req.locale, kind === 'internet' ? 'terminal.internetDisabled' : 'terminal.remoteDisabled');
   return { remote, enabled, ...(enabled ? {} : { reason }) };
 }
 
@@ -39,12 +38,12 @@ export function terminalRoutes({ store }: BackendContext, terminal: TerminalServ
   };
   const project = (req: Request, res: Response) => {
     const found = store.getProject(String(req.params.id));
-    if (!found) error(res, 404, 'Projeto não encontrado');
+    if (!found) error(res, 404, 'common.projectNotFound');
     return found;
   };
   const owned = (req: Request, res: Response): TerminalCommand | undefined => {
     const command = terminal.get(String(req.params.id));
-    if (!command) error(res, 404, 'Comando não encontrado');
+    if (!command) error(res, 404, 'terminal.commandNotFound');
     return command;
   };
 
@@ -65,7 +64,7 @@ export function terminalRoutes({ store }: BackendContext, terminal: TerminalServ
     if (!allowed(req, res)) return;
     const p = project(req, res);
     if (!p) return;
-    const parsed = parseBody(TerminalRunSchema, req.body, 'Comando inválido');
+    const parsed = parseBody(TerminalRunSchema, req.body, 'terminal.invalidCommand', req.locale);
     if (!parsed.ok) return error(res, 400, parsed.message);
     try {
       const started = await terminal.start({
@@ -78,7 +77,7 @@ export function terminalRoutes({ store }: BackendContext, terminal: TerminalServ
       });
       res.status(202).json({ id: started.id, command: started });
     } catch (e) {
-      error(res, errorStatus(e) || 500, message(e));
+      error(res, errorStatus(e) || 500, e as Error);
     }
   });
   app.get('/api/projects/:id/terminal/events', (req, res) => {
@@ -108,7 +107,7 @@ export function terminalRoutes({ store }: BackendContext, terminal: TerminalServ
   });
   app.post('/api/terminal/:id/stop', async (req, res) => {
     if (!allowed(req, res)) return;
-    const parsed = parseBody(TerminalStopSchema, req.body, 'Envie um corpo JSON vazio ({})');
+    const parsed = parseBody(TerminalStopSchema, req.body, 'terminal.emptyBody', req.locale);
     if (!parsed.ok) return error(res, 400, parsed.message);
     if (!owned(req, res)) return;
     res.json(await terminal.stop(String(req.params.id)));

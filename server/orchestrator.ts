@@ -26,7 +26,8 @@ import type {
   StreamEvent,
   Thinking,
 } from '../shared/contracts.js';
-import { attachmentMeta, IMAGES_UNSUPPORTED, loadRunAttachments } from './attachments.js';
+import { attachmentMeta, loadRunAttachments } from './attachments.js';
+import { httpError, tr, type ServerKey, type Translatable } from './i18n.js';
 import { routeMessage, titleFromMessage } from './router.js';
 import { memoryContextFor } from './memory.js';
 import { expandMessage } from './commands.js';
@@ -72,7 +73,8 @@ import {
 import { buildPlanningPrompt, planCommand } from './plan-markdown.js';
 import { Plans } from './plans.js';
 import { boundedHistory, handoffHistory, performHandoff, type HandoffRequest } from './provider-handoff.js';
-import { COMPACTING_TEXT, COMPACT_INVALID, compactCommand } from '../shared/compaction.js';
+import { compactCommand } from '../shared/compaction.js';
+import { eventFields, type EventTextKey, type EventVars } from '../shared/event-text.js';
 import { blockedBy, EMPTY_HOOKS, normalizeCommand, type ProjectHooks } from '../shared/hooks.js';
 import { HookChecks, fixLabel, fixPrompt, type runCheck } from './hooks.js';
 import {
@@ -106,9 +108,8 @@ export interface StartOptions {
 }
 /** A plan-mode run: its kind and the prompt that replaces the usual one. */
 type SpecialRun = { ref: RunPlanRef; prompt: string };
-const commandSourceLabel = { builtin: 'embutido', global: 'global', repo: 'do repositório', project: 'do projeto' };
-const modeLabel = { auto: 'Auto', fast: 'Rápido', deep: 'Completo' };
-const cancelledError = (message: string) => Object.assign(new Error(message), { status: 409, cancelled: true });
+
+const cancelledError = (key: ServerKey) => httpError(409, key, undefined, { cancelled: true });
 
 interface StartingRun {
   clientMessageId?: string;
@@ -197,6 +198,18 @@ export class Orchestrator {
       } catch {}
     }
   }
+  /** A run event whose text has a catalog key (shared/event-text.ts): pt-BR `text` plus `textKey`. */
+  private publishKeyed(
+    sessionId: string,
+    runId: string,
+    type: RunEvent['type'],
+    key: EventTextKey,
+    vars?: EventVars,
+    extra: Partial<RunEvent> = {},
+  ) {
+    const { text, ...keyed } = eventFields(key, vars);
+    return this.publishEvent(sessionId, runId, type, text, { ...keyed, ...extra });
+  }
   private publishEvent(
     sessionId: string,
     runId: string,
@@ -225,18 +238,18 @@ export class Orchestrator {
     attachments: StoredAttachment[] = [],
     options: StartOptions = {},
   ): Promise<{ runId: string; messageId: string }> {
-    if (this.shuttingDown) throw Object.assign(new Error('Orquestrador está encerrando'), { status: 503 });
+    if (this.shuttingDown) throw httpError(503, 'orchestrator.shuttingDown');
     this.assertNotUpdating();
     // `/compactar` alone is a built-in action, checked before saved commands: no user message,
     // just the summary card (docs/specs/compaction.md).
     const compact = options.planTask || options.hookFix ? undefined : compactCommand(content);
-    if (compact === 'invalid') throw Object.assign(new Error(COMPACT_INVALID), { status: 400 });
+    if (compact === 'invalid') throw httpError(400, 'compaction.invalid');
     if (compact === 'compact') {
-      if (attachments.length) throw Object.assign(new Error('/compactar não aceita anexos'), { status: 400 });
+      if (attachments.length) throw httpError(400, 'orchestrator.compactNoAttachments');
       return this.compact(session.id, { overrideLimit: options.overrideLimit });
     }
     if (!options.planTask && !options.hookFix && planCommand(content) === '')
-      throw Object.assign(new Error('Escreva o pedido depois de /plano'), { status: 400 });
+      throw httpError(400, 'orchestrator.planNeedsRequest');
     if (clientMessageId) {
       const existing = this.store.findClientMessage(session.id, clientMessageId);
       if (existing) return this.startedResult(session.id, existing);
@@ -247,16 +260,15 @@ export class Orchestrator {
         await pending.done;
         if (pending.error) throw pending.error;
         if (pending.result) return pending.result;
-        throw Object.assign(new Error('A inicialização concorrente não produziu uma execução'), { status: 409 });
+        throw httpError(409, 'orchestrator.concurrentStart');
       }
-      throw Object.assign(new Error('Já existe uma execução ativa nesta conversa'), { status: 409 });
+      throw httpError(409, 'orchestrator.alreadyActive');
     }
     session = this.store.getSession(session.id) ?? session;
     // Usage limits: refused before the run exists and before any provider call.
     if (!options.overrideLimit) assertWithinLimits(this.store, session.projectId);
-    if (!this.store.getSession(session.id)) throw Object.assign(new Error('Conversa não encontrada'), { status: 404 });
-    if (this.active.has(session.id) || session.activeRunId)
-      throw Object.assign(new Error('Já existe uma execução ativa nesta conversa'), { status: 409 });
+    if (!this.store.getSession(session.id)) throw httpError(404, 'common.sessionNotFound');
+    if (this.active.has(session.id) || session.activeRunId) throw httpError(409, 'orchestrator.alreadyActive');
     const controller = new AbortController();
     let finish!: () => void;
     const done = new Promise<void>((resolve) => {
@@ -267,51 +279,38 @@ export class Orchestrator {
     try {
       const startingSettings = structuredClone(this.store.getSettings()!);
       if (options.manualApproval) startingSettings.approvalMode = 'manual';
-      if (controller.signal.aborted) throw cancelledError('Execução cancelada antes de iniciar');
+      if (controller.signal.aborted) throw cancelledError('orchestrator.cancelledBeforeStart');
       const initialThinking = session.thinking;
       const hasImages = attachments.some((a) => a.kind === 'image');
       const catalog =
         (initialThinking && initialThinking !== 'auto') || hasImages ? await this.providerList() : undefined;
-      if (this.shuttingDown) throw Object.assign(new Error('Orquestrador está encerrando'), { status: 503 });
+      if (this.shuttingDown) throw httpError(503, 'orchestrator.shuttingDown');
       this.assertNotUpdating();
-      if (controller.signal.aborted) throw cancelledError('Execução cancelada antes de iniciar');
+      if (controller.signal.aborted) throw cancelledError('orchestrator.cancelledBeforeStart');
       // Re-read after discovery. PATCH is blocked by this reservation, and using the
       // stored snapshot here prevents an older request object from overwriting it.
       const latest = this.store.getSession(session.id);
-      if (!latest) throw Object.assign(new Error('Conversa não encontrada'), { status: 404 });
-      if (this.active.has(session.id) || latest.activeRunId)
-        throw Object.assign(new Error('Já existe uma execução ativa nesta conversa'), { status: 409 });
+      if (!latest) throw httpError(404, 'common.sessionNotFound');
+      if (this.active.has(session.id) || latest.activeRunId) throw httpError(409, 'orchestrator.alreadyActive');
       session = latest;
       if (session.thinking && session.thinking !== 'auto' && !catalog)
-        throw Object.assign(new Error('A configuração da conversa mudou durante a descoberta; tente novamente.'), {
-          status: 409,
-        });
-      if (this.worktreeBusy.has(session.id))
-        throw Object.assign(new Error('A cópia isolada desta conversa está sendo alterada; tente de novo'), {
-          status: 409,
-        });
+        throw httpError(409, 'orchestrator.configChanged');
+      if (this.worktreeBusy.has(session.id)) throw httpError(409, 'orchestrator.worktreeChanging');
       const project = this.workspaceFor(session);
       const writeKey = this.writeKey(session, project);
       if (this.writingProjects.has(writeKey) || this.reservedProjectWrites.has(writeKey))
-        throw Object.assign(new Error('Já há uma execução alterando este projeto'), { status: 409 });
+        throw httpError(409, 'orchestrator.projectWriting');
       if (hasImages) this.assertImageSupport(session, project, catalog!);
       const projectPath = realPath(project.path);
       if ([...this.restoring].some((path) => overlaps(path, projectPath)))
-        throw Object.assign(new Error('As alterações de uma execução estão sendo desfeitas neste projeto'), {
-          status: 409,
-        });
-      if ([...this.gitOps].some((path) => overlaps(path, projectPath)))
-        throw Object.assign(new Error('Uma operação do git está em andamento neste projeto; tente de novo'), {
-          status: 409,
-        });
+        throw httpError(409, 'orchestrator.gitBlock.restoring');
+      if ([...this.gitOps].some((path) => overlaps(path, projectPath))) throw httpError(409, 'orchestrator.gitRunning');
       if ([...this.applying].some((path) => overlaps(path, projectPath)))
-        throw Object.assign(new Error('Uma cópia isolada está sendo aplicada neste projeto; tente de novo'), {
-          status: 409,
-        });
+        throw httpError(409, 'orchestrator.gitBlock.applying');
       const stored = this.store.listMessages(session.id);
       // Edit and resend: the run sees only the messages before the edited one.
       const cut = options.replaceFrom ? stored.findIndex((m) => m.id === options.replaceFrom) : stored.length;
-      if (cut < 0) throw Object.assign(new Error('Mensagem não encontrada nesta conversa'), { status: 404 });
+      if (cut < 0) throw httpError(404, 'orchestrator.messageNotFound');
       const kept = stored.slice(0, cut);
       // After a compaction, runs get its summary plus only the messages after it. A summary
       // counts only while the message it ends at is still kept (an edit can discard it).
@@ -445,11 +444,16 @@ export class Orchestrator {
       this.emit({ type: 'run', run });
       this.emit({ type: 'session', session });
       if (expanded.command)
-        this.publishEvent(
+        this.publishKeyed(
           session.id,
           runId,
           'status',
-          `Comando /${expanded.command.name} (${commandSourceLabel[expanded.command.source]}) expandido${expanded.mode ? `; modo ${modeLabel[expanded.mode]} nesta execução` : ''}`,
+          expanded.mode ? 'event.commandExpandedMode' : 'event.commandExpanded',
+          {
+            name: expanded.command.name,
+            source: { key: `event.commandSource.${expanded.command.source}` },
+            ...(expanded.mode ? { mode: { key: `event.mode.${expanded.mode}` } } : {}),
+          },
         );
       active.done = this.execute(
         session,
@@ -501,18 +505,11 @@ export class Orchestrator {
       if (existing) return Promise.resolve(this.startedResult(sessionId, existing));
     }
     const message = this.store.getMessage(messageId);
-    if (!message || message.sessionId !== sessionId)
-      throw Object.assign(new Error('Mensagem não encontrada nesta conversa'), { status: 404 });
-    if (message.role !== 'user')
-      throw Object.assign(new Error('Só mensagens do usuário podem ser editadas'), { status: 400 });
-    if (session.activeRunId || this.isActive(sessionId))
-      throw Object.assign(new Error('Há uma execução em andamento nesta conversa; aguarde ou cancele antes'), {
-        status: 409,
-      });
+    if (!message || message.sessionId !== sessionId) throw httpError(404, 'orchestrator.messageNotFound');
+    if (message.role !== 'user') throw httpError(400, 'orchestrator.onlyUserEdits');
+    if (session.activeRunId || this.isActive(sessionId)) throw httpError(409, 'orchestrator.runInProgress');
     if (this.store.listPlans(sessionId).some((plan) => plan.status === 'executing'))
-      throw Object.assign(new Error('Um plano está em execução nesta conversa; pare o plano antes de editar'), {
-        status: 409,
-      });
+      throw httpError(409, 'orchestrator.planRunningEdit');
     const kept =
       attachments ??
       (message.attachments ?? []).flatMap((meta) => {
@@ -537,20 +534,16 @@ export class Orchestrator {
    * native session is dropped, so the next turn starts fresh from the summary.
    */
   async compact(sessionId: string, options: { overrideLimit?: boolean } = {}): Promise<Started> {
-    if (this.shuttingDown) throw Object.assign(new Error('Orquestrador está encerrando'), { status: 503 });
+    if (this.shuttingDown) throw httpError(503, 'orchestrator.shuttingDown');
     this.assertNotUpdating();
     const session = this.requireSession(sessionId);
-    if (this.isActive(sessionId) || session.activeRunId)
-      throw Object.assign(new Error('Há uma execução em andamento nesta conversa; aguarde ou cancele antes'), {
-        status: 409,
-      });
+    if (this.isActive(sessionId) || session.activeRunId) throw httpError(409, 'orchestrator.runInProgress');
     if (this.store.listPlans(sessionId).some((p) => p.status === 'executing'))
-      throw Object.assign(new Error('Um plano está em execução nesta conversa'), { status: 409 });
+      throw httpError(409, 'orchestrator.planRunning');
     const messages = this.store.listMessages(sessionId);
     const compactions = this.store.listCompactions(sessionId);
     const pending = messagesAfter(messages, compactions.at(-1));
-    if (!summarisable(pending).length)
-      throw Object.assign(new Error('Não há mensagens novas para compactar'), { status: 409 });
+    if (!summarisable(pending).length) throw httpError(409, 'orchestrator.nothingToCompact');
     if (!options.overrideLimit) assertWithinLimits(this.store, session.projectId);
     const project = this.workspaceFor(session);
     const settings = structuredClone(this.store.getSettings()!);
@@ -578,20 +571,20 @@ export class Orchestrator {
     const usage = new UsageMeter();
     active.done = (async () => {
       try {
-        this.publishEvent(sessionId, run.id, 'status', COMPACTING_TEXT);
+        this.publishKeyed(sessionId, run.id, 'status', 'event.compacting');
         await this.summarise(running, project, run.id, run, compactions, pending, settings, controller.signal, {
           auto: false,
           usage,
         });
         run.status = 'completed';
-        this.publishEvent(sessionId, run.id, 'status', 'Conversa compactada');
+        this.publishKeyed(sessionId, run.id, 'status', 'event.compacted');
       } catch (e) {
         if (controller.signal.aborted) run.status = 'cancelled';
         else {
           run.status = 'failed';
           run.error = errorText(e);
           run.failure = failureOf(e);
-          this.publishEvent(sessionId, run.id, 'error', `Não foi possível compactar a conversa: ${run.error}`);
+          this.publishKeyed(sessionId, run.id, 'error', 'event.compactFailed', { error: run.error });
         }
       } finally {
         // Recorded on failure and cancel too: tokens already used still count (spend limits).
@@ -633,7 +626,7 @@ export class Orchestrator {
     // `history` already holds only the messages after the latest compaction.
     const reason = autoCompactReason(settings, history, compactions, this.store.listRuns(session.id));
     if (!reason) return undefined;
-    this.publishEvent(session.id, run.id, 'status', COMPACTING_TEXT);
+    this.publishKeyed(session.id, run.id, 'status', 'event.compacting');
     // The summary call's usage is part of this run (counted by the usage limits).
     const usage = new UsageMeter();
     try {
@@ -648,16 +641,11 @@ export class Orchestrator {
         signal,
         { auto: true, usage },
       );
-      this.publishEvent(session.id, run.id, 'status', `Conversa compactada antes desta mensagem: ${reason}`);
+      this.publishKeyed(session.id, run.id, 'status', 'event.compactedBefore', { reason });
       return compaction;
     } catch (e) {
       if (signal.aborted) throw e;
-      this.publishEvent(
-        session.id,
-        run.id,
-        'error',
-        `Não foi possível compactar a conversa (${errorText(e)}); a mensagem seguiu sem compactar.`,
-      );
+      this.publishKeyed(session.id, run.id, 'error', 'event.compactSkipped', { error: errorText(e) });
       return undefined;
     } finally {
       addUsage(run, usage.totals());
@@ -772,15 +760,12 @@ export class Orchestrator {
    * cancelling the conversation aborts the summary call.
    */
   async handoff(sessionId: string, request: HandoffRequest, options: { overrideLimit?: boolean } = {}) {
-    if (this.shuttingDown) throw Object.assign(new Error('Orquestrador está encerrando'), { status: 503 });
+    if (this.shuttingDown) throw httpError(503, 'orchestrator.shuttingDown');
     this.assertNotUpdating();
     const session = this.requireSession(sessionId);
-    if (this.isActive(sessionId) || session.activeRunId)
-      throw Object.assign(new Error('Não é possível trocar de agente durante uma execução'), { status: 409 });
+    if (this.isActive(sessionId) || session.activeRunId) throw httpError(409, 'orchestrator.handoffDuringRun');
     if (this.plans.list(sessionId).some((plan) => plan.status === 'executing'))
-      throw Object.assign(new Error('Há um plano em execução nesta conversa; pare-o antes de trocar de agente'), {
-        status: 409,
-      });
+      throw httpError(409, 'orchestrator.handoffDuringPlan');
     const controller = new AbortController();
     let finish!: () => void;
     const done = new Promise<void>((resolve) => {
@@ -839,12 +824,9 @@ export class Orchestrator {
   private workspaceFor(session: Session): Project {
     if (session.projectId === null) return this.detachedProject(session.id);
     const project = this.store.getProject(session.projectId);
-    if (!project) throw Object.assign(new Error('Projeto não encontrado'), { status: 404 });
+    if (!project) throw httpError(404, 'common.projectNotFound');
     if (!session.worktree) return project;
-    if (!existsSync(join(session.worktree.path, '.git')))
-      throw Object.assign(new Error('A pasta da cópia isolada desta conversa não existe mais; descarte-a'), {
-        status: 409,
-      });
+    if (!existsSync(join(session.worktree.path, '.git'))) throw httpError(409, 'orchestrator.worktreeGone');
     return { ...project, path: session.worktree.path };
   }
   /**
@@ -857,21 +839,16 @@ export class Orchestrator {
   // ---- Isolated worktree per conversation (docs/specs/worktrees.md) ----
   private worktreeProject(sessionId: string) {
     const session = this.requireSession(sessionId);
-    if (session.projectId === null)
-      throw Object.assign(new Error('Conversas avulsas não têm cópia isolada'), { status: 409 });
+    if (session.projectId === null) throw httpError(409, 'orchestrator.detachedNoWorktree');
     const project = this.store.getProject(session.projectId);
-    if (!project) throw Object.assign(new Error('Projeto não encontrado'), { status: 404 });
+    if (!project) throw httpError(404, 'common.projectNotFound');
     return { session, project };
   }
   private assertIdle(session: Session) {
-    if (session.activeRunId || this.isActive(session.id))
-      throw Object.assign(new Error('Há uma execução em andamento nesta conversa; aguarde ou cancele antes'), {
-        status: 409,
-      });
+    if (session.activeRunId || this.isActive(session.id)) throw httpError(409, 'orchestrator.runInProgress');
     if (this.store.listPlans(session.id).some((plan) => plan.status === 'executing'))
-      throw Object.assign(new Error('Um plano está em execução nesta conversa'), { status: 409 });
-    if (this.worktreeBusy.has(session.id))
-      throw Object.assign(new Error('A cópia isolada desta conversa já está sendo alterada'), { status: 409 });
+      throw httpError(409, 'orchestrator.planRunning');
+    if (this.worktreeBusy.has(session.id)) throw httpError(409, 'orchestrator.worktreeBusy');
   }
   /** Runs one worktree operation at a time per conversation; runs there wait for 409 meanwhile. */
   private async withWorktree<T>(sessionId: string, work: () => Promise<T>) {
@@ -898,13 +875,17 @@ export class Orchestrator {
     const { session, project } = this.worktreeProject(sessionId);
     if (!session.worktree) {
       const { reason } = await mainRepo(project);
-      return { enabled: false, available: !reason, ...(reason ? { reason } : {}) };
+      return {
+        enabled: false,
+        available: !reason,
+        ...(reason ? { reason: tr(undefined, reason.key, reason.vars), reasons: { reason } } : {}),
+      };
     }
     return worktreeStatus(project, session.worktree);
   }
   async enableWorktree(sessionId: string) {
     const { session, project } = this.worktreeProject(sessionId);
-    if (session.worktree) throw Object.assign(new Error('Esta conversa já usa uma cópia isolada'), { status: 409 });
+    if (session.worktree) throw httpError(409, 'orchestrator.worktreeExists');
     this.assertIdle(session);
     return this.withWorktree(sessionId, async () => {
       const worktree = await createWorktree(project, session, this.store.dataDir);
@@ -913,13 +894,13 @@ export class Orchestrator {
   }
   async worktreeFileDiff(sessionId: string, path: string) {
     const { session, project } = this.worktreeProject(sessionId);
-    if (!session.worktree) throw Object.assign(new Error('Esta conversa não usa uma cópia isolada'), { status: 404 });
+    if (!session.worktree) throw httpError(404, 'orchestrator.noWorktree');
     return worktreeDiff(project, session.worktree, path);
   }
   /** "Aplicar no projeto": refused while a run is active in the conversation or the main checkout. */
   async applyWorktree(sessionId: string) {
     const { session, project } = this.worktreeProject(sessionId);
-    if (!session.worktree) throw Object.assign(new Error('Esta conversa não usa uma cópia isolada'), { status: 404 });
+    if (!session.worktree) throw httpError(404, 'orchestrator.noWorktree');
     this.assertIdle(session);
     const main = realPath(project.path);
     if (
@@ -928,9 +909,7 @@ export class Orchestrator {
       this.reservedProjectWrites.has(project.id) ||
       [...this.restoring, ...this.applying, ...this.gitOps].some((path) => overlaps(path, main))
     )
-      throw Object.assign(new Error('Há uma execução em andamento no projeto; aguarde ou cancele antes de aplicar'), {
-        status: 409,
-      });
+      throw httpError(409, 'orchestrator.applyDuringRun');
     const worktree = session.worktree;
     this.applying.add(main);
     try {
@@ -944,7 +923,7 @@ export class Orchestrator {
   }
   async discardWorktree(sessionId: string, deleteBranch = false) {
     const { session, project } = this.worktreeProject(sessionId);
-    if (!session.worktree) throw Object.assign(new Error('Esta conversa não usa uma cópia isolada'), { status: 404 });
+    if (!session.worktree) throw httpError(404, 'orchestrator.noWorktree');
     this.assertIdle(session);
     const worktree = session.worktree;
     return this.withWorktree(sessionId, async () => {
@@ -1077,7 +1056,7 @@ export class Orchestrator {
             memoryContext = `[Resultado da busca: nenhuma nota pertinente foi encontrada no escopo de memória ${scopeName}. Nenhum outro escopo foi consultado.]`;
         } catch (e) {
           const detail = errorText(e);
-          this.publishEvent(session.id, run.id, 'error', `Memória indisponível: ${detail}`);
+          this.publishKeyed(session.id, run.id, 'error', 'event.memoryUnavailable', { detail });
           memoryContext = `[Resultado da busca: a recuperação de memória no escopo ${scopeName} falhou (${detail}). Nenhuma decisão anterior foi verificada.]`;
         }
       }
@@ -1097,14 +1076,15 @@ export class Orchestrator {
         const mentioned = await resolveMentions(project.path, mentions);
         attached.text += mentioned.text;
         if (mentioned.included.length)
-          this.publishEvent(
-            session.id,
-            run.id,
-            'status',
-            `${mentioned.included.length === 1 ? 'Arquivo mencionado incluído' : 'Arquivos mencionados incluídos'}: ${mentioned.included.join(', ')}`,
-          );
+          this.publishKeyed(session.id, run.id, 'status', 'event.mentionIncluded', {
+            count: mentioned.included.length,
+            paths: mentioned.included.join(', '),
+          });
         for (const ignored of mentioned.ignored)
-          this.publishEvent(session.id, run.id, 'status', `Menção ignorada: ${ignored.path} (${ignored.reason})`);
+          this.publishKeyed(session.id, run.id, 'status', 'event.mentionIgnored', {
+            path: ignored.path,
+            reason: ignored.reason,
+          });
       }
       const projectConfig = project.orchestration ?? { enabled: true, maxWorkers: 2, review: true };
       // Plan mode runs are one direct call: the plan already is the decomposition.
@@ -1470,11 +1450,12 @@ export class Orchestrator {
       const effectiveInput = this.applyThinking(input, session.thinking, catalog);
       task.effort = effectiveInput.plan.effort;
       this.store.putTask(task);
-      this.publishEvent(
+      this.publishKeyed(
         session.id,
         run.id,
         'status',
-        `Esforço efetivo da tarefa “${task.title}”: ${task.effort ?? 'Auto (nativo)'}`,
+        task.effort ? 'event.taskEffort' : 'event.taskEffortAuto',
+        task.effort ? { title: task.title, effort: task.effort } : { title: task.title },
       );
       if (route.level === 'fast' && task.role === 'worker') {
         route.effort = effectiveInput.plan.effort;
@@ -1617,12 +1598,10 @@ export class Orchestrator {
           graphContext = await graph(`${planned.title}\n${planned.instructions}\n${planned.scope.join(' ')}`);
         } catch (e) {
           if (controller.signal.aborted) throw e;
-          this.publishEvent(
-            session.id,
-            run.id,
-            'status',
-            `Graphify indisponível para ${planned.title}: ${errorText(e)}`,
-          );
+          this.publishKeyed(session.id, run.id, 'status', 'event.graphifyTask', {
+            title: planned.title,
+            error: errorText(e),
+          });
         }
         if (!planned.scope.length && graphContext) {
           planned.scope = mapPaths(graphContext);
@@ -1788,7 +1767,7 @@ export class Orchestrator {
     try {
       graphContext = await graph(content);
     } catch (e) {
-      this.publishEvent(session.id, run.id, 'status', `Graphify indisponível para planejamento: ${errorText(e)}`);
+      this.publishKeyed(session.id, run.id, 'status', 'event.graphifyPlanning', { error: errorText(e) });
     }
     if (controller.signal.aborted) throw new Error('Execução cancelada');
     const plannerContext = boundedCoordinatorContext(history, request, priorBrief, mapPaths(graphContext), 6000);
@@ -1824,7 +1803,7 @@ export class Orchestrator {
     } catch (e) {
       finishTask(planner, controller.signal.aborted ? 'cancelled' : 'failed', planner.output || '', errorText(e));
       if (controller.signal.aborted) throw e;
-      this.publishEvent(session.id, run.id, 'status', `Plano inválido; delegando tarefa integral: ${errorText(e)}`);
+      this.publishKeyed(session.id, run.id, 'status', 'event.invalidPlan', { error: errorText(e) });
       planned = [
         { id: 'whole', title: 'Executar solicitação integral', instructions: content, scope: [], dependsOn: [] },
       ];
@@ -1974,10 +1953,7 @@ export class Orchestrator {
     for (const id of receivers) {
       const provider = catalog.find((item) => item.id === id);
       if (!provider?.capabilities.images)
-        throw Object.assign(
-          new Error(`${IMAGES_UNSUPPORTED} (${provider?.name ?? id}). Remova as imagens ou escolha o Codex ou o Kiro.`),
-          { status: 400 },
-        );
+        throw httpError(400, 'orchestrator.imagesUnsupported', { provider: provider?.name ?? id });
     }
   }
   private validateCoordinatorThinking(
@@ -1989,12 +1965,11 @@ export class Orchestrator {
     const provider = catalog.find((item) => item.id === providerId);
     if (!supportsEffort(provider, model, thinking)) {
       const selected = provider?.models.find((item) => item.id === model);
-      throw Object.assign(
-        new Error(
-          `${provider?.name ?? providerId} não anuncia esforço ${thinking} para ${selected?.name ?? model ?? 'o modelo selecionado'}.`,
-        ),
-        { status: 400 },
-      );
+      throw httpError(400, 'orchestrator.effortNotAdvertised', {
+        provider: provider?.name ?? providerId,
+        effort: thinking,
+        model: selected?.name ?? model ?? tr(undefined, 'orchestrator.selectedModel'),
+      });
     }
   }
   private applyThinking<
@@ -2052,6 +2027,11 @@ export class Orchestrator {
    * overlapping folder, an undo or another git operation there. Undefined when allowed.
    */
   gitBlock(path: string): string | undefined {
+    const reason = this.gitBlockReason(path);
+    return reason && tr(undefined, reason.key);
+  }
+  /** gitBlock as a catalog key, so the refusal can be translated per request. */
+  gitBlockReason(path: string): Translatable | undefined {
     const root = realPath(path);
     const writing = [...new Set([...this.writingProjects, ...this.reservedProjectWrites.keys()])].some((id) => {
       const folder = id.startsWith('detached:')
@@ -2061,19 +2041,17 @@ export class Orchestrator {
           : this.store.getProject(id)?.path;
       return folder !== undefined && overlaps(realPath(folder), root);
     });
-    if (writing) return 'Há uma execução alterando arquivos neste projeto; aguarde ela terminar';
-    if ([...this.restoring].some((p) => overlaps(p, root)))
-      return 'As alterações de uma execução estão sendo desfeitas neste projeto';
-    if ([...this.gitOps].some((p) => overlaps(p, root))) return 'Outra operação do git está em andamento neste projeto';
-    if ([...this.applying].some((p) => overlaps(p, root)))
-      return 'Uma cópia isolada está sendo aplicada neste projeto; tente de novo';
+    if (writing) return { key: 'orchestrator.gitBlock.writing' };
+    if ([...this.restoring].some((p) => overlaps(p, root))) return { key: 'orchestrator.gitBlock.restoring' };
+    if ([...this.gitOps].some((p) => overlaps(p, root))) return { key: 'orchestrator.gitBlock.git' };
+    if ([...this.applying].some((p) => overlaps(p, root))) return { key: 'orchestrator.gitBlock.applying' };
     return undefined;
   }
   /** Runs a git panel mutation in `path`; 409 when gitBlock refuses. New runs there wait for 409. */
   async withGitOperation<T>(path: string, work: () => Promise<T>): Promise<T> {
     this.assertNotUpdating();
-    const reason = this.gitBlock(path);
-    if (reason) throw Object.assign(new Error(reason), { status: 409 });
+    const reason = this.gitBlockReason(path);
+    if (reason) throw httpError(409, reason.key);
     const root = realPath(path);
     this.gitOps.add(root);
     try {
@@ -2089,18 +2067,18 @@ export class Orchestrator {
   async restoreRun(runId: string) {
     this.assertNotUpdating();
     const run = this.store.getRun(runId);
-    if (!run) throw Object.assign(new Error('Execução não encontrada'), { status: 404 });
-    if (run.status === 'running') throw new CheckpointError('A execução ainda está em andamento');
+    if (!run) throw httpError(404, 'common.runNotFound');
+    if (run.status === 'running') throw CheckpointError.of('orchestrator.restoreRunning');
     const root = run.checkpoint?.root;
     if (!run.checkpoint?.available || !root || !run.checkpoint.after)
-      throw new CheckpointError('Esta execução não tem alterações registradas para desfazer', 404);
-    if (run.checkpoint.restoredAt) throw new CheckpointError('As alterações desta execução já foram desfeitas');
+      throw CheckpointError.of('orchestrator.nothingToRestore', undefined, 404);
+    if (run.checkpoint.restoredAt) throw CheckpointError.of('orchestrator.alreadyRestored');
     if (
       this.busyAt(root) ||
       [...this.restoring, ...this.gitOps, ...this.applying].some((path) => overlaps(path, root)) ||
       [...this.worktreeBusy].some((id) => this.store.getSession(id)?.worktree?.path === root)
     )
-      throw new CheckpointError('Há uma execução em andamento neste projeto; aguarde ou cancele antes de desfazer');
+      throw CheckpointError.of('orchestrator.restoreBusy');
     this.restoring.add(root);
     try {
       // A check must not write while files are put back.
@@ -2164,12 +2142,12 @@ export class Orchestrator {
   }
   /** "Testar" in the project settings: one check now; 409 while a run may write there. */
   async testHook(projectId: string, index: number) {
-    if (this.shuttingDown) throw Object.assign(new Error('Orquestrador está encerrando'), { status: 503 });
+    if (this.shuttingDown) throw httpError(503, 'orchestrator.shuttingDown');
     this.assertNotUpdating();
     const project = this.store.getProject(projectId);
-    if (!project) throw Object.assign(new Error('Projeto não encontrado'), { status: 404 });
+    if (!project) throw httpError(404, 'common.projectNotFound');
     const check = this.store.getHooks(projectId).afterEdit[index];
-    if (!check) throw Object.assign(new Error('Verificação não encontrada'), { status: 404 });
+    if (!check) throw httpError(404, 'orchestrator.checkNotFound');
     const path = realPath(project.path);
     if (
       this.writingProjects.has(projectId) ||
@@ -2177,11 +2155,8 @@ export class Orchestrator {
       [...this.active.values()].some((item) => item.writes && item.projectPath && overlaps(item.projectPath, path)) ||
       [...this.restoring].some((item) => overlaps(item, path))
     )
-      throw Object.assign(new Error('Há uma execução em andamento neste projeto; aguarde para testar'), {
-        status: 409,
-      });
-    if (this.hookChecks.running(projectId))
-      throw Object.assign(new Error('Já há verificações rodando neste projeto'), { status: 409 });
+      throw httpError(409, 'orchestrator.testDuringRun');
+    if (this.hookChecks.running(projectId)) throw httpError(409, 'orchestrator.checksRunning');
     return this.hookChecks.test(projectId, project.path, 'workspace-write', check);
   }
   async cancel(sessionId: string) {
@@ -2195,44 +2170,43 @@ export class Orchestrator {
       starting.controller.abort();
       return;
     }
-    throw Object.assign(new Error('Não há execução ativa'), { status: 409 });
+    throw httpError(409, 'orchestrator.noActiveRun');
   }
   /** `note` replaces the activity text ("Aprovado"/"Negado"), e.g. for an automatic denial. */
   async decide(approvalId: string, sessionId: string, decision: 'approve' | 'deny', note?: string) {
     const approval = this.store.getApproval(approvalId);
     if (!approval || approval.sessionId !== sessionId || approval.status !== 'pending')
-      throw Object.assign(new Error('Aprovação não encontrada ou já respondida'), { status: 404 });
+      throw httpError(404, 'orchestrator.approvalNotFound');
     const active = this.active.get(sessionId);
-    if (!active || active.runId !== approval.runId)
-      throw Object.assign(new Error('Execução dona da aprovação não está ativa'), { status: 409 });
-    if (this.deciding.has(approvalId))
-      throw Object.assign(new Error('Aprovação já está sendo respondida'), { status: 409 });
+    if (!active || active.runId !== approval.runId) throw httpError(409, 'orchestrator.approvalOwnerInactive');
+    if (this.deciding.has(approvalId)) throw httpError(409, 'orchestrator.approvalAnswering');
     // Rules saved while the request waited apply too: a blocked command is never approved.
     const session = this.store.getSession(sessionId);
     const rules = session?.projectId ? this.store.getHooks(session.projectId).blockedCommands : [];
     const blocked = decision === 'approve' ? blockedBy(rules, approval.command) : undefined;
     if (blocked) {
       this.screenApproval(approval, rules);
-      throw Object.assign(new Error('Comando bloqueado pelas regras do projeto'), { status: 409 });
+      throw httpError(409, 'orchestrator.commandBlocked');
     }
     this.deciding.add(approvalId);
     try {
       await this.providers.approve(approvalId, decision);
       const current = this.store.getApproval(approvalId);
       if (!current || current.status !== 'pending' || this.active.get(sessionId)?.runId !== approval.runId)
-        throw Object.assign(new Error('Execução encerrada antes da resposta à aprovação'), { status: 409 });
+        throw httpError(409, 'orchestrator.approvalRunEnded');
       current.status = decision === 'approve' ? 'approved' : 'denied';
       this.store.putApproval(current);
       this.emit({ type: 'approval', approval: current });
-      this.publishEvent(
-        sessionId,
-        approval.runId,
-        'approval',
-        note ?? (decision === 'approve' ? 'Aprovado' : 'Negado'),
-        {
-          status: current.status,
-        },
-      );
+      if (note) this.publishEvent(sessionId, approval.runId, 'approval', note, { status: current.status });
+      else
+        this.publishKeyed(
+          sessionId,
+          approval.runId,
+          'approval',
+          decision === 'approve' ? 'event.approved' : 'event.denied',
+          undefined,
+          { status: current.status },
+        );
     } finally {
       this.deciding.delete(approvalId);
     }
@@ -2246,7 +2220,7 @@ export class Orchestrator {
   }
   private requireSession(sessionId: string) {
     const session = this.store.getSession(sessionId);
-    if (!session) throw Object.assign(new Error('Conversa não encontrada'), { status: 404 });
+    if (!session) throw httpError(404, 'common.sessionNotFound');
     return session;
   }
   /** A pause only means something while items wait; an empty queue never stays paused. */
@@ -2288,14 +2262,13 @@ export class Orchestrator {
   editQueued(sessionId: string, itemId: string, content: string) {
     this.requireSession(sessionId);
     const item = this.store.updateQueued(sessionId, itemId, content);
-    if (!item) throw Object.assign(new Error('Mensagem não está mais na fila'), { status: 404 });
+    if (!item) throw httpError(404, 'orchestrator.queueItemGone');
     this.emitQueue(sessionId);
     return item;
   }
   removeQueued(sessionId: string, itemId: string) {
     this.requireSession(sessionId);
-    if (!this.store.removeQueued(sessionId, itemId))
-      throw Object.assign(new Error('Mensagem não está mais na fila'), { status: 404 });
+    if (!this.store.removeQueued(sessionId, itemId)) throw httpError(404, 'orchestrator.queueItemGone');
     this.limitOverrides.delete(itemId);
     this.clearPauseIfEmpty(sessionId);
     this.emitQueue(sessionId);
@@ -2326,7 +2299,7 @@ export class Orchestrator {
     let itemId: string;
     if ('itemId' in input) {
       if (!this.store.listQueue(sessionId).some((i) => i.id === input.itemId))
-        throw Object.assign(new Error('Mensagem não está mais na fila'), { status: 404 });
+        throw httpError(404, 'orchestrator.queueItemGone');
       itemId = input.itemId;
     } else {
       itemId = this.store.enqueue(
@@ -2367,17 +2340,12 @@ export class Orchestrator {
   async steerQueued(sessionId: string, itemId: string) {
     this.requireSession(sessionId);
     const item = this.store.listQueue(sessionId).find((i) => i.id === itemId);
-    if (!item) throw Object.assign(new Error('Mensagem não está mais na fila'), { status: 404 });
-    if (item.attachments?.length)
-      throw Object.assign(new Error('Mensagens com anexos não podem orientar; use Enviar agora'), { status: 409 });
-    if (compactCommand(item.content))
-      throw Object.assign(new Error('/compactar não orienta um turno; ele roda quando a conversa fica livre'), {
-        status: 409,
-      });
+    if (!item) throw httpError(404, 'orchestrator.queueItemGone');
+    if (item.attachments?.length) throw httpError(409, 'orchestrator.steerAttachments');
+    if (compactCommand(item.content)) throw httpError(409, 'orchestrator.steerCompact');
     const active = this.active.get(sessionId);
-    if (!active) throw Object.assign(new Error('Não há execução ativa'), { status: 409 });
-    if (!this.providers.steer)
-      throw Object.assign(new Error('Nenhum agente aceita orientação durante a execução'), { status: 409 });
+    if (!active) throw httpError(409, 'orchestrator.noActiveRun');
+    if (!this.providers.steer) throw httpError(409, 'orchestrator.steerUnsupported');
     const session = this.requireSession(sessionId);
     const project = session.projectId === null ? undefined : this.store.getProject(session.projectId);
     // A queued `/name` steers with the expanded template too (a mode override cannot apply mid-turn).
@@ -2390,7 +2358,7 @@ export class Orchestrator {
     this.store.removeQueued(sessionId, itemId);
     this.clearPauseIfEmpty(sessionId);
     this.emitQueue(sessionId);
-    this.publishEvent(sessionId, active.runId, 'status', `Orientação enviada ao agente: ${item.content.slice(0, 200)}`);
+    this.publishKeyed(sessionId, active.runId, 'status', 'event.steered', { content: item.content.slice(0, 200) });
   }
   /** Called once a run has fully finished: continue, or pause the queue for the user. */
   private afterRun(sessionId: string, run: Run) {
@@ -2446,7 +2414,7 @@ export class Orchestrator {
         const attachments = (item.attachments ?? []).map((meta) => {
           const stored = this.store.getAttachment(meta.id);
           if (!stored || stored.sessionId !== sessionId)
-            throw Object.assign(new Error(`Anexo “${meta.name}” não está mais disponível`), { status: 400 });
+            throw httpError(400, 'attachments.unavailable', { name: meta.name });
           return stored;
         });
         const overrideLimit = this.limitOverrides.delete(item.id);
@@ -2593,18 +2561,17 @@ export class Orchestrator {
     options: { overrideLimit?: boolean; manualApproval?: boolean } = {},
   ) {
     const run = this.store.getRun(runId);
-    if (!run) throw Object.assign(new Error('Execução não encontrada'), { status: 404 });
+    if (!run) throw httpError(404, 'common.runNotFound');
     const session = this.requireSession(run.sessionId);
     if (run.status === 'running' || session.activeRunId || this.isActive(session.id))
-      throw Object.assign(new Error('Já existe uma execução ativa nesta conversa'), { status: 409 });
-    if (run.plan?.kind === 'task')
-      throw Object.assign(new Error('Tarefas de um plano são repetidas pelo cartão do plano'), { status: 409 });
+      throw httpError(409, 'orchestrator.alreadyActive');
+    if (run.plan?.kind === 'task') throw httpError(409, 'orchestrator.planTaskRetry');
     const request = this.store.listMessages(session.id).find((m) => m.runId === run.id && m.role === 'user');
-    if (!request) throw Object.assign(new Error('Pedido desta execução não encontrado'), { status: 404 });
+    if (!request) throw httpError(404, 'orchestrator.requestNotFound');
     const attachments = (request.attachments ?? []).map((meta) => {
       const stored = this.store.getAttachment(meta.id);
       if (!stored || stored.sessionId !== session.id)
-        throw Object.assign(new Error(`Anexo “${meta.name}” não está mais disponível`), { status: 400 });
+        throw httpError(400, 'attachments.unavailable', { name: meta.name });
       return stored;
     });
     const previous = structuredClone(session);
@@ -2614,13 +2581,15 @@ export class Orchestrator {
       const catalog = await this.providerList();
       const provider = catalog.find((p) => p.id === providerId);
       if (!provider?.available)
-        throw Object.assign(new Error(provider?.detail || 'Provedor indisponível'), { status: 400 });
+        throw provider?.detail
+          ? Object.assign(new Error(provider.detail), { status: 400 })
+          : httpError(400, 'orchestrator.providerUnavailable');
       if (target.model && !provider.models.some((m) => m.id === target.model))
-        throw Object.assign(new Error('Modelo não anunciado para este provedor'), { status: 400 });
+        throw httpError(400, 'common.modelNotAdvertised');
       const model = target.model ?? (providerId === session.providerId ? session.model : undefined);
       const latest = this.requireSession(session.id);
       if (latest.activeRunId || this.isActive(latest.id) || JSON.stringify(latest) !== JSON.stringify(previous))
-        throw Object.assign(new Error('A conversa mudou durante a troca de modelo'), { status: 409 });
+        throw httpError(409, 'orchestrator.modelSwitchChanged');
       next = { ...latest, providerId, model, updatedAt: new Date().toISOString() };
       if (!model) delete next.model;
       if (next.thinking && next.thinking !== 'auto' && !supportsEffort(provider, model, next.thinking))
@@ -2657,35 +2626,38 @@ export class Orchestrator {
     this.store.putRun(run);
     this.emit({ type: 'run', run });
     const seconds = Math.max(1, Math.round(progress.delayMs / 1000));
-    this.publishEvent(
+    const vars = { reason: progress.reason, attempt: progress.attempt, of: progress.of, seconds };
+    this.publishKeyed(
       sessionId,
       run.id,
       'retry',
-      `${taskTitle ? `${taskTitle}: ` : ''}${progress.reason}; tentando de novo (${progress.attempt}/${progress.of}) em ${seconds} s`,
+      taskTitle ? 'event.retryingTask' : 'event.retrying',
+      taskTitle ? { task: taskTitle, ...vars } : vars,
       { attempt: progress.attempt, of: progress.of, delayMs: progress.delayMs, error: progress.error.slice(0, 300) },
     );
   }
   private assertNotUpdating() {
-    if (this.updating)
-      throw Object.assign(new Error('O Adelic está sendo atualizado; tente de novo depois de reiniciar'), {
-        status: 409,
-      });
+    if (this.updating) throw httpError(409, 'orchestrator.updating');
   }
   /**
    * Why an app update cannot start now: any run (starting or active), queue drain, undo,
    * git panel operation, worktree change or after-edit check. Undefined when idle.
    */
   updateBlock(): string | undefined {
-    if (this.shuttingDown) return 'O Adelic está encerrando';
-    if (this.updating) return 'Uma atualização já está em andamento';
-    if (this.active.size || this.starting.size || this.drains.size)
-      return 'Há uma execução em andamento; aguarde ou cancele antes de atualizar';
-    if (this.store.hasExecutingPlans()) return 'Um plano está em execução; aguarde ou pare antes de atualizar';
-    if (this.restoring.size) return 'As alterações de uma execução estão sendo desfeitas';
+    const reason = this.updateBlockReason();
+    return reason && tr(undefined, reason.key);
+  }
+  /** updateBlock as a catalog key, so the refusal can be translated per request. */
+  updateBlockReason(): Translatable | undefined {
+    if (this.shuttingDown) return { key: 'common.shuttingDown' };
+    if (this.updating) return { key: 'orchestrator.updateBlock.updating' };
+    if (this.active.size || this.starting.size || this.drains.size) return { key: 'orchestrator.updateBlock.run' };
+    if (this.store.hasExecutingPlans()) return { key: 'orchestrator.updateBlock.plan' };
+    if (this.restoring.size) return { key: 'orchestrator.updateBlock.restoring' };
     if (this.gitOps.size || this.applying.size || this.worktreeBusy.size)
-      return 'Uma operação do git está em andamento; aguarde';
+      return { key: 'orchestrator.updateBlock.git' };
     if (this.store.listProjects().some((project) => this.hookChecks.running(project.id)))
-      return 'Há verificações de projeto rodando; aguarde';
+      return { key: 'orchestrator.updateBlock.checks' };
     return undefined;
   }
   /**
@@ -2694,8 +2666,8 @@ export class Orchestrator {
    * updateBlock refuses.
    */
   beginUpdate(): () => void {
-    const reason = this.updateBlock();
-    if (reason) throw Object.assign(new Error(reason), { status: 409 });
+    const reason = this.updateBlockReason();
+    if (reason) throw httpError(409, reason.key);
     this.updating = true;
     let released = false;
     return () => {

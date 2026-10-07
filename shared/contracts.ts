@@ -448,7 +448,14 @@ export interface RunEvent {
   runId: string;
   sessionId: string;
   type: 'status' | 'tool' | 'approval' | 'error' | 'retry' | 'fallback' | 'check';
+  /** Persisted in the language the server produced it in (pt-BR); older events have only this. */
   text: string;
+  /**
+   * Catalog key of `text` (shared/event-text.ts) and its variables, on events created since the
+   * server i18n: the UI shows `eventText(textKey, textVars)` in its locale, else `text`.
+   */
+  textKey?: string;
+  textVars?: Record<string, string | number | { key: string }>;
   createdAt: string;
   toolName?: string;
   toolCallId?: string;

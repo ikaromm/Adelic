@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { CheckpointError, checkpointDiff } from '../checkpoints.js';
 import { RestoreRunSchema, RetryRunSchema, parseBody, text } from '../../shared/schemas.js';
 import { forceManualApproval } from './auth.js';
-import { error, errorStatus, failure, message } from './common.js';
+import { error, errorStatus, errorText, failure } from './common.js';
 import type { BackendContext } from './context.js';
 
 const pathQuery = text(4096);
@@ -12,7 +12,7 @@ export function runsRoutes({ store, orchestrator }: BackendContext) {
   const app = Router();
   app.get('/api/runs/:id/changes', (req, res) => {
     const run = store.getRun(req.params.id);
-    if (!run) return error(res, 404, 'Execução não encontrada');
+    if (!run) return error(res, 404, 'common.runNotFound');
     const c = run.checkpoint;
     res.json({
       available: Boolean(c?.available),
@@ -24,30 +24,30 @@ export function runsRoutes({ store, orchestrator }: BackendContext) {
   });
   app.get('/api/runs/:id/diff', async (req, res) => {
     const run = store.getRun(req.params.id);
-    if (!run) return error(res, 404, 'Execução não encontrada');
+    if (!run) return error(res, 404, 'common.runNotFound');
     const path = pathQuery.safeParse(req.query.path);
-    if (!path.success) return error(res, 400, 'path obrigatório');
+    if (!path.success) return error(res, 400, 'validation.requiredField', { field: 'path' });
     try {
       res.json(await checkpointDiff(run.id, run.checkpoint, path.data));
     } catch (e) {
-      error(res, e instanceof CheckpointError ? e.status : errorStatus(e) || 500, message(e));
+      error(res, e instanceof CheckpointError ? e.status : errorStatus(e) || 500, e as Error);
     }
   });
   app.post('/api/runs/:id/restore', async (req, res) => {
-    const parsed = parseBody(RestoreRunSchema, req.body, 'confirm: true é obrigatório para desfazer alterações');
+    const parsed = parseBody(RestoreRunSchema, req.body, 'validation.confirm.restore', req.locale);
     if (!parsed.ok) return error(res, 400, parsed.message);
     try {
       res.json(await orchestrator.restoreRun(req.params.id));
     } catch (e) {
       const status = e instanceof CheckpointError ? e.status : errorStatus(e) || 500;
       const conflicts = e instanceof CheckpointError ? e.conflicts : undefined;
-      res.status(status).json({ error: message(e), ...(conflicts ? { conflicts } : {}) });
+      res.status(status).json({ error: errorText(res, e), ...(conflicts ? { conflicts } : {}) });
     }
   });
   // "Tentar de novo" and "Tentar com outro modelo": the same request as a new run, optionally
   // after switching the conversation to another provider/model (validated against the catalog).
   app.post('/api/runs/:id/retry', async (req, res) => {
-    const parsed = parseBody(RetryRunSchema, req.body, 'Pedido inválido');
+    const parsed = parseBody(RetryRunSchema, req.body, 'common.invalidRequest', req.locale);
     if (!parsed.ok) return error(res, 400, parsed.message);
     const { overrideLimit, ...target } = parsed.data;
     try {

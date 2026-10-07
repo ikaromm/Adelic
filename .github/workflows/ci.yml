@@ -117,6 +117,14 @@ jobs:
       - name: Install Playwright Chromium
         run: npx playwright install --with-deps chromium
 
+      # Project checks and the terminal run in the real bubblewrap sandbox (never unsandboxed
+      # in production), so the E2E runner needs it and unprivileged user namespaces.
+      - name: Install bubblewrap
+        run: |
+          sudo apt-get install -y -qq bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          bwrap --ro-bind / / true && echo "bubblewrap ok"
+
       - name: E2E (scripted provider, temporary data)
         run: npm run test:e2e
 

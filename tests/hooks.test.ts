@@ -284,7 +284,9 @@ describe.skipIf(!existsSync('/usr/bin/bwrap'))('checks inside the real bubblewra
 
     const controller = new AbortController();
     const marker = `adelic-hook-${process.pid}-${Date.now()}`;
-    const pending = runCheck(check(`exec -a ${marker} sleep 300`, { timeoutSec: 60 }), dir, {
+    // `exec -a` is a bash extension (Debian/Ubuntu's /bin/sh is dash): the marker is an argument
+    // of a child `sh -c` instead, which `pgrep -f` matches on any POSIX shell.
+    const pending = runCheck(check(`sh -c 'sleep 300; :' ${marker}`, { timeoutSec: 60 }), dir, {
       sandbox: 'workspace-write',
       signal: controller.signal,
     });

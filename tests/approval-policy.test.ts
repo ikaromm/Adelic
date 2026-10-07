@@ -49,14 +49,14 @@ describe('classifyApproval', () => {
   it('leaves destructive, compound and expansion syntax pending', async () => {
     for (const c of [
       'rm note.txt',
-      'pwd; id',
+      'pwd; rm note.txt',
       'pwd $(id)',
       'cat note.txt > copy',
       'whoami &',
       'FOO=bar pwd',
       'bash -lc pwd',
       'bash -lc "uname -a"',
-      '/usr/bin/bash -c "uname -a; id"',
+      '/usr/bin/bash -c "uname -a; rm note.txt"',
       '/usr/bin/bash -c "rm note.txt"',
       '/usr/bin/bash -c "uname -a" extra',
       '/usr/bin/bash -i -c "uname -a"',
@@ -79,10 +79,13 @@ describe('classifyApproval', () => {
       'rg --no-config --pre=evil pattern README',
       'rg --no-config --hidden pattern README',
       'rg --no-config --files pattern README',
-      'rg --no-config pattern',
       'rg --no-config -z pattern README',
     ])
       expect((await run(c)).decision).toBe('pending');
+    // Recursive search of the cwd is automatic when the tree holds no secret-named entry.
+    expect((await run('rg --no-config pattern')).decision).toBe('auto');
+    await writeFile(path.join(root, 'sub', 'id_ed25519'), 'synthetic');
+    expect((await run('rg --no-config pattern')).decision).toBe('pending');
   });
   it('preserves empty argv tokens so rg cannot skip a sensitive positional file', async () => {
     await writeFile(path.join(root, '.env'), 'synthetic-secret');
@@ -100,11 +103,15 @@ describe('classifyApproval', () => {
       'cat *.txt',
       'cat "[note].txt"',
       'cat nested',
-      'rg --no-config x nested',
       'cat .env-public',
       'cat .env-alias',
     ])
       expect((await run(c)).decision).toBe('pending');
+    // A recursive rg into a directory walks it for secret names first.
+    expect((await run('rg --no-config x nested')).decision).toBe('auto');
+    await writeFile(path.join(root, 'nested', '.env'), 'synthetic');
+    await writeFile(path.join(root, 'nested', '.ignore'), '!.env\n');
+    expect((await run('rg --no-config x nested')).decision).toBe('pending');
   });
   it('manual, no-tools, missing fields and shadowed executable fail closed', async () => {
     expect((await run('pwd', { mode: 'manual' })).decision).toBe('pending');

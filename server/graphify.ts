@@ -56,7 +56,8 @@ async function fingerprint(root: string) {
   return hash.digest('hex');
 }
 
-async function findGraphify() {
+/** The Graphify CLI Adelic runs and suggests to agents; undefined when none is installed. */
+export async function findGraphify() {
   const candidates = [
     join(homedir(), '.local/bin/graphify'),
     ...String(process.env.PATH || '')
@@ -184,6 +185,14 @@ export class GraphifyService {
       'graphs',
       createHash('sha256').update(resolve(project.path)).digest('hex').slice(0, 32),
     );
+  }
+  /**
+   * Trusted paths for the safe-command classifier (docs/specs/safe-command-approvals.md): the
+   * binary Adelic suggests and this project's own graph directory. Undefined without Graphify.
+   */
+  async approvalPaths(project: Project): Promise<{ binary: string; graphsRoot: string } | undefined> {
+    const binary = await this.binaryResolver();
+    return binary ? { binary, graphsRoot: this.outputRoot(project) } : undefined;
   }
   graphPath(project: Project) {
     return join(this.outputRoot(project), 'graphify-out/graph.json');
@@ -365,6 +374,7 @@ export class GraphifyService {
 }
 
 export const graphify = new GraphifyService();
+
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 export async function graphifyContext(
   project: Project,

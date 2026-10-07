@@ -14,7 +14,7 @@ import {
 import type { GitCommitInfo, GitFileArea, GitFileEntry, GitStatus, Project } from '../../shared/contracts';
 import { GIT_COMMIT_MESSAGE_MAX } from '../../shared/schemas';
 import { api } from '../api';
-import { relativeTime } from '../format';
+import { useI18n, type MessageKey } from '../i18n';
 import { diffLines } from '../run-activity';
 
 type RepoStatus = Extract<GitStatus, { repo: true }>;
@@ -23,21 +23,23 @@ type Confirm =
   | { kind: 'discard'; file: GitFileEntry; mixed: boolean }
   | { kind: 'push'; remote: string; branch: string; remoteBranch: string };
 
-const AREAS: { area: GitFileArea; title: string }[] = [
-  { area: 'staged', title: 'Staged' },
-  { area: 'unstaged', title: 'Não staged' },
-  { area: 'untracked', title: 'Não rastreados' },
+const AREAS: { area: GitFileArea; title: MessageKey }[] = [
+  { area: 'staged', title: 'git.area.staged' },
+  { area: 'unstaged', title: 'git.area.unstaged' },
+  { area: 'untracked', title: 'git.area.untracked' },
 ];
-const LETTER_NAME: Record<string, string> = {
-  M: 'modificado',
-  A: 'adicionado',
-  D: 'removido',
-  R: 'renomeado',
-  C: 'copiado',
-  T: 'tipo alterado',
-  U: 'em conflito',
-  '?': 'não rastreado',
+const LETTER_NAME: Record<string, MessageKey> = {
+  M: 'git.letter.modified',
+  A: 'git.letter.added',
+  D: 'git.letter.deleted',
+  R: 'git.letter.renamed',
+  C: 'git.letter.copied',
+  T: 'git.letter.typeChanged',
+  U: 'git.letter.conflicted',
+  '?': 'git.letter.untracked',
 };
+/** The server's "not a git repository" reason (pt-BR, or English once the server translates it). */
+const NOT_GIT_REASON = /^(não é um repositório git|is not a git repository)$/i;
 const keyOf = (f: Pick<GitFileEntry, 'path' | 'area'>) => `${f.area}:${f.path}`;
 
 /** Whether the project folder is inside a git work tree (shows the "Git" entry points). */
@@ -59,6 +61,7 @@ export function useGitRepo(projectId: string | undefined) {
 
 /** Git page of a project: status, diffs, stage, commit, push and PR link (docs/specs/git-panel.md). */
 export function GitPanel({ project, onProjectUpdated }: { project: Project; onProjectUpdated: (p: Project) => void }) {
+  const { t, tRich, fmt } = useI18n();
   const [status, setStatus] = useState<GitStatus | null>(null);
   const [commits, setCommits] = useState<GitCommitInfo[]>([]);
   const [error, setError] = useState('');
@@ -133,7 +136,7 @@ export function GitPanel({ project, onProjectUpdated }: { project: Project; onPr
     setError('');
     try {
       const { target } = await api.git.pushTarget(project.id);
-      if (!target) setError('A branch atual não tem upstream.');
+      if (!target) setError(t('git.noUpstreamError'));
       else setConfirm({ kind: 'push', ...target });
     } catch (e) {
       setError((e as Error).message);
@@ -143,18 +146,18 @@ export function GitPanel({ project, onProjectUpdated }: { project: Project; onPr
   const heading = (
     <div className="page-heading">
       <div>
-        <div className="eyebrow">PROJETO · {project.name}</div>
+        <div className="eyebrow">{t('git.eyebrow', { project: project.name })}</div>
         <h1>Git</h1>
-        <p>Alterações, commits e envio do repositório deste projeto.</p>
+        <p>{t('git.subtitle')}</p>
       </div>
       <button
         type="button"
         className="secondary-button"
         onClick={() => void refresh()}
         disabled={working}
-        aria-label="Atualizar estado do git"
+        aria-label={t('git.refreshLabel')}
       >
-        <RefreshCw size={14} /> Atualizar
+        <RefreshCw size={14} /> {t('git.refresh')}
       </button>
     </div>
   );
@@ -168,7 +171,7 @@ export function GitPanel({ project, onProjectUpdated }: { project: Project; onPr
           </div>
         ) : (
           <div className="run-diff-loading">
-            <LoaderCircle className="spin" size={14} /> Lendo o repositório…
+            <LoaderCircle className="spin" size={14} /> {t('git.loading')}
           </div>
         )}
       </section>
@@ -177,7 +180,9 @@ export function GitPanel({ project, onProjectUpdated }: { project: Project; onPr
     return (
       <section className="page-content git-page">
         {heading}
-        <div className="inline-notice">A pasta do projeto {status.reason}.</div>
+        <div className="inline-notice">
+          {NOT_GIT_REASON.test(status.reason) ? t('git.notRepo') : t('git.notRepoReason', { reason: status.reason })}
+        </div>
       </section>
     );
 
@@ -190,32 +195,34 @@ export function GitPanel({ project, onProjectUpdated }: { project: Project; onPr
     <section className="page-content git-page">
       {heading}
       <div className="git-layout">
-        <div className="git-branch-row" aria-label="Branch atual">
+        <div className="git-branch-row" aria-label={t('git.branchLabel')}>
           <GitBranch size={15} aria-hidden="true" />
-          <strong>{repo.branch ?? `HEAD destacado (${repo.head ?? 'sem commits'})`}</strong>
+          <strong>
+            {repo.branch ?? (repo.head ? t('git.detached', { head: repo.head }) : t('git.detachedNoCommits'))}
+          </strong>
           {repo.upstream ? (
-            <span className="git-upstream" title="Calculado com as refs locais, sem buscar o remoto">
+            <span className="git-upstream" title={t('git.upstreamTitle')}>
               {repo.upstream} · ↑{repo.ahead ?? 0} ↓{repo.behind ?? 0}
             </span>
           ) : (
-            <span className="git-upstream">sem upstream</span>
+            <span className="git-upstream">{t('git.noUpstream')}</span>
           )}
           <div className="git-branch-actions">
             {repo.upstream && (
               <button type="button" className="secondary-button" disabled={locked} onClick={() => void askPush()}>
-                <ArrowUpFromLine size={14} /> Enviar (git push)
+                <ArrowUpFromLine size={14} /> {t('git.push')}
               </button>
             )}
             {repo.branch && (
               <button type="button" className="secondary-button" onClick={() => void openPullRequest()}>
-                <GitPullRequest size={14} /> Abrir pull request
+                <GitPullRequest size={14} /> {t('git.openPullRequest')}
               </button>
             )}
           </div>
         </div>
         {repo.blocked && (
           <div className="inline-notice git-blocked" role="status">
-            {repo.blocked}. Alterações pelo painel ficam bloqueadas até lá.
+            {t('git.blocked', { reason: repo.blocked })}
           </div>
         )}
         {error && (
@@ -229,8 +236,8 @@ export function GitPanel({ project, onProjectUpdated }: { project: Project; onPr
           </div>
         )}
 
-        <section className="settings-card git-changes" aria-label="Alterações">
-          {repo.files.length === 0 && <p className="git-empty">Nenhuma alteração. A árvore de trabalho está limpa.</p>}
+        <section className="settings-card git-changes" aria-label={t('git.changes')}>
+          {repo.files.length === 0 && <p className="git-empty">{t('git.clean')}</p>}
           {AREAS.map(({ area, title }) => {
             const list = repo.files.filter((f) => f.area === area);
             if (!list.length) return null;
@@ -239,13 +246,13 @@ export function GitPanel({ project, onProjectUpdated }: { project: Project; onPr
               <div key={area} className="git-group">
                 <div className="git-group-heading">
                   <h2>
-                    {title} <span className="git-count">{list.length}</span>
+                    {t(title)} <span className="git-count">{list.length}</span>
                   </h2>
                   <button
                     type="button"
                     className="ghost-button"
                     disabled={locked}
-                    aria-label={isStaged ? 'Tirar tudo do stage' : `Adicionar tudo ao stage (${title})`}
+                    aria-label={isStaged ? t('git.unstageAll') : t('git.stageAll', { area: t(title) })}
                     onClick={() =>
                       void act(() =>
                         isStaged
@@ -254,7 +261,7 @@ export function GitPanel({ project, onProjectUpdated }: { project: Project; onPr
                       )
                     }
                   >
-                    {isStaged ? <Minus size={14} /> : <Plus size={14} />} Tudo
+                    {isStaged ? <Minus size={14} /> : <Plus size={14} />} {t('git.all')}
                   </button>
                 </div>
                 <ul className="git-files">
@@ -269,7 +276,10 @@ export function GitPanel({ project, onProjectUpdated }: { project: Project; onPr
                             type="button"
                             className="git-file"
                             aria-expanded={open}
-                            aria-label={`${LETTER_NAME[file.letter] ?? file.letter} ${file.path}`}
+                            aria-label={t('git.fileLabel', {
+                              status: LETTER_NAME[file.letter] ? t(LETTER_NAME[file.letter]) : file.letter,
+                              path: file.path,
+                            })}
                             onClick={() => void toggleDiff(file)}
                             title={file.origPath ? `${file.origPath} → ${file.path}` : file.path}
                           >
@@ -289,8 +299,8 @@ export function GitPanel({ project, onProjectUpdated }: { project: Project; onPr
                               type="button"
                               className="icon-button"
                               disabled={locked}
-                              aria-label={`Descartar ${file.path}`}
-                              title="Descartar alterações"
+                              aria-label={t('git.discardFile', { path: file.path })}
+                              title={t('git.discardChanges')}
                               onClick={() => setConfirm({ kind: 'discard', file, mixed: stagedPaths.has(file.path) })}
                             >
                               <Trash2 size={14} />
@@ -300,8 +310,12 @@ export function GitPanel({ project, onProjectUpdated }: { project: Project; onPr
                             type="button"
                             className="icon-button"
                             disabled={locked}
-                            aria-label={isStaged ? `Tirar do stage ${file.path}` : `Adicionar ao stage ${file.path}`}
-                            title={isStaged ? 'Tirar do stage' : 'Adicionar ao stage'}
+                            aria-label={
+                              isStaged
+                                ? t('git.unstageFile', { path: file.path })
+                                : t('git.stageFile', { path: file.path })
+                            }
+                            title={isStaged ? t('git.unstage') : t('git.stage')}
                             onClick={() =>
                               void act(() =>
                                 isStaged
@@ -321,48 +335,47 @@ export function GitPanel({ project, onProjectUpdated }: { project: Project; onPr
               </div>
             );
           })}
-          {repo.omitted ? <small className="run-diff-note">Mais {repo.omitted} alterações não listadas.</small> : null}
+          {repo.omitted ? <small className="run-diff-note">{t('git.omitted', { count: repo.omitted })}</small> : null}
         </section>
 
         <section className="settings-card git-commit" aria-label="Commit">
           <label className="git-commit-label" htmlFor="git-commit-message">
-            Mensagem do commit
+            {t('git.commitMessage')}
           </label>
           <textarea
             id="git-commit-message"
             value={message}
             maxLength={GIT_COMMIT_MESSAGE_MAX}
             rows={3}
-            placeholder="Descreva as alterações staged"
+            placeholder={t('git.commitPlaceholder')}
             onChange={(e) => setMessage(e.target.value)}
           />
           <div className="git-commit-actions">
             <small>
-              {repo.runHooks ? 'Hooks do git ativados para commits.' : 'Commits sem hooks do git.'} {message.length}/
-              {GIT_COMMIT_MESSAGE_MAX}
+              {repo.runHooks ? t('git.hooksOn') : t('git.hooksOff')} {message.length}/{GIT_COMMIT_MESSAGE_MAX}
             </small>
             <button
               type="button"
               className="primary-button"
               disabled={locked || !trimmed || !staged.length}
-              title={!staged.length ? 'Adicione arquivos ao stage primeiro' : undefined}
+              title={!staged.length ? t('git.stageFirst') : undefined}
               onClick={() =>
                 void act(async () => {
                   const { hash } = await api.git.commit(project.id, message);
                   setMessage('');
-                  setNotice(`Commit ${hash.slice(0, 7)} criado.`);
+                  setNotice(t('git.committed', { hash: hash.slice(0, 7) }));
                 })
               }
             >
-              <GitCommitHorizontal size={14} /> Fazer commit
+              <GitCommitHorizontal size={14} /> {t('git.commit')}
             </button>
           </div>
         </section>
 
-        <section className="settings-card git-log" aria-label="Commits recentes">
-          <h2>Commits recentes</h2>
+        <section className="settings-card git-log" aria-label={t('git.recentCommits')}>
+          <h2>{t('git.recentCommits')}</h2>
           {commits.length === 0 ? (
-            <p className="git-empty">Nenhum commit ainda.</p>
+            <p className="git-empty">{t('git.noCommits')}</p>
           ) : (
             <ol>
               {commits.map((c) => (
@@ -370,7 +383,7 @@ export function GitPanel({ project, onProjectUpdated }: { project: Project; onPr
                   <code title={c.hash}>{c.short}</code>
                   <span className="git-log-subject">{c.subject}</span>
                   <span className="git-log-meta">
-                    {c.author} · <time dateTime={c.date}>{relativeTime(c.date)}</time>
+                    {c.author} · <time dateTime={c.date}>{fmt.relative(c.date)}</time>
                   </span>
                 </li>
               ))}
@@ -378,21 +391,18 @@ export function GitPanel({ project, onProjectUpdated }: { project: Project; onPr
           )}
         </section>
 
-        <section className="settings-card git-settings" aria-label="Configurações do git">
+        <section className="settings-card git-settings" aria-label={t('git.settings')}>
           <div className="setting-row">
             <div>
-              <strong>Executar hooks do git (pre-commit etc.) ao fazer commit</strong>
-              <span>
-                Os hooks são programas que ficam no próprio repositório e rodam fora do sandbox. Um agente que pode
-                escrever no projeto pode alterá-los. Deixe desligado se não confia neles.
-              </span>
+              <strong>{t('git.hooks.title')}</strong>
+              <span>{t('git.hooks.detail')}</span>
             </div>
             <button
               type="button"
               className={`toggle ${repo.runHooks ? 'on' : ''}`}
               role="switch"
               aria-checked={repo.runHooks}
-              aria-label="Executar hooks do git ao fazer commit"
+              aria-label={t('git.hooks.label')}
               disabled={working}
               onClick={() => setRunHooks(!repo.runHooks)}
             >
@@ -403,8 +413,10 @@ export function GitPanel({ project, onProjectUpdated }: { project: Project; onPr
       </div>
       {confirm && (
         <ConfirmDialog
-          title={confirm.kind === 'push' ? 'Enviar commits?' : 'Descartar alterações?'}
-          action={confirm.kind === 'push' ? 'Enviar' : 'Descartar'}
+          title={confirm.kind === 'push' ? t('git.confirm.pushTitle') : t('git.confirm.discardTitle')}
+          action={confirm.kind === 'push' ? t('git.confirm.push') : t('git.confirm.discard')}
+          closeLabel={t('git.close')}
+          cancelLabel={t('git.cancel')}
           danger={confirm.kind === 'discard'}
           busy={working}
           onCancel={() => setConfirm(null)}
@@ -415,32 +427,30 @@ export function GitPanel({ project, onProjectUpdated }: { project: Project; onPr
                 current.kind === 'push'
                   ? api.git.push(project.id)
                   : api.git.discard(project.id, [current.file.path], current.mixed),
-              current.kind === 'push' ? `Enviado para ${current.remote}/${current.remoteBranch}.` : undefined,
+              current.kind === 'push'
+                ? t('git.pushed', { target: `${current.remote}/${current.remoteBranch}` })
+                : undefined,
             ).then(() => setConfirm(null));
           }}
         >
           {confirm.kind === 'push' ? (
             <p>
-              Roda <code>git push</code> da branch <code>{confirm.branch}</code> para{' '}
-              <code>
-                {confirm.remote}/{confirm.remoteBranch}
-              </code>
-              , sem forçar. Se o remoto pedir autenticação, o envio falha e o erro aparece aqui.
+              {tRich('git.confirm.pushDetail', {
+                command: <code>git push</code>,
+                branch: <code>{confirm.branch}</code>,
+                target: (
+                  <code>
+                    {confirm.remote}/{confirm.remoteBranch}
+                  </code>
+                ),
+              })}
             </p>
           ) : confirm.file.area === 'untracked' ? (
-            <p>
-              O arquivo <code>{confirm.file.path}</code> não é rastreado e será apagado do disco. Não dá para desfazer.
-            </p>
+            <p>{tRich('git.confirm.discardUntracked', { path: <code>{confirm.file.path}</code> })}</p>
           ) : (
             <>
-              <p>
-                <code>{confirm.file.path}</code> volta ao conteúdo do índice; as alterações não staged são perdidas.
-              </p>
-              {confirm.mixed && (
-                <p className="git-warning">
-                  Este arquivo também tem alterações staged. Elas são mantidas; só o que não está no stage é descartado.
-                </p>
-              )}
+              <p>{tRich('git.confirm.discardTracked', { path: <code>{confirm.file.path}</code> })}</p>
+              {confirm.mixed && <p className="git-warning">{t('git.confirm.discardMixed')}</p>}
             </>
           )}
         </ConfirmDialog>
@@ -450,17 +460,18 @@ export function GitPanel({ project, onProjectUpdated }: { project: Project; onPr
 }
 
 function DiffView({ path, diff }: { path: string; diff: Diff | undefined }) {
+  const { t } = useI18n();
   if (!diff)
     return (
       <div className="run-diff-loading">
-        <LoaderCircle className="spin" size={12} /> Carregando diferenças…
+        <LoaderCircle className="spin" size={12} /> {t('git.diff.loading')}
       </div>
     );
   if ('error' in diff) return <div className="form-error">{diff.error}</div>;
-  if (!diff.diff) return <small className="run-diff-note">Sem diferenças de texto para mostrar.</small>;
+  if (!diff.diff) return <small className="run-diff-note">{t('git.diff.empty')}</small>;
   return (
     <>
-      <pre className="run-diff" aria-label={`Diferenças em ${path}`}>
+      <pre className="run-diff" aria-label={t('git.diff.label', { path })}>
         {diffLines(diff.diff).map((line, index) => (
           <span key={index} className={`diff-${line.kind}`}>
             {line.text}
@@ -468,7 +479,7 @@ function DiffView({ path, diff }: { path: string; diff: Diff | undefined }) {
           </span>
         ))}
       </pre>
-      {diff.truncated && <small className="run-diff-note">Diferenças cortadas em 200 KB.</small>}
+      {diff.truncated && <small className="run-diff-note">{t('git.diff.truncated')}</small>}
     </>
   );
 }
@@ -478,6 +489,8 @@ function ConfirmDialog({
   action,
   danger,
   busy,
+  closeLabel,
+  cancelLabel,
   children,
   onCancel,
   onConfirm,
@@ -486,6 +499,8 @@ function ConfirmDialog({
   action: string;
   danger: boolean;
   busy: boolean;
+  closeLabel: string;
+  cancelLabel: string;
   children: ReactNode;
   onCancel: () => void;
   onConfirm: () => void;
@@ -514,7 +529,7 @@ function ConfirmDialog({
           <div>
             <h2 id="git-confirm-title">{title}</h2>
           </div>
-          <button type="button" className="icon-button" aria-label="Fechar" onClick={onCancel} disabled={busy}>
+          <button type="button" className="icon-button" aria-label={closeLabel} onClick={onCancel} disabled={busy}>
             <X size={17} />
           </button>
         </div>
@@ -523,7 +538,7 @@ function ConfirmDialog({
         </div>
         <div className="modal-actions">
           <button ref={cancelRef} type="button" className="secondary-button" onClick={onCancel} disabled={busy}>
-            Cancelar
+            {cancelLabel}
           </button>
           <button
             type="button"

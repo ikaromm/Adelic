@@ -3,13 +3,18 @@ import { FileDiff, GitBranch, GitMerge, LoaderCircle, Trash2, X } from 'lucide-r
 import type { FileChange, Session, WorktreeStatus } from '../../shared/contracts';
 import { api, type ApiError } from '../api';
 import { diffLines } from '../run-activity';
+import { t as translate, useI18n, type MessageKey } from '../i18n';
 
 // Isolated git worktree per conversation (docs/specs/worktrees.md).
 
-const statusName: Record<FileChange['status'], string> = { added: 'criado', modified: 'alterado', deleted: 'removido' };
+const statusName: Record<FileChange['status'], MessageKey> = {
+  added: 'worktree.status.added',
+  modified: 'worktree.status.modified',
+  deleted: 'worktree.status.deleted',
+};
 
 export function changedFilesLabel(count: number, base: string) {
-  return `${count === 1 ? '1 arquivo alterado' : `${count} arquivos alterados`} em relação a ${base.slice(0, 7)}`;
+  return translate('worktree.changedFiles', { count, base: base.slice(0, 7) });
 }
 
 /**
@@ -27,6 +32,7 @@ export function WorktreePanel({
   running: boolean;
   onSession: (session: Session) => void;
 }) {
+  const { t } = useI18n();
   const [info, setInfo] = useState<{ id: string; status: WorktreeStatus } | null>(null);
   const [working, setWorking] = useState<'enable' | 'apply' | 'discard' | null>(null);
   const [message, setMessage] = useState<{ kind: 'error' | 'done'; text: string; files?: string[] } | null>(null);
@@ -79,7 +85,7 @@ export function WorktreePanel({
       setInfo({ id: sessionId, status: result.status });
       setMessage({
         kind: 'done',
-        text: `Alterações aplicadas em ${result.branch} (merge ${result.commit.slice(0, 7)}).`,
+        text: t('worktree.applied', { branch: result.branch, commit: result.commit.slice(0, 7) }),
       });
     } catch (e) {
       fail(e);
@@ -99,8 +105,8 @@ export function WorktreePanel({
       setMessage({
         kind: 'done',
         text: result.branchDeleted
-          ? `Cópia isolada descartada; o branch ${result.branch} foi apagado.`
-          : `Cópia isolada descartada; o branch ${result.branch} continua no repositório.`,
+          ? t('worktree.discardedDeleted', { branch: result.branch })
+          : t('worktree.discardedKept', { branch: result.branch }),
       });
     } catch (e) {
       fail(e);
@@ -134,11 +140,11 @@ export function WorktreePanel({
     // Shown only for git repositories (the toggle explains why it is disabled during a run).
     if (!status?.available && !feedback) return null;
     return (
-      <section className="worktree-panel" aria-label="Cópia isolada">
+      <section className="worktree-panel" aria-label={t('worktree.label')}>
         {status?.available && (
-          <label className="worktree-toggle" title={running ? 'Aguarde a execução atual terminar' : undefined}>
+          <label className="worktree-toggle" title={running ? t('worktree.waitRun') : undefined}>
             <input type="checkbox" role="switch" checked={false} disabled={busy} onChange={() => void enable()} />
-            <span>Trabalhar em uma cópia isolada (worktree)</span>
+            <span>{t('worktree.enable')}</span>
             {working === 'enable' && <LoaderCircle className="spin" size={13} aria-hidden="true" />}
           </label>
         )}
@@ -151,19 +157,19 @@ export function WorktreePanel({
   const files = status?.files ?? [];
   const count = files.length + (status?.omitted ?? 0);
   return (
-    <section className="worktree-panel enabled" aria-label="Cópia isolada">
+    <section className="worktree-panel enabled" aria-label={t('worktree.label')}>
       <div className="worktree-row">
-        <span className="worktree-branch" title={`Pasta: ${worktree.path}`}>
+        <span className="worktree-branch" title={t('worktree.folder', { path: worktree.path })}>
           <GitBranch size={13} aria-hidden="true" />
           <code>{worktree.branch}</code>
         </span>
         <span className="worktree-count">
           {status
             ? status.exists === false
-              ? 'A pasta da cópia não existe mais'
-              : changedFilesLabel(count, worktree.base)
-            : 'Carregando…'}
-          {status?.merged && !status.dirty ? ' · aplicado' : ''}
+              ? t('worktree.missing')
+              : t('worktree.changedFiles', { count, base: worktree.base.slice(0, 7) })
+            : t('worktree.loading')}
+          {status?.merged && !status.dirty ? t('worktree.appliedSuffix') : ''}
         </span>
         <div className="worktree-actions">
           <button
@@ -173,13 +179,13 @@ export function WorktreePanel({
             disabled={!count}
             onClick={() => setOpen((value) => !value)}
           >
-            <FileDiff size={14} aria-hidden="true" /> Ver alterações
+            <FileDiff size={14} aria-hidden="true" /> {t('worktree.viewChanges')}
           </button>
           <button
             type="button"
             className="secondary-button"
             disabled={busy || Boolean(status?.applyBlocked) || !status}
-            title={running ? 'Aguarde a execução atual terminar' : status?.applyBlocked}
+            title={running ? t('worktree.waitRun') : status?.applyBlocked}
             onClick={() => {
               setMessage(null);
               setConfirm('apply');
@@ -190,19 +196,19 @@ export function WorktreePanel({
             ) : (
               <GitMerge size={14} aria-hidden="true" />
             )}
-            Aplicar no projeto
+            {t('worktree.apply')}
           </button>
           <button
             type="button"
             className="ghost-button danger-text"
             disabled={busy}
-            title={running ? 'Aguarde a execução atual terminar' : undefined}
+            title={running ? t('worktree.waitRun') : undefined}
             onClick={() => {
               setMessage(null);
               setConfirm('discard');
             }}
           >
-            <Trash2 size={14} aria-hidden="true" /> Descartar worktree
+            <Trash2 size={14} aria-hidden="true" /> {t('worktree.discard')}
           </button>
         </div>
       </div>
@@ -236,6 +242,7 @@ export function WorktreePanel({
 }
 
 function WorktreeFiles({ sessionId, files, omitted }: { sessionId: string; files: FileChange[]; omitted?: number }) {
+  const { t } = useI18n();
   const [selected, setSelected] = useState<string | null>(null);
   const [diffs, setDiffs] = useState<Record<string, { diff: string; truncated: boolean } | { error: string }>>({});
   const toggle = async (path: string) => {
@@ -263,11 +270,11 @@ function WorktreeFiles({ sessionId, files, omitted }: { sessionId: string; files
                 aria-expanded={open}
                 onClick={() => void toggle(file.path)}
               >
-                <span className={`run-change-status ${file.status}`}>{statusName[file.status]}</span>
+                <span className={`run-change-status ${file.status}`}>{t(statusName[file.status])}</span>
                 <code>{file.path}</code>
                 <span className="run-change-counts">
                   {file.binary ? (
-                    'binário'
+                    t('worktree.binary')
                   ) : (
                     <>
                       <span className="add">+{file.additions}</span> <span className="del">−{file.deletions}</span>
@@ -278,13 +285,13 @@ function WorktreeFiles({ sessionId, files, omitted }: { sessionId: string; files
               {open &&
                 (!diff ? (
                   <div className="run-diff-loading">
-                    <LoaderCircle className="spin" size={12} /> Carregando diferenças…
+                    <LoaderCircle className="spin" size={12} /> {t('worktree.diff.loading')}
                   </div>
                 ) : 'error' in diff ? (
                   <div className="form-error">{diff.error}</div>
                 ) : (
                   <>
-                    <pre className="run-diff" aria-label={`Diferenças em ${file.path}`}>
+                    <pre className="run-diff" aria-label={t('worktree.diff.label', { path: file.path })}>
                       {diffLines(diff.diff).map((line, index) => (
                         <span key={index} className={`diff-${line.kind}`}>
                           {line.text}
@@ -292,18 +299,14 @@ function WorktreeFiles({ sessionId, files, omitted }: { sessionId: string; files
                         </span>
                       ))}
                     </pre>
-                    {diff.truncated && <small className="run-diff-note">Diferenças cortadas em 200 KB.</small>}
+                    {diff.truncated && <small className="run-diff-note">{t('worktree.diff.truncated')}</small>}
                   </>
                 ))}
             </li>
           );
         })}
       </ul>
-      {omitted ? (
-        <small className="run-diff-note">
-          Mais {omitted} {omitted === 1 ? 'arquivo' : 'arquivos'} não listados.
-        </small>
-      ) : null}
+      {omitted ? <small className="run-diff-note">{t('worktree.omitted', { count: omitted })}</small> : null}
     </>
   );
 }
@@ -323,6 +326,7 @@ function Dialog({
   children: ReactNode;
   actions: ReactNode;
 }) {
+  const { t } = useI18n();
   const cancelRef = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     cancelRef.current?.focus();
@@ -352,7 +356,13 @@ function Dialog({
           <div>
             <h2 id="worktree-dialog-title">{title}</h2>
           </div>
-          <button type="button" className="icon-button" aria-label="Fechar" onClick={onCancel} disabled={working}>
+          <button
+            type="button"
+            className="icon-button"
+            aria-label={t('worktree.close')}
+            onClick={onCancel}
+            disabled={working}
+          >
             <X size={17} />
           </button>
         </div>
@@ -361,7 +371,7 @@ function Dialog({
         </div>
         <div className="modal-actions">
           <button ref={cancelRef} type="button" className="secondary-button" onClick={onCancel} disabled={working}>
-            Cancelar
+            {t('worktree.cancel')}
           </button>
           {actions}
         </div>
@@ -387,35 +397,36 @@ function ApplyDialog({
   onCancel: () => void;
   onConfirm: () => void;
 }) {
+  const { t, tRich } = useI18n();
+  const vars = {
+    branch: <code>{branch}</code>,
+    command: <code>git merge --no-ff</code>,
+    main: <code>{mainBranch}</code>,
+  };
+  const key: MessageKey = dirty
+    ? mainBranch
+      ? 'worktree.applyDialog.dirtyInto'
+      : 'worktree.applyDialog.dirty'
+    : mainBranch
+      ? 'worktree.applyDialog.cleanInto'
+      : 'worktree.applyDialog.clean';
   return (
     <Dialog
-      title="Aplicar no projeto?"
+      title={t('worktree.applyDialog.title')}
       icon={<GitMerge size={17} />}
       working={working}
       onCancel={onCancel}
       actions={
         <button type="button" className="primary-button" onClick={onConfirm} disabled={working}>
           {working ? <LoaderCircle className="spin" size={14} /> : <GitMerge size={14} />}
-          Aplicar
+          {t('worktree.applyDialog.confirm')}
         </button>
       }
     >
       <p>
-        {dirty ? 'As alterações pendentes da cópia viram um commit no branch ' : 'O branch '}
-        <code>{branch}</code>
-        {dirty ? ', que' : ''} entra no projeto com <code>git merge --no-ff</code>
-        {mainBranch ? (
-          <>
-            {' '}
-            em <code>{mainBranch}</code>
-          </>
-        ) : null}
-        . {count === 1 ? '1 arquivo alterado.' : `${count} arquivos alterados.`}
+        {tRich(key, vars)} {t('worktree.applyDialog.files', { count })}
       </p>
-      <p>
-        Só acontece se o projeto estiver sem alterações não commitadas e em um branch. Se houver conflito, o merge é
-        desfeito e o projeto fica como estava. Nada é guardado no stash nem descartado.
-      </p>
+      <p>{t('worktree.applyDialog.safety')}</p>
     </Dialog>
   );
 }
@@ -433,34 +444,28 @@ function DiscardDialog({
   onCancel: () => void;
   onConfirm: (deleteBranch: boolean) => void;
 }) {
+  const { t, tRich } = useI18n();
   const [deleteBranch, setDeleteBranch] = useState(false);
   return (
     <Dialog
-      title="Descartar a cópia isolada?"
+      title={t('worktree.discardDialog.title')}
       icon={<Trash2 size={17} />}
       working={working}
       onCancel={onCancel}
       actions={
         <button type="button" className="danger-button" onClick={() => onConfirm(deleteBranch)} disabled={working}>
           {working ? <LoaderCircle className="spin" size={14} /> : <Trash2 size={14} />}
-          Descartar
+          {t('worktree.discardDialog.confirm')}
         </button>
       }
     >
-      <p>
-        A pasta da cópia é apagada, com alterações não commitadas. As próximas mensagens voltam a trabalhar na pasta do
-        projeto.
-      </p>
+      <p>{t('worktree.discardDialog.detail')}</p>
       {merged ? (
-        <p>
-          O branch <code>{branch}</code> não tem commits fora do projeto e também é apagado.
-        </p>
+        <p>{tRich('worktree.discardDialog.merged', { branch: <code>{branch}</code> })}</p>
       ) : (
         <label className="worktree-toggle">
           <input type="checkbox" checked={deleteBranch} onChange={(event) => setDeleteBranch(event.target.checked)} />
-          <span>
-            Apagar o branch também (<code>{branch}</code> não foi aplicado; os commits dele se perdem)
-          </span>
+          <span>{tRich('worktree.discardDialog.deleteBranch', { branch: <code>{branch}</code> })}</span>
         </label>
       )}
     </Dialog>

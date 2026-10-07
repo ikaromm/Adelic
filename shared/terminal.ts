@@ -128,7 +128,9 @@ export type PreviewUrlResult =
       /** False for [::1]: CSP host sources cannot list IPv6 literals, so it opens only in the browser. */
       frameable: boolean;
     }
-  | { ok: false; message: string };
+  | { ok: false; code: PreviewUrlError; message: string };
+/** Why a preview URL was refused; the UI translates it (`message` stays the pt-BR text). */
+export type PreviewUrlError = 'empty' | 'invalid' | 'scheme' | 'userinfo' | 'notLocal' | 'self';
 
 /**
  * Accepts only loopback http(s) URLs: localhost, 127.0.0.1 or [::1], any port, without
@@ -137,22 +139,23 @@ export type PreviewUrlResult =
  */
 export function validatePreviewUrl(input: string, appOrigin?: string): PreviewUrlResult {
   const raw = input.trim();
-  if (!raw) return { ok: false, message: 'Informe um endereço.' };
+  if (!raw) return { ok: false, code: 'empty', message: 'Informe um endereço.' };
   // "localhost:5173" alone is common; treat it as http.
   const withScheme = /^(localhost|127\.0\.0\.1|\[::1\])(:\d{1,5})?([/?#]|$)/i.test(raw) ? `http://${raw}` : raw;
   let url: URL;
   try {
     url = new URL(withScheme);
   } catch {
-    return { ok: false, message: 'Endereço inválido. Use, por exemplo, http://localhost:5173.' };
+    return { ok: false, code: 'invalid', message: 'Endereço inválido. Use, por exemplo, http://localhost:5173.' };
   }
   if (url.protocol !== 'http:' && url.protocol !== 'https:')
-    return { ok: false, message: 'Só endereços http:// ou https:// são aceitos.' };
-  if (url.username || url.password) return { ok: false, message: 'Endereços com usuário ou senha não são aceitos.' };
+    return { ok: false, code: 'scheme', message: 'Só endereços http:// ou https:// são aceitos.' };
+  if (url.username || url.password)
+    return { ok: false, code: 'userinfo', message: 'Endereços com usuário ou senha não são aceitos.' };
   if (!LOOPBACK_HOSTS.has(url.hostname))
-    return { ok: false, message: 'Só endereços locais são aceitos: localhost, 127.0.0.1 ou [::1].' };
+    return { ok: false, code: 'notLocal', message: 'Só endereços locais são aceitos: localhost, 127.0.0.1 ou [::1].' };
   if (appOrigin && sameLoopbackPort(url, appOrigin))
-    return { ok: false, message: 'O preview não abre o próprio Adelic.' };
+    return { ok: false, code: 'self', message: 'O preview não abre o próprio Adelic.' };
   return { ok: true, url: url.href, frameable: url.hostname !== '[::1]' };
 }
 

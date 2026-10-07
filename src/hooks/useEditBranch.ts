@@ -2,6 +2,7 @@ import { useCallback, useState } from 'react';
 import type { AttachmentMeta, Message, Plan, Session } from '../../shared/contracts';
 import { api, type ApiError } from '../api';
 import { isLimitError } from './useUsage';
+import { uuid } from '../uuid';
 
 /**
  * Edit and resend, and "Ramificar daqui" for the open conversation (docs/specs/edit-branch.md).
@@ -53,7 +54,7 @@ export function useEditBranch({
           sessionId,
           message.id,
           content,
-          crypto.randomUUID(),
+          uuid(),
           attachments.map((item) => item.id),
           overrideLimit,
         );

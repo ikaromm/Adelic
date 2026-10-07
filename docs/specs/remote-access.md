@@ -26,6 +26,7 @@ ADELIC_REMOTE_PORT=4318              # opcional
 - **Um token só:** quem tem o token tem acesso completo, com as mesmas permissões dos agentes que você configurou. Não há usuários nem papéis.
 - **Trocar o token:** reinicie o Adelic com outro valor. Os cookies antigos deixam de valer.
 - **App no celular:** a instalação como app exige HTTPS; veja [app instalável](pwa.md).
+- **Contexto não seguro:** em HTTP por um IP que não é loopback, o navegador omite APIs como `crypto.randomUUID`, a área de transferência e o microfone. A interface não depende delas para conversar; `tests/e2e/insecure-context.spec.ts` remove essas APIs e confere o envio e a fila.
 - **Desktop:** o app desktop herda as variáveis do ambiente em que é aberto. Se elas estiverem definidas lá, o acesso remoto também abre.
 
 ## Validação

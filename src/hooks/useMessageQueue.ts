@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { MessageQueue } from '../../shared/contracts';
 import { api } from '../api';
+import { uuid } from '../uuid';
 
 export type SendNowTarget = { itemId: string } | { content: string; attachmentIds?: string[] };
 export type ComposerKeyAction = 'send' | 'queue' | 'send-now' | null;
@@ -102,7 +103,7 @@ export function useMessageQueue(sessionId: string, onError: (message: string) =>
     /** Asks before interrupting; `null` dismisses the question. */
     askSendNow: setConfirming,
     add: (content: string, attachmentIds: string[] = []) =>
-      run((id) => api.enqueue(id, content, crypto.randomUUID(), attachmentIds)),
+      run((id) => api.enqueue(id, content, uuid(), attachmentIds)),
     edit: (itemId: string, content: string) => run((id) => api.editQueued(id, itemId, content)),
     remove: (itemId: string) => run((id) => api.removeQueued(id, itemId)),
     /** With `overrideLimit` ("Continuar mesmo assim"), only the next message passes the usage limits. */
@@ -117,7 +118,7 @@ export function useMessageQueue(sessionId: string, onError: (message: string) =>
             ? target
             : {
                 content: target.content,
-                clientId: crypto.randomUUID(),
+                clientId: uuid(),
                 ...(target.attachmentIds?.length ? { attachmentIds: target.attachmentIds } : {}),
               },
         ),

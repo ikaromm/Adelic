@@ -296,6 +296,9 @@ describe.skipIf(!existsSync('/usr/bin/bwrap'))('checks inside the real bubblewra
     controller.abort('cancelada pelo teste');
     const cancelled = await pending;
     expect(cancelled).toMatchObject({ status: 'cancelled', detail: 'cancelada pelo teste' });
+    // Killing the sandbox init ends its PID namespace; the kernel reaps the rest asynchronously,
+    // which takes a moment on a loaded machine. Every process must still be gone.
+    for (let i = 0; i < 30 && pids.some(alive); i++) await new Promise((r) => setTimeout(r, 100));
     expect(pids.filter(alive)).toEqual([]);
   });
   it('keeps only the last 64 KB of output and reports progress', async () => {

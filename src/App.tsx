@@ -89,6 +89,7 @@ import type { ApiError, SpendLimitsPatch } from './api';
 import { SIDEBAR_LIMIT, SessionItem, SidebarNav, UpdateNotice, type Page } from './components/Sidebar';
 import { ToolsPanel, type ToolsTab } from './components/ToolsPanel';
 import { WorktreePanel } from './components/WorktreePanel';
+import { uuid } from './uuid';
 
 type LocalStream = { runId: string; messageId: string; content: string };
 
@@ -738,7 +739,7 @@ export default function App() {
       selectSession(created.id);
       setPage('chat');
       setSidebarOpen(false);
-      await api.send(created.id, text, crypto.randomUUID());
+      await api.send(created.id, text, uuid());
       await refreshDetail(created.id);
     } catch (error) {
       setNotice((error as Error).message);
@@ -793,7 +794,7 @@ export default function App() {
     setLimitBlock(null);
     conversationScroll.stick();
     const optimistic: Message = {
-      id: `local-${crypto.randomUUID()}`,
+      id: `local-${uuid()}`,
       sessionId,
       role: 'user',
       content,
@@ -808,7 +809,7 @@ export default function App() {
       const acceptedRun = await api.send(
         sessionId,
         content,
-        crypto.randomUUID(),
+        uuid(),
         sentAttachments.map((item) => item.id),
         overrideLimit,
       );

@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 import { api, type Diagnostics, type UpdateInfo } from '../api';
 import { promptInstall, usePwa } from '../pwa/client';
+import { copyText } from '../Markdown';
 
 const field = (label: string, value: string | number | null | undefined) => (
   <div className="diagnostics-row" key={label}>
@@ -78,13 +79,11 @@ export function DiagnosticsCard({
   };
   const json = report ? JSON.stringify(report, null, 2) : '';
   const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(json);
+    // copyText falls back to a textarea where the Clipboard API is missing (plain HTTP remote access).
+    if (await copyText(json)) {
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1500);
-    } catch {
-      setError('Não foi possível copiar; use Baixar.');
-    }
+    } else setError('Não foi possível copiar; use Baixar.');
   };
   const download = () => {
     const url = URL.createObjectURL(new Blob([json], { type: 'application/json' }));

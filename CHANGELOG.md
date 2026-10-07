@@ -2,6 +2,7 @@
 
 ## Não publicado
 
+- Correção: pelo acesso remoto em HTTP (IP da Tailscale) o navegador não oferece `crypto.randomUUID` nem a área de transferência, e enviar uma mensagem falhava em silêncio (o botão ficava vermelho e nada aparecia). Os ids passam a usar `getRandomValues`, e copiar usa a alternativa já existente.
 - Ditado por voz no campo de mensagem: o microfone grava até 2 minutos e o voxtype transcreve neste computador, com recusa se ele estiver configurado para um serviço remoto; o texto entra no cursor, sem enviar. Veja [ditado por voz](docs/specs/voice.md).
 - **Terminal e preview do projeto**: executa comandos no mesmo sandbox dos agentes, sem enviá-los a nenhum modelo, com saída ao vivo (últimos 256 KB), código de saída, **Parar** e tempo limite. Também abre servidores de desenvolvimento locais (somente loopback) num preview. No acesso remoto, o terminal fica desligado salvo opção explícita. Veja [terminal e preview](docs/specs/terminal-preview.md).
 - Instalável como app (PWA) no navegador em HTTPS ou localhost, por exemplo no celular com `tailscale serve`. Guarda só a interface, nunca `/api`, mostra "Sem conexão com o Adelic" quando o computador está fora do ar e pede para recarregar antes de trocar de versão. Veja [app instalável](docs/specs/pwa.md).

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type ClipboardEvent, type Dra
 import type { AttachmentMeta } from '../../shared/contracts';
 import { MAX_ATTACHMENTS_PER_MESSAGE, checkAttachment } from '../../shared/attachments';
 import { api } from '../api';
+import { uuid } from '../uuid';
 
 export interface PendingAttachment {
   key: string;
@@ -63,7 +64,7 @@ export function useComposerAttachments(sessionId: string | undefined, onError: (
           problems.push(check.message);
           continue;
         }
-        const key = crypto.randomUUID();
+        const key = uuid();
         const item: PendingAttachment = {
           key,
           name: file.name,

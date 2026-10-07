@@ -19,7 +19,13 @@ import { errorMessage, isRecord, JsonRpcProcess, type JsonRpcMessage } from './p
 import { findProviderBinary, hasProviderBinaryOverride, providerBinaryMissingDetail } from './discovery';
 import { canonWritePathWithin, classifyApproval, scanCodexRules } from '../approval-policy';
 import { blockedBy } from '../../shared/hooks';
-import { bubblewrap, mcpCommandBindings, type ReadonlyFileBinding, type WrappedCommand } from './sandbox';
+import {
+  bubblewrap,
+  mcpCommandBindings,
+  type BubblewrapOptions,
+  type ReadonlyFileBinding,
+  type WrappedCommand,
+} from './sandbox';
 import type { RunMcpServer } from '../../shared/mcp';
 
 type CodexToolProfile = 'no-tools' | 'fast-local-tools' | 'deep-tools';
@@ -66,6 +72,7 @@ type CodexWrapper = (
   sandbox: Sandbox,
   writableRuntimeDirs?: string[],
   readonlyFileBindings?: ReadonlyFileBinding[],
+  options?: BubblewrapOptions,
 ) => Promise<WrappedCommand>;
 
 /**
@@ -541,7 +548,11 @@ export class CodexProvider {
     if (signal.aborted) throw abortError(signal);
     if (this.shuttingDown) throw new Error('Codex provider is shutting down');
     const isolatedHome = path.join(server.scratch, 'CODEX_HOME');
-    const wrapped = await this.wrapCommand(this.binary, args, server.cwd, sandbox, [server.scratch], readonlyAuth);
+    // ssh and other clients inside the sandbox read user-owned copies of root-owned configs,
+    // kept in the run's scratch and removed with it.
+    const wrapped = await this.wrapCommand(this.binary, args, server.cwd, sandbox, [server.scratch], readonlyAuth, {
+      systemShims: { dir: path.join(server.scratch, 'system-shims') },
+    });
     if (signal.aborted) throw abortError(signal);
     if (this.shuttingDown) throw new Error('Codex provider is shutting down');
     const runtimeEnv = Object.fromEntries(

@@ -34,6 +34,7 @@ export type TerminalWrapper = (
  * so stopping it means killing that init: the kernel then ends the whole PID namespace.
  */
 export const sandboxedTerminal: TerminalWrapper = async (command, args, cwd, sandbox) => {
+  // Defaults: system config shims (ssh) from the per-process cache and the ssh-agent socket.
   const wrapped = await bubblewrap(command, args, cwd, sandbox);
   return { command: wrapped.command, args: ['--info-fd', '3', ...wrapped.args], infoFd: true };
 };

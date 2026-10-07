@@ -1,5 +1,6 @@
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { validatePreviewUrl } from '../shared/terminal.js';
 
 export type NavigationPolicy = 'internal' | 'external' | 'blocked';
 
@@ -44,6 +45,16 @@ function audioOnly(media: MediaPermissionDetails | undefined) {
   if (media.mediaTypes !== undefined)
     return media.mediaTypes.length > 0 && media.mediaTypes.every((type) => type === 'audio');
   return media.mediaType === 'audio';
+}
+
+/**
+ * Sub-frame navigations: the app's own pages, or the local preview (docs/specs/terminal-preview.md),
+ * which accepts only loopback http(s) dev servers other than the Adelic itself. Anything else
+ * inside a frame is blocked; top-level windows keep `navigationPolicy`.
+ */
+export function subframeNavigationAllowed(target: string, appUrl: string): boolean {
+  if (navigationPolicy(target, appUrl) === 'internal') return true;
+  return Boolean(appUrl) && validatePreviewUrl(target, appUrl).ok;
 }
 
 /**

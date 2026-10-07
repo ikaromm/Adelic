@@ -25,7 +25,8 @@
 // Voice dictation: a fake voxtype/ffmpeg runner (never the real binaries) transcribes any
 // recording as "texto ditado"; GET /e2e/voice?mode=local|remote|missing switches its setup.
 import { createServer } from 'node:http';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { existsSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import express from 'express';
@@ -37,6 +38,7 @@ import { PLAN_PROMPT_MARKER, TASK_PROMPT_MARKER } from '../../server/plan-markdo
 import { HANDOFF_PROMPT_MARKER } from '../../server/provider-handoff.js';
 import { COMPACTION_PROMPT_MARKER } from '../../server/compaction.js';
 import { VoiceService, type CommandRunner } from '../../server/voice.js';
+import { TerminalService } from '../../server/terminal.js';
 import { startFakeMemory } from './fake-memory.js';
 
 const port = Number(process.env.E2E_PORT || 4399);
@@ -277,8 +279,30 @@ const voice = new VoiceService({
   statusTtlMs: 0,
 });
 
+// Terminal (docs/specs/terminal-preview.md): the real bubblewrap sandbox when it can create
+// namespaces here; otherwise (some CI containers) commands run unsandboxed in the project folder,
+// so the UI flows are still covered. Isolation itself is tested in tests/terminal.test.ts.
+const bwrapWorks =
+  existsSync('/usr/bin/bwrap') &&
+  spawnSync(
+    '/usr/bin/bwrap',
+    ['--ro-bind', '/', '/', '--proc', '/proc', '--dev', '/dev', '--unshare-pid', '--', '/bin/true'],
+    {
+      timeout: 10_000,
+      stdio: 'ignore',
+    },
+  ).status === 0;
+const terminal = new TerminalService(bwrapWorks ? {} : { wrap: async (command, args) => ({ command, args }) });
 // Short retry delays so the retry flows finish quickly.
-const { app } = createBackend(store, providers, undefined, undefined, { baseDelayMs: 150, maxDelayMs: 400 }, voice);
+const { app } = createBackend(
+  store,
+  providers,
+  undefined,
+  undefined,
+  { baseDelayMs: 150, maxDelayMs: 400 },
+  voice,
+  terminal,
+);
 app.get('/e2e/voice', (req, res) => {
   const mode = String(req.query.mode);
   if (mode === 'local' || mode === 'remote' || mode === 'missing') voiceMode = mode;

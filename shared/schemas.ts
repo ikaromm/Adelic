@@ -10,6 +10,7 @@ import {
 } from './commands.js';
 import { MENTION_PATH_MAX } from './mentions.js';
 import { AUTO_COMPACT_MAX_TOKENS, AUTO_COMPACT_MIN_TOKENS } from './compaction.js';
+import { TERMINAL_COMMAND_MAX, TERMINAL_TIMEOUT_MAX_SEC, TERMINAL_TIMEOUT_MIN_SEC } from './terminal.js';
 
 // Request schemas shared by the server routes (and usable by the UI). Each field keeps
 // the exact error message the API returned before zod, so clients see no change.
@@ -195,7 +196,22 @@ export const SettingsPatchSchema = z.object({
     z.number().int().min(AUTO_COMPACT_MIN_TOKENS).max(AUTO_COMPACT_MAX_TOKENS),
     `autoCompactTokens deve ser um inteiro entre ${AUTO_COMPACT_MIN_TOKENS} e ${AUTO_COMPACT_MAX_TOKENS}`,
   ),
+  terminalRemote: optional(z.boolean(), 'terminalRemote deve ser booleano'),
 });
+/** POST /api/projects/:id/terminal (docs/specs/terminal-preview.md). */
+export const TerminalRunSchema = z
+  .object({
+    command: required(
+      z.string().refine((value) => value.trim().length > 0 && value.length <= TERMINAL_COMMAND_MAX),
+      `command obrigatório (máximo ${TERMINAL_COMMAND_MAX} caracteres)`,
+    ),
+    timeoutSec: optional(
+      z.number().int().min(TERMINAL_TIMEOUT_MIN_SEC).max(TERMINAL_TIMEOUT_MAX_SEC),
+      `timeoutSec deve ser um inteiro entre ${TERMINAL_TIMEOUT_MIN_SEC} e ${TERMINAL_TIMEOUT_MAX_SEC}`,
+    ),
+  })
+  .strict();
+export const TerminalStopSchema = z.object({}).strict();
 /** "Compactar conversa" takes no options (docs/specs/compaction.md). */
 export const CompactSchema = z.object({}).strict();
 export const RestoreRunSchema = z.object({

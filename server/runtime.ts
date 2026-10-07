@@ -115,6 +115,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Run
   let store: Store | undefined;
   let providers: ProviderRegistry | undefined;
   let orchestrator: ReturnType<typeof createBackend>['orchestrator'] | undefined;
+  let terminal: ReturnType<typeof createBackend>['terminal'] | undefined;
   let graphifyService: GraphifyService | undefined;
   let http: HttpServer | undefined;
   let remoteHttp: HttpServer | undefined;
@@ -129,6 +130,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Run
     const remote = options.remote === null ? undefined : (options.remote ?? remoteAccessFromEnv());
     const backend = createBackend(store, providers, graphifyService, remote);
     orchestrator = backend.orchestrator;
+    terminal = backend.terminal;
 
     if (options.development) {
       const { createServer: createViteServer } = await import('vite');
@@ -169,8 +171,8 @@ export async function startServer(options: StartServerOptions = {}): Promise<Run
         });
         await attempt(async () => {
           const results = await Promise.allSettled(
-            [orchestrator?.shutdown(), graphifyService?.shutdown()].filter((pending): pending is Promise<void> =>
-              Boolean(pending),
+            [orchestrator?.shutdown(), graphifyService?.shutdown(), terminal?.shutdown()].filter(
+              (pending): pending is Promise<void> => Boolean(pending),
             ),
           );
           const failed = results.find((result) => result.status === 'rejected');
@@ -199,8 +201,8 @@ export async function startServer(options: StartServerOptions = {}): Promise<Run
     };
   } catch (error) {
     await Promise.allSettled(
-      [orchestrator?.shutdown(), graphifyService?.shutdown()].filter((pending): pending is Promise<void> =>
-        Boolean(pending),
+      [orchestrator?.shutdown(), graphifyService?.shutdown(), terminal?.shutdown()].filter(
+        (pending): pending is Promise<void> => Boolean(pending),
       ),
     );
     try {

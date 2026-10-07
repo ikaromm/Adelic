@@ -27,6 +27,7 @@ import type {
 } from '../shared/contracts';
 import type { CommandList, CommandMode, SavedCommand } from '../shared/commands';
 import type { VoiceStatus } from '../shared/voice';
+import type { TerminalCommand, TerminalCommandInfo, TerminalState } from '../shared/terminal';
 /** Report from /api/diagnostics: versions, paths and status only, without secrets or content. */
 export interface Diagnostics {
   generatedAt: string;
@@ -296,6 +297,19 @@ export const api = {
     request<MemoryPage>('/api/memory/page', {
       method: 'POST',
       body: JSON.stringify({ ...scope, path, body, expectedVersion }),
+    }),
+  /** Integrated command runner (docs/specs/terminal-preview.md). */
+  terminal: (projectId: string) => request<TerminalState>(`/api/projects/${encodeURIComponent(projectId)}/terminal`),
+  runTerminal: (projectId: string, command: string, timeoutSec: number) =>
+    request<{ id: string; command: TerminalCommandInfo }>(`/api/projects/${encodeURIComponent(projectId)}/terminal`, {
+      method: 'POST',
+      body: JSON.stringify({ command, timeoutSec }),
+    }),
+  terminalCommand: (id: string) => request<TerminalCommand>(`/api/terminal/${encodeURIComponent(id)}`),
+  stopTerminal: (id: string) =>
+    request<TerminalCommandInfo>(`/api/terminal/${encodeURIComponent(id)}/stop`, {
+      method: 'POST',
+      body: JSON.stringify({}),
     }),
   skill: (id: string, enabled: boolean) =>
     request<Skill>(`/api/skills/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ enabled }) }),

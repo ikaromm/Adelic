@@ -2,6 +2,7 @@ import { Router } from 'express';
 import type { Settings } from '../../shared/contracts.js';
 import { SettingsPatchSchema, SkillPatchSchema, parseBody } from '../../shared/schemas.js';
 import { checkForUpdate } from '../updates.js';
+import { isLoopbackRequest } from './auth.js';
 import { error } from './common.js';
 import type { BackendContext } from './context.js';
 
@@ -10,6 +11,9 @@ export function settingsRoutes({ store }: BackendContext) {
   app.patch('/api/settings', (req, res) => {
     const parsed = parseBody(SettingsPatchSchema, req.body, 'Configuração inválida');
     if (!parsed.ok) return error(res, 400, parsed.message);
+    // The remote terminal opt-in cannot be granted from the remote side itself.
+    if (parsed.data.terminalRemote !== undefined && !isLoopbackRequest(req))
+      return error(res, 403, 'Esta opção só pode ser alterada neste computador, não pelo acesso remoto');
     // Unknown keys are ignored, as before; only defined fields change.
     const patch = Object.fromEntries(Object.entries(parsed.data).filter(([, value]) => value !== undefined));
     const next: Settings = { ...store.getSettings()!, ...patch };

@@ -4,7 +4,13 @@ import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { app, BrowserWindow, dialog, shell, session, utilityProcess, type UtilityProcess } from 'electron';
 import { desktopPath } from '../server/providers/discovery.js';
-import { desktopResources, navigationPolicy, permissionPolicy, resolveDesktopDataDir } from './policy.js';
+import {
+  desktopResources,
+  navigationPolicy,
+  permissionPolicy,
+  resolveDesktopDataDir,
+  subframeNavigationAllowed,
+} from './policy.js';
 import { stopUtilityProcess, type UtilityState } from './utility-lifecycle.js';
 
 type BackendMessage =
@@ -142,13 +148,21 @@ function installWindowPolicies(window: BrowserWindow) {
     return { action: 'deny' };
   });
   window.webContents.on('will-frame-navigate', (details) => {
+    // The local preview frame may load loopback dev servers only.
+    if (!details.isMainFrame) {
+      if (!subframeNavigationAllowed(details.url, origin)) details.preventDefault();
+      return;
+    }
     const policy = navigationPolicy(details.url, origin);
     if (policy === 'internal') return;
     details.preventDefault();
-    if (details.isMainFrame && policy === 'external') handleExternalLink(details.url);
+    if (policy === 'external') handleExternalLink(details.url);
   });
-  window.webContents.on('will-redirect', (event, url) => {
-    if (navigationPolicy(url, origin) !== 'internal') event.preventDefault();
+  window.webContents.on('will-redirect', (details) => {
+    const allowed = details.isMainFrame
+      ? navigationPolicy(details.url, origin) === 'internal'
+      : subframeNavigationAllowed(details.url, origin);
+    if (!allowed) details.preventDefault();
   });
 }
 

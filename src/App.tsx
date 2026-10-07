@@ -22,6 +22,7 @@ import {
   ListPlus,
   ClipboardList,
   ArrowRightLeft,
+  SquareTerminal,
 } from 'lucide-react';
 import type {
   AttachmentMeta,
@@ -80,6 +81,7 @@ import { compactCommand } from '../shared/compaction';
 import { SettingsPage } from './components/SettingsPage';
 import { HandoffDialog, type HandoffTarget } from './components/HandoffDialog';
 import { SIDEBAR_LIMIT, SessionItem, SidebarNav, UpdateNotice, type Page } from './components/Sidebar';
+import { ToolsPanel, type ToolsTab } from './components/ToolsPanel';
 
 type LocalStream = { runId: string; messageId: string; content: string };
 
@@ -108,6 +110,8 @@ export default function App() {
   const [handoff, setHandoff] = useState<{ sessionId: string; target?: HandoffTarget } | null>(null);
   const [handoffBusy, setHandoffBusy] = useState(false);
   const [handoffError, setHandoffError] = useState('');
+  // Terminal / Preview panel of the project in context (docs/specs/terminal-preview.md).
+  const [toolsTab, setToolsTab] = useState<ToolsTab | null>(null);
   const focusComposerRef = useRef(false);
   const [expandedLists, setExpandedLists] = useState<Record<string, boolean>>({});
   const now = useNow(60_000);
@@ -1121,7 +1125,8 @@ export default function App() {
       | 'notifications'
       | 'autoCompact'
       | 'autoCompactTokens'
-      | 'voiceDictation',
+      | 'voiceDictation'
+      | 'terminalRemote',
     value: string | boolean | number,
   ) {
     if (!data) return;
@@ -1213,6 +1218,9 @@ export default function App() {
       ? 'Execução direta, sem delegação.'
       : `Orquestração ativa: ${provider?.name || 'agente da conversa'} coordena tarefas com contexto enxuto.`
     : 'Conversa avulsa: sem contexto ou configuração de projeto.';
+  // The conversation's project, or the selected project on the start screen; detached
+  // conversations have no project folder for the terminal.
+  const toolsProject = page === 'chat' ? (session ? conversationProject : project) : undefined;
   const pageTitle =
     page === 'chat'
       ? session
@@ -1485,6 +1493,18 @@ export default function App() {
             </div>
           </div>
           <div className="topbar-right">
+            {toolsProject && (
+              <button
+                type="button"
+                className={`icon-button ${toolsTab ? 'active' : ''}`}
+                aria-label="Terminal e preview do projeto"
+                title="Terminal e preview do projeto"
+                aria-pressed={Boolean(toolsTab)}
+                onClick={() => setToolsTab((current) => (current ? null : 'terminal'))}
+              >
+                <SquareTerminal size={16} />
+              </button>
+            )}
             {page === 'chat' && session && (
               <button
                 type="button"
@@ -1981,6 +2001,19 @@ export default function App() {
                 </div>
               </div>
             )}
+          </ErrorBoundary>
+        )}
+
+        {data && toolsProject && toolsTab && (
+          <ErrorBoundary scope="o terminal" resetKey={toolsProject.id}>
+            <ToolsPanel
+              key={toolsProject.id}
+              projectId={toolsProject.id}
+              projectName={toolsProject.name}
+              tab={toolsTab}
+              onTab={setToolsTab}
+              onClose={() => setToolsTab(null)}
+            />
           </ErrorBoundary>
         )}
 

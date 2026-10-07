@@ -383,6 +383,8 @@ export interface Settings {
   autoCompactTokens?: number;
   /** Microphone button in the composer, transcribed locally by voxtype (docs/specs/voice.md). Absent: on when available. */
   voiceDictation?: boolean;
+  /** "Permitir terminal pelo acesso remoto": off unless set (docs/specs/terminal-preview.md). */
+  terminalRemote?: boolean;
 }
 export interface Integration {
   id: string;

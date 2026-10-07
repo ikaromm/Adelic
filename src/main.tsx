@@ -5,7 +5,12 @@ import '@fontsource-variable/jetbrains-mono';
 import App from './App';
 import { ErrorBoundary } from './ErrorBoundary';
 import { RemoteGate } from './RemoteGate';
+import { startPwa } from './pwa/client';
+import { UpdateToast } from './pwa/UpdateToast';
 import './styles.css';
+
+// Installable app: service worker only in production, secure contexts and outside Electron.
+startPwa();
 
 createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
@@ -13,6 +18,7 @@ createRoot(document.getElementById('root')!).render(
       <RemoteGate>
         <App />
       </RemoteGate>
+      <UpdateToast />
     </ErrorBoundary>
   </React.StrictMode>,
 );

@@ -25,6 +25,7 @@ ADELIC_REMOTE_PORT=4318              # opcional
 - **HTTP sem TLS:** o tráfego vai em HTTP simples. Use só dentro de uma rede cifrada como a Tailscale, ou atrás de um proxy com HTTPS. Não exponha a porta à internet.
 - **Um token só:** quem tem o token tem acesso completo, com as mesmas permissões dos agentes que você configurou. Não há usuários nem papéis.
 - **Trocar o token:** reinicie o Adelic com outro valor. Os cookies antigos deixam de valer.
+- **App no celular:** a instalação como app exige HTTPS; veja [app instalável](pwa.md).
 - **Desktop:** o app desktop herda as variáveis do ambiente em que é aberto. Se elas estiverem definidas lá, o acesso remoto também abre.
 
 ## Validação

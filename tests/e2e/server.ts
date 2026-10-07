@@ -14,6 +14,7 @@
 //   [eco]     → answers "Eco: <current request>" so tests can see what the agent received
 //               (saved commands: the expanded template, not the typed `/name`); after a
 //               compaction it adds "| Resumo recebido: <summary>"
+//   [memoria] → answers whether the run carried a memory block, and its first lines
 //   [mencoes] → answers the "[Arquivo mencionado: …]" labels found in the prompt
 //   [sobrecarga] → the default model (e2e-model) fails as overloaded before any output; any
 //               other model (e2e-reserva) answers with the model it ran on (model fallback)
@@ -147,6 +148,7 @@ const providers: ProviderRegistry = {
         '[anexos]',
         '[escrever]',
         '[eco]',
+        '[memoria]',
         '[mencoes]',
         '[sobrecarga]',
         '[historico]',
@@ -197,6 +199,12 @@ const providers: ProviderRegistry = {
         // Detached conversations run the coordinated fast path: the request follows "Pedido atual:".
         const summary = input.summary ? ` | Resumo recebido: ${input.summary.replace(/\s+/g, ' ').trim()}` : '';
         const text = `Eco: ${current.replace(/\s+/g, ' ').trim()}${summary}`;
+        emit({ type: 'delta', text });
+        return { text, stopReason: 'completed' };
+      }
+      if (marker === '[memoria]') {
+        const block = input.memoryContext?.replace(/\s+/g, ' ').trim();
+        const text = block ? `Memória recebida: ${block.slice(0, 400)}` : 'Memória recebida: nenhuma';
         emit({ type: 'delta', text });
         return { text, stopReason: 'completed' };
       }

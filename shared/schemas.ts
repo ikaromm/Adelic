@@ -129,6 +129,9 @@ export const ProjectSpendLimitsPatchSchema = z.union([
 /** "Continuar mesmo assim": skip the usage limits for this one request (never stored). */
 const overrideLimit = () => optional(z.boolean(), 'overrideLimit deve ser booleano');
 
+/** An ai-memory scope, with the same rules as a project's memoryWorkspace/memoryProject. */
+export const MemoryScopeSchema = z.object({ workspace: text(100), project: text(100) }).strict();
+
 export const CreateProjectSchema = z.object({
   name: text(),
   path: text(4096),
@@ -266,6 +269,10 @@ export const SettingsPatchSchema = z.object({
   defaultProviderId: optional(ProviderIdSchema, 'defaultProviderId inválido'),
   defaultMode: optional(ModeSchema, 'defaultMode inválido'),
   memoryEnabled: optional(z.boolean(), 'memoryEnabled deve ser booleano'),
+  detachedMemory: optional(
+    z.union([z.null(), MemoryScopeSchema]),
+    'detachedMemory deve ser null ou { workspace, project } (até 100 caracteres cada)',
+  ),
   sandbox: optional(z.enum(['read-only', 'workspace-write']), 'sandbox inválido'),
   responseStyle: optional(z.enum(['concise', 'balanced']), 'responseStyle inválido'),
   approvalMode: optional(z.enum(['auto-safe', 'manual']), 'approvalMode inválido'),

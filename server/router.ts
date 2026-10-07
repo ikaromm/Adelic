@@ -12,6 +12,11 @@ const researchPattern =
   /\b(pesquise|search|procure|look up|busque|browse|navegue)\b|\b(cot[aç][aã]o|pre[cç]o|price|clima|weather|not[ií]cia|news)\b.{0,60}\b(atual|hoje|today|latest|current|recent)\b|\b(atual|hoje|today|latest|current|recent)\b.{0,60}\b(cot[aç][aã]o|pre[cç]o|price|clima|weather|not[ií]cia|news)\b/i;
 const implementationPattern =
   /\b(implemente|implement|crie|create|corrija|fix|edite|edit|altere|change|refatore|refactor|adicione|add)\b.{0,120}\b(api|endpoint|fun[cç][aã]o|function|componente|component|schema|migration|migra[cç][aã]o|banco de dados|database|script|servidor|server|frontend|backend)\b/i;
+/** Explicit requests to consult memory, in pt-BR and English ("busca na memória", "remember", "from memory"). */
+const memoryRequestPattern =
+  /\b(lembra|lembre|lembrar|lembrou|lembro|recorda|recorde|recordar|mem[oó]rias?|memory|memories|remember|recall)\b/i;
+/** Requests that depend on earlier context; with memory enabled they also search it. */
+const priorContextPattern = /\b(contexto anterior|previous context|antes|anterior)\b/i;
 const toolPatterns: [RegExp, string][] = [
   [implementationPattern, 'O pedido requer implementação ou alteração de software'],
   [
@@ -32,7 +37,7 @@ const toolPatterns: [RegExp, string][] = [
     'O pedido pede comparação e recomendação em várias etapas',
   ],
   [
-    /\b(lembra|lembre|remember|mem[oó]ria|memory|na conversa anterior|before|last time|como eu disse|as I said|contexto anterior|previous context)\b/i,
+    /\b(lembra|lembre|lembrar|lembrou|lembro|recorda|recorde|recordar|remember|recall|mem[oó]rias?|memory|memories|na conversa anterior|before|last time|como eu disse|as I said|contexto anterior|previous context)\b/i,
     'O pedido depende de contexto ou memória anterior',
   ],
 ];
@@ -53,7 +58,7 @@ export function routeMessage(content: string, mode: Mode, history: Message[] = [
       level: 'deep',
       reason: 'Modo Completo selecionado pelo operador',
       tools: needsTools(text),
-      memory: memoryEnabled && /mem[oó]ria|memory|lembra|lembre/i.test(text),
+      memory: memoryEnabled && memoryRequestPattern.test(text),
       effort: 'high',
       contextBudget: 24000,
     };
@@ -62,16 +67,14 @@ export function routeMessage(content: string, mode: Mode, history: Message[] = [
       level: 'deep',
       reason: 'O pedido aponta explicitamente para um arquivo ou projeto',
       tools: true,
-      memory: false,
+      memory: memoryEnabled && memoryRequestPattern.test(text),
       effort: 'high',
       contextBudget: 24000,
     };
   }
   for (const [pattern, reason] of toolPatterns)
     if (pattern.test(text)) {
-      const memory =
-        memoryEnabled &&
-        /mem[oó]ria|memory|lembra|lembre|contexto anterior|previous context|antes|anterior/i.test(text);
+      const memory = memoryEnabled && (memoryRequestPattern.test(text) || priorContextPattern.test(text));
       return { level: 'deep', reason, tools: needsTools(text), memory, effort: 'high', contextBudget: 24000 };
     }
   // Follow-ups often omit the object of the request. Use the recent exchange as intent context.

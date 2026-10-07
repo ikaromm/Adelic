@@ -17,7 +17,19 @@ A biblioteca usa somente o serviço ai-memory, nunca os arquivos dele. Assim fun
 - O MCP não oferece listagem de escopos nem catálogo; a API `/api/v1` cumpre essa função. A paginação (50 por página, máximo 100) é feita no Adelic sobre a lista do serviço. As contagens são as do serviço: notas `is_latest`; notas com TTL vencido continuam até a próxima limpeza (sweep).
 - Erros não viram catálogo vazio. Os casos tratados: serviço indisponível (503 com o endereço), token ausente ou errado (indica `ADELIC_MEMORY_TOKEN`), API ausente (indica `--enable-web`), escopo inexistente (404), resposta incompatível, e catálogo vazio enquanto `/admin/status` informa notas atuais.
 
-Nenhuma nota é copiada para o banco do Adelic. A busca automática no chat continua separada (`memoryContextFor`, com o workspace/project do projeto vinculado) e a biblioteca não muda esse escopo.
+Nenhuma nota é copiada para o banco do Adelic. A busca automática no chat continua separada (`memoryContextFor`, com o workspace/project do projeto vinculado, ou o escopo das conversas avulsas) e a biblioteca não muda esse escopo.
+
+## Memória das conversas avulsas
+
+Conversas sem projeto não têm escopo próprio. Em Configurações › Memória, **Memória das conversas avulsas** escolhe um escopo do catálogo (o mesmo da tela Memória, sem `_global`) ou **Desligada**, o padrão.
+
+- Configuração: `Settings.detachedMemory?: { workspace: string; project: string } | null`. Ausente ou `null` desliga. `PATCH /api/settings` valida com as mesmas regras do escopo de projeto (texto aparado, 1 a 100 caracteres cada, sem outros campos).
+- Com **Permitir busca de memória** ligado e um escopo escolhido, a conversa avulsa se comporta como um projeto com esse escopo: o roteador pode pedir memória, `memoryContextFor` busca só nesse escopo e o bloco de memória e a orientação chegam à execução direta, ao planejador e aos executores. Pasta de trabalho, Graphify (desligado), MCP e resumo de projeto continuam como antes.
+- Sem escopo, ou com a busca desligada, nada muda: nenhuma busca.
+- Conversas de projeto usam sempre o escopo do projeto; a configuração não as afeta.
+- Não há busca automática em outros escopos (privacidade entre escopos). O contexto informa o escopo consultado (`Escopo de memória consultado: pessoal/ambiente-ikaromm`). Quando nada é encontrado, informa que nenhuma nota foi encontrada naquele escopo e que nenhum outro foi consultado, para que o agente diga onde procurou.
+- Pedidos explícitos acionam a memória em pt-BR e inglês: "busca na memória", "lembra", "consegue lembrar", "memórias", "search memory", "remember", "recall", "from memory". Os termos de busca ignoram esses verbos e mantêm siglas curtas como IP e VM.
+- No campo de mensagem, a dica do seletor de projeto/modo de uma conversa avulsa mostra o escopo (`Memória: pessoal/ambiente-ikaromm`).
 
 ## Contrato
 

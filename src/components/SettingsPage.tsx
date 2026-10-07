@@ -28,6 +28,7 @@ import { notificationPermission, notificationsEnabled } from '../hooks/useRunNot
 import { CommandsCard } from './CommandsCard';
 import { DiagnosticsCard } from './DiagnosticsCard';
 import { McpCard } from './McpCard';
+import { DetachedMemorySetting } from './DetachedMemorySetting';
 import { HooksCard } from './HooksCard';
 import { ProjectTools } from './ProjectTools';
 import { RemoteAccessCard } from './RemoteAccessCard';
@@ -53,6 +54,7 @@ export function SettingsPage({
   onSetting,
   onSkill,
   onModelFallback,
+  onDetachedMemory,
   onProjectUpdated,
   usage,
   usageError,
@@ -98,6 +100,7 @@ export function SettingsPage({
   ) => void;
   onSkill: (id: string, enabled: boolean) => void;
   onModelFallback: (value: NonNullable<Settings['modelFallback']>) => void;
+  onDetachedMemory: (scope: Settings['detachedMemory']) => void;
   onProjectUpdated: (project: Project) => void;
   /** Usage report of this page's scope (the project, when one is open). */
   usage: UsageReport | null;
@@ -353,6 +356,11 @@ export function SettingsPage({
                 <span />
               </button>
             </div>
+            <DetachedMemorySetting
+              value={data.settings.detachedMemory}
+              memoryEnabled={data.settings.memoryEnabled}
+              onChange={onDetachedMemory}
+            />
             <div className="integration-list">
               {data.integrations
                 .filter((item) => item.kind === 'memory' || item.kind === 'sandbox')

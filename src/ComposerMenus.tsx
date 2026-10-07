@@ -422,6 +422,7 @@ export function ConversationMenu({
   mode,
   disabled,
   context,
+  memoryScope,
   onProject,
   onMode,
   onConfigure,
@@ -431,6 +432,8 @@ export function ConversationMenu({
   mode: Mode;
   disabled?: boolean;
   context: string;
+  /** Memory scope searched by this detached conversation (Settings › Memória), shown in the tooltip. */
+  memoryScope?: string;
   onProject: (projectId: string | null) => void;
   onMode: (mode: Mode) => void;
   onConfigure?: () => void;
@@ -446,7 +449,11 @@ export function ConversationMenu({
       label={t('composer.conversation.label')}
       icon={<Folder size={14} />}
       summary={summary}
-      title={t('composer.conversation.title', { project: projectName, mode: t(`mode.${mode}`) })}
+      title={
+        memoryScope
+          ? t('memorySettings.composer.title', { project: projectName, mode: t(`mode.${mode}`), scope: memoryScope })
+          : t('composer.conversation.title', { project: projectName, mode: t(`mode.${mode}`) })
+      }
       disabled={disabled}
       focusFirst
       width={340}

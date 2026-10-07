@@ -465,6 +465,11 @@ export interface Settings {
   defaultProviderId: ProviderId;
   defaultMode: Mode;
   memoryEnabled: boolean;
+  /**
+   * "Memória das conversas avulsas": the ai-memory scope searched by conversations without a
+   * project, like a project's own scope (docs/specs/shared-memory.md). Absent or null: off.
+   */
+  detachedMemory?: MemoryScope | null;
   sandbox: Sandbox;
   responseStyle: 'concise' | 'balanced';
   approvalMode?: 'auto-safe' | 'manual';

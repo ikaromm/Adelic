@@ -55,3 +55,59 @@ test('edits a note, and an external change while editing keeps the draft and blo
   await expect(content).toHaveValue('# Backup\n\nmeu rascunho\n');
   await expect(page.getByRole('button', { name: 'Salvar nota' })).toBeDisabled();
 });
+
+test.describe('detached conversation memory', () => {
+  test.afterEach(async ({ request }) => {
+    const reset = await request.patch('/api/settings', { data: { memoryEnabled: false, detachedMemory: null } });
+    expect(reset.ok()).toBe(true);
+  });
+
+  test('searches the scope chosen in Settings and sends it to the agent', async ({ page }) => {
+    await page.goto('/');
+    await page
+      .getByRole('navigation', { name: 'Navegação principal' })
+      .getByRole('button', { name: /Configurações/ })
+      .click();
+    await page.getByRole('switch', { name: 'Permitir busca de memória' }).click();
+    await expect(page.getByRole('switch', { name: 'Permitir busca de memória' })).toHaveAttribute(
+      'aria-checked',
+      'true',
+    );
+    const selector = page.getByRole('combobox', { name: 'Memória das conversas avulsas' });
+    await expect(selector.locator('option', { hasText: 'pessoal/ambiente-ikaromm (2)' })).toHaveCount(1);
+    await selector.selectOption({ label: 'pessoal/ambiente-ikaromm (2)' });
+    await expect(selector).toHaveValue('pessoal\0ambiente-ikaromm');
+
+    await page
+      .getByRole('button', { name: /Nova conversa/ })
+      .first()
+      .click();
+    const input = page.getByRole('textbox', { name: 'Mensagem para o agente' });
+    await input.fill('[memoria] busca na memória o roteador');
+    await input.press('Enter');
+    const conversation = page.getByRole('region', { name: 'Conversa', exact: true });
+    await expect(
+      conversation.locator('.markdown-content', {
+        hasText: /Memória recebida: .*Escopo de memória consultado: pessoal\/ambiente-ikaromm.*192\.168\.0\.1/,
+      }),
+    ).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator('button.context-pill[title*="Memória: pessoal/ambiente-ikaromm"]')).toHaveCount(1);
+  });
+
+  test('without a detached scope the agent receives no memory block', async ({ page, request }) => {
+    expect((await request.patch('/api/settings', { data: { memoryEnabled: true } })).ok()).toBe(true);
+    await page.goto('/');
+    await page
+      .getByRole('button', { name: /Nova conversa/ })
+      .first()
+      .click();
+    const input = page.getByRole('textbox', { name: 'Mensagem para o agente' });
+    await input.fill('[memoria] busca na memória o roteador');
+    await input.press('Enter');
+    await expect(
+      page
+        .getByRole('region', { name: 'Conversa', exact: true })
+        .locator('.markdown-content', { hasText: 'Memória recebida: nenhuma' }),
+    ).toBeVisible({ timeout: 10_000 });
+  });
+});

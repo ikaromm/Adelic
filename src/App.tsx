@@ -1342,11 +1342,18 @@ export default function App() {
   };
   const toggleList = (key: string, expanded: boolean) =>
     setExpandedLists((current) => ({ ...current, [key]: expanded }));
+  // Detached conversations search the scope chosen in Settings › Memória, when memory is on.
+  const detachedMemoryScope =
+    data?.settings.memoryEnabled && data.settings.detachedMemory
+      ? `${data.settings.detachedMemory.workspace}/${data.settings.detachedMemory.project}`
+      : undefined;
   const conversationContext = conversationProject
     ? conversationProject.orchestration?.enabled === false
       ? t('composer.context.direct')
       : t('composer.context.orchestrated', { agent: provider?.name || t('composer.context.agentFallback') })
-    : t('composer.context.detached');
+    : detachedMemoryScope
+      ? t('memorySettings.composer.context', { scope: detachedMemoryScope })
+      : t('composer.context.detached');
   // The conversation's project, or the selected project on the start screen; detached
   // conversations have no project folder for the terminal.
   const toolsProject = page === 'chat' ? (session ? conversationProject : project) : undefined;
@@ -2100,6 +2107,7 @@ export default function App() {
                           mode={session.mode}
                           disabled={busy || Boolean(session.activeRunId)}
                           context={conversationContext}
+                          memoryScope={session.projectId === null ? detachedMemoryScope : undefined}
                           onProject={(projectId) => void changeSession({ projectId })}
                           onMode={(mode) => void changeSession({ mode })}
                           onConfigure={
@@ -2254,6 +2262,9 @@ export default function App() {
               }
               onSetting={updateSetting}
               onModelFallback={(modelFallback) => void enqueueSettingsPatch({ modelFallback })}
+              onDetachedMemory={(detachedMemory) =>
+                void enqueueSettingsPatch({ detachedMemory: detachedMemory ?? null })
+              }
               onProjectUpdated={(updated) =>
                 setData((current) =>
                   current

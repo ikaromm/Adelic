@@ -352,14 +352,55 @@ const memoryStopwords = new Set([
   'our',
   'previous',
   'remember',
+  // Request verbs and fillers of explicit memory requests ("busca na memória o IP da VM").
+  'busca',
+  'busque',
+  'buscar',
+  'procura',
+  'procure',
+  'procurar',
+  'pesquisa',
+  'pesquise',
+  'pesquisar',
+  'consulta',
+  'consulte',
+  'consultar',
+  'lembrou',
+  'lembro',
+  'recorda',
+  'recorde',
+  'recordar',
+  'memorias',
+  'voce',
+  'consegue',
+  'pode',
+  'search',
+  'find',
+  'look',
+  'check',
+  'recall',
+  'memories',
+  'for',
+  'from',
+  'your',
+  'you',
+  'can',
+  'tell',
 ]);
 export function memoryQueryTerms(content: string): string[] {
   const words =
     content
       .normalize('NFD')
       .replace(/[\u0300-\u036f]/g, '')
-      .match(/[\p{L}\p{N}_-]{3,}/gu) ?? [];
-  const terms = [...new Set(words.filter((word) => !memoryStopwords.has(word.toLowerCase())))];
+      .match(/[\p{L}\p{N}_-]{2,}/gu) ?? [];
+  // Two-letter words count only as acronyms (IP, VM, DB); "no", "da" and the like are noise.
+  const terms = [
+    ...new Set(
+      words.filter(
+        (word) => (word.length > 2 || /^[A-Z0-9]{2}$/.test(word)) && !memoryStopwords.has(word.toLowerCase()),
+      ),
+    ),
+  ];
   terms.sort((a, b) => Number(/^[A-Z0-9_-]{2,}$/.test(b)) - Number(/^[A-Z0-9_-]{2,}$/.test(a)));
   return (terms.length ? terms : ['decisão']).slice(0, 3);
 }

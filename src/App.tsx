@@ -51,6 +51,8 @@ import { notificationsEnabled, useRunNotifications } from './hooks/useRunNotific
 import { useComposerAttachments } from './hooks/useComposerAttachments';
 import { AttachButton, PendingAttachments } from './components/ComposerAttachments';
 import { composerKeyAction, useMessageQueue } from './hooks/useMessageQueue';
+import { useSlashCommands } from './hooks/useSlashCommands';
+import { CommandPopup } from './components/CommandPopup';
 import { MessageQueue } from './components/MessageQueue';
 import { projectOrchestration } from '../shared/contracts';
 import { ActivityPage } from './components/ActivityPage';
@@ -429,6 +431,9 @@ export default function App() {
 
   const composerRef = useAutosize([composer, selectedSession, page, session?.activeRunId]);
   const attachments = useComposerAttachments(session?.id, setNotice);
+  const slash = useSlashCommands(session?.projectId, composer, (value) =>
+    setDrafts((current) => ({ ...current, [selectedSessionRef.current]: value })),
+  );
   useEffect(() => {
     if (!focusComposerRef.current || page !== 'chat') return;
     const element = composerRef.current;
@@ -1380,13 +1385,26 @@ export default function App() {
                     {...attachments.dropHandlers}
                   >
                     <PendingAttachments items={attachments.items} disabled={busy} onRemove={attachments.remove} />
+                    {slash.open && (
+                      <CommandPopup
+                        id={slash.listboxId}
+                        items={slash.items}
+                        activeIndex={slash.activeIndex}
+                        optionId={slash.optionId}
+                        onSelect={slash.select}
+                        onHover={slash.setActiveIndex}
+                      />
+                    )}
                     <textarea
                       ref={composerRef}
                       className="composer-input"
                       value={composer}
                       onChange={(event) => setDrafts((current) => ({ ...current, [session.id]: event.target.value }))}
                       onPaste={attachments.onPaste}
+                      {...slash.inputProps}
                       onKeyDown={(event) => {
+                        // The open command list owns Enter, Tab, arrows and Escape.
+                        if (slash.onKeyDown(event)) return;
                         const action = composerKeyAction(
                           { ...event, isComposing: event.nativeEvent.isComposing },
                           Boolean(session.activeRunId),

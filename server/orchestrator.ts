@@ -24,6 +24,7 @@ import type {
 import { attachmentMeta, IMAGES_UNSUPPORTED, loadRunAttachments } from './attachments.js';
 import { routeMessage, selectHistory, titleFromMessage } from './router.js';
 import { memoryContextFor } from './memory.js';
+import { expandMessage } from './commands.js';
 import { Store } from './store.js';
 import {
   boundedCoordinatorContext,
@@ -48,6 +49,8 @@ import {
 import { CheckpointError, checkpointAfter, checkpointBefore, restoreCheckpoint } from './checkpoints.js';
 
 type Started = { runId: string; messageId: string };
+const commandSourceLabel = { builtin: 'embutido', global: 'global', repo: 'do repositório', project: 'do projeto' };
+const modeLabel = { auto: 'Auto', fast: 'Rápido', deep: 'Completo' };
 const cancelledError = (message: string) => Object.assign(new Error(message), { status: 409, cancelled: true });
 
 interface StartingRun {
@@ -184,7 +187,17 @@ export class Orchestrator {
       const projectSnapshot = structuredClone(project),
         history = this.store.listMessages(session.id),
         settings = startingSettings;
-      const plan = routeMessage(content, session.mode, history, settings.memoryEnabled && session.projectId !== null);
+      // `/name args` runs the saved command's template; the user message keeps the typed text.
+      // The command's mode applies to this run only. Detached conversations see only global
+      // and built-in commands (no project folder to read).
+      const expanded = expandMessage(this.store, content, session.projectId === null ? undefined : project);
+      const prompt = expanded.prompt;
+      const plan = routeMessage(
+        prompt,
+        expanded.mode ?? session.mode,
+        history,
+        settings.memoryEnabled && session.projectId !== null,
+      );
       if (session.thinking && session.thinking !== 'auto') {
         plan.effort = session.thinking;
         this.validateCoordinatorThinking(session.providerId, session.model, session.thinking, catalog!);
@@ -244,10 +257,17 @@ export class Orchestrator {
       this.emit({ type: 'message', message: assistant });
       this.emit({ type: 'run', run });
       this.emit({ type: 'session', session });
+      if (expanded.command)
+        this.publishEvent(
+          session.id,
+          runId,
+          'status',
+          `Comando /${expanded.command.name} (${commandSourceLabel[expanded.command.source]}) expandido${expanded.mode ? `; modo ${modeLabel[expanded.mode]} nesta execução` : ''}`,
+        );
       active.done = this.execute(
         session,
         projectSnapshot,
-        content,
+        prompt,
         history,
         plan,
         run,
@@ -1360,8 +1380,12 @@ export class Orchestrator {
     if (!active) throw Object.assign(new Error('Não há execução ativa'), { status: 409 });
     if (!this.providers.steer)
       throw Object.assign(new Error('Nenhum agente aceita orientação durante a execução'), { status: 409 });
+    const session = this.requireSession(sessionId);
+    const project = session.projectId === null ? undefined : this.store.getProject(session.projectId);
+    // A queued `/name` steers with the expanded template too (a mode override cannot apply mid-turn).
+    const steerText = expandMessage(this.store, item.content, project).prompt;
     try {
-      await this.providers.steer(active.runId, item.content);
+      await this.providers.steer(active.runId, steerText);
     } catch (e) {
       throw Object.assign(new Error(errorText(e)), { status: 409 });
     }

@@ -9,6 +9,7 @@ import { error, message, originGuard } from './http/common.js';
 import type { BackendContext } from './http/context.js';
 import type { RetryPolicy } from './retry.js';
 import { accessGuard, authRoutes, type RemoteAccess } from './http/auth.js';
+import { commandsRoutes } from './http/commands.js';
 import { diagnosticsRoutes } from './http/diagnostics.js';
 import { memoryRoutes } from './http/memory.js';
 import { projectsRoutes } from './http/projects.js';
@@ -99,6 +100,7 @@ export function createBackend(
   app.use(sessionsRoutes(context));
   app.use(runsRoutes(context));
   app.use(settingsRoutes(context));
+  app.use(commandsRoutes(context));
   app.use(memoryRoutes(context));
   app.use(diagnosticsRoutes(context));
   app.get('/api/health', async (_req, res) => {

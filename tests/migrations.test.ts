@@ -130,7 +130,8 @@ describe('SQLite schema migrations', () => {
     );
     db.exec(`INSERT INTO sessions VALUES('s',NULL,'{}');`);
     const result = migrate(db, dir);
-    expect(result).toMatchObject({ from: 2, to: 4, applied: [3, 4] });
+    expect(result).toMatchObject({ from: 2, to: schemaVersion });
+    expect(result.applied.slice(0, 2)).toEqual([3, 4]);
     db.exec(`PRAGMA foreign_keys=ON; INSERT INTO message_queue VALUES('q','s',0,'{}'); DELETE FROM sessions;`);
     expect(tableRows(db, 'message_queue')).toEqual([]);
     db.close();

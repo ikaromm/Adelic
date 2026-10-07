@@ -23,6 +23,7 @@ import {
   type QueuedMessage,
   QUEUE_LIMIT,
 } from '../shared/contracts.js';
+import type { SavedCommand } from '../shared/commands.js';
 import { migrate, type MigrationResult } from './migrations.js';
 
 const defaults: Settings = {
@@ -527,6 +528,26 @@ export class Store {
         .run(sessionId, JSON.stringify(pause));
     else this.db.prepare('DELETE FROM message_queue_state WHERE session_id=?').run(sessionId);
   }
+  /** Saved commands of one scope: `null` = global, otherwise that project's. */
+  listCommands(projectId: string | null) {
+    return projectId === null
+      ? this.rows<SavedCommand>('commands', 'WHERE project_id IS NULL ORDER BY rowid')
+      : this.rows<SavedCommand>('commands', 'WHERE project_id=? ORDER BY rowid', [projectId]);
+  }
+  getCommand(id: string) {
+    return this.get<SavedCommand>('commands', id);
+  }
+  putCommand(command: SavedCommand) {
+    this.db
+      .prepare(
+        'INSERT INTO commands(id,project_id,data) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id,data=excluded.data',
+      )
+      .run(command.id, command.projectId, JSON.stringify(command));
+    return command;
+  }
+  deleteCommand(id: string) {
+    return Number(this.db.prepare('DELETE FROM commands WHERE id=?').run(id).changes) > 0;
+  }
   exportData() {
     return {
       projects: this.listProjects(),
@@ -538,6 +559,7 @@ export class Store {
       briefs: this.listBriefs(),
       settings: this.getSettings(),
       skills: this.listSkills(),
+      commands: this.rows<SavedCommand>('commands', 'ORDER BY rowid'),
     };
   }
 }

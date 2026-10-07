@@ -10,6 +10,7 @@ import type {
 } from '../../shared/contracts';
 import { integrationName } from '../labels';
 import { notificationPermission, notificationsEnabled } from '../hooks/useRunNotifications';
+import { CommandsCard } from './CommandsCard';
 import { DiagnosticsCard } from './DiagnosticsCard';
 import { ProjectTools } from './ProjectTools';
 
@@ -345,6 +346,7 @@ export function SettingsPage({
               </div>
             )}
           </section>
+          <CommandsCard projects={data.projects} project={project} />
           <DiagnosticsCard
             updateCheck={data.settings.updateCheck === true}
             onUpdateCheck={(enabled) => onSetting('updateCheck', enabled)}

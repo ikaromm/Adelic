@@ -2,6 +2,7 @@
 
 ## Não publicado
 
+- Paleta de comandos com Ctrl+P (⌘P): ações, conversas, projetos, agente e modelo, modo e comandos salvos, com busca sem acentos e escolhas recentes primeiro. Veja [paleta de comandos](docs/specs/command-palette.md).
 - Modo de planejamento: **Planejar antes** ou `/plano` gera, em modo somente leitura, um plano com requisitos, design e tarefas; o cartão permite editar, aprovar e executar uma tarefa por execução (com checkpoint), parar, pular, tentar de novo e salvar em `.adelic/specs/`. Veja [modo de planejamento](docs/specs/plan-mode.md).
 - Comandos salvos com `/` no início da mensagem: `/revisar`, `/testes` e `/explicar` embutidos, comandos próprios (globais ou por projeto) em Configurações e arquivos `.adelic/commands/*.md` do repositório. O servidor expande o modelo (`{{args}}`) e a conversa mostra o que foi digitado. Veja [comandos salvos](docs/specs/saved-commands.md).
 

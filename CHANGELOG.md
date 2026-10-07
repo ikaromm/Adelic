@@ -2,6 +2,7 @@
 
 ## Não publicado
 
+- Painel **Git** do projeto: branch e upstream (à frente/atrás pelas refs locais), alterações staged, não staged e não rastreadas com diff, stage/unstage, descartar com confirmação, commit, `git push` sem forçar e link para abrir pull request no GitHub/GitLab; commits sem hooks por padrão. Veja [painel Git](docs/specs/git-panel.md).
 - Menções `@arquivo` no campo de mensagem: a lista sugere os arquivos do projeto enquanto você digita, e os arquivos de texto mencionados (até 5, 512 KB cada) entram no pedido ao agente, com o caminho conferido para não sair do projeto. Veja [menções de arquivos](docs/specs/mentions.md).
 - Troca de modelo quando o atual está sobrecarregado ou no limite de requisições: **Tentar com outro modelo** oferece até 3 alternativas e muda a conversa para a escolhida; opcionalmente, **Trocar de modelo se o atual estiver sobrecarregado** tenta até 3 modelos configurados, só naquela resposta, depois das novas tentativas e só sem efeito visível. Veja [troca de modelo](docs/specs/retries.md#troca-de-modelo).
 - Paleta de comandos com Ctrl+P (⌘P): ações, conversas, projetos, agente e modelo, modo e comandos salvos, com busca sem acentos e escolhas recentes primeiro. Veja [paleta de comandos](docs/specs/command-palette.md).

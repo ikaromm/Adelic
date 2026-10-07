@@ -22,6 +22,7 @@ import {
   ListPlus,
   ClipboardList,
   ArrowRightLeft,
+  GitBranch,
 } from 'lucide-react';
 import type {
   AttachmentMeta,
@@ -75,6 +76,7 @@ import { CompactingNotice, CompactionCard, ConversationActions } from './compone
 import { timelineSegments, upsertCompaction } from './compaction-timeline';
 import { compactCommand } from '../shared/compaction';
 import { SettingsPage } from './components/SettingsPage';
+import { GitPanel, useGitRepo } from './components/GitPanel';
 import { HandoffDialog, type HandoffTarget } from './components/HandoffDialog';
 import { SIDEBAR_LIMIT, SessionItem, SidebarNav, UpdateNotice, type Page } from './components/Sidebar';
 
@@ -470,6 +472,8 @@ export default function App() {
   );
   const detachedSessions = useMemo(() => data?.sessions.filter((s) => s.projectId === null) || [], [data?.sessions]);
   const conversationProject = data?.projects.find((item) => item.id === session?.projectId);
+  // The Git page follows the selected project (a linked conversation selects its project).
+  const projectIsGit = useGitRepo(project?.id);
   const messages = currentDetail?.messages || [];
   const activityEvents = currentDetail?.events || [];
   const activityTasks = currentDetail?.tasks || [];
@@ -1183,7 +1187,9 @@ export default function App() {
         ? 'Atividade'
         : page === 'memory'
           ? 'Memória'
-          : 'Configurações';
+          : page === 'git'
+            ? `Git · ${project?.name ?? ''}`
+            : 'Configurações';
 
   /** One message of the conversation, with its retry notice and activity panel. */
   function renderTimelineMessage(message: Message) {
@@ -1446,6 +1452,17 @@ export default function App() {
             </div>
           </div>
           <div className="topbar-right">
+            {page === 'chat' && project && projectIsGit && (!session || session.projectId === project.id) && (
+              <button
+                type="button"
+                className="icon-button"
+                aria-label={`Git do projeto ${project.name}`}
+                title="Git do projeto"
+                onClick={() => goTo('git')}
+              >
+                <GitBranch size={16} />
+              </button>
+            )}
             {page === 'chat' && session && (
               <button
                 type="button"
@@ -1931,6 +1948,29 @@ export default function App() {
           </ErrorBoundary>
         )}
 
+        {data && page === 'git' && project && (
+          <ErrorBoundary scope="o git" resetKey={project.id}>
+            <GitPanel
+              key={project.id}
+              project={project}
+              onProjectUpdated={(updated) =>
+                setData((snapshot) =>
+                  snapshot
+                    ? {
+                        ...snapshot,
+                        projects: snapshot.projects.map((item) => (item.id === updated.id ? updated : item)),
+                      }
+                    : snapshot,
+                )
+              }
+            />
+          </ErrorBoundary>
+        )}
+        {data && page === 'git' && !project && (
+          <section className="page-content">
+            <div className="inline-notice">Selecione um projeto para ver o git.</div>
+          </section>
+        )}
         {data && page === 'activity' && (
           <ErrorBoundary scope="a atividade" resetKey={page}>
             <ActivityPage runs={data.runs} providers={data.providers} />

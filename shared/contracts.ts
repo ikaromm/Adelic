@@ -14,6 +14,48 @@ export interface Project {
   memoryProject: string;
   orchestration?: OrchestrationConfig;
   graphify?: GraphifyConfig;
+  /** Git panel settings (docs/specs/git-panel.md). */
+  git?: ProjectGitConfig;
+}
+export interface ProjectGitConfig {
+  /** Run the repository's hooks (pre-commit etc.) on commit. Off by default. */
+  runHooks: boolean;
+}
+/** Where a changed file sits: in the index, only in the working tree, or not tracked. */
+export type GitFileArea = 'staged' | 'unstaged' | 'untracked';
+export interface GitFileEntry {
+  /** Path relative to the repository top level, `/`-separated. */
+  path: string;
+  area: GitFileArea;
+  /** Porcelain status letter: M, A, D, R, C, T, U (conflict) or ? (untracked). */
+  letter: string;
+  /** Previous path of a staged rename or copy. */
+  origPath?: string;
+}
+export type GitStatus =
+  | { repo: false; reason: string }
+  | {
+      repo: true;
+      /** Current branch, or null when HEAD is detached. */
+      branch: string | null;
+      /** Short id of HEAD; null before the first commit. */
+      head: string | null;
+      upstream?: string;
+      /** Counted from local refs only (no fetch). */
+      ahead?: number;
+      behind?: number;
+      files: GitFileEntry[];
+      omitted?: number;
+      /** Why stage/discard/commit/push are refused right now (a run writing, an undo). */
+      blocked?: string;
+      runHooks: boolean;
+    };
+export interface GitCommitInfo {
+  hash: string;
+  short: string;
+  subject: string;
+  author: string;
+  date: string;
 }
 export interface GraphifyConfig {
   enabled: boolean;

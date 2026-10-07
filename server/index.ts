@@ -11,6 +11,7 @@ import type { RetryPolicy } from './retry.js';
 import { accessGuard, authRoutes, type RemoteAccess } from './http/auth.js';
 import { commandsRoutes } from './http/commands.js';
 import { diagnosticsRoutes } from './http/diagnostics.js';
+import { gitRoutes } from './http/git.js';
 import { memoryRoutes } from './http/memory.js';
 import { projectsRoutes } from './http/projects.js';
 import { plansRoutes } from './http/plans.js';
@@ -98,6 +99,7 @@ export function createBackend(
   });
   const context: BackendContext = { store, orchestrator, providerList };
   app.use(projectsRoutes(context));
+  app.use(gitRoutes(context));
   app.use(sessionsRoutes(context));
   app.use(runsRoutes(context));
   app.use(plansRoutes(context));

@@ -14,6 +14,8 @@ import type {
   MemoryPage,
   MemoryScope,
   FileChange,
+  GitCommitInfo,
+  GitStatus,
   MessageQueue,
   Plan,
   Project,
@@ -72,6 +74,7 @@ type ProjectPatch = {
   memoryProject?: string;
   orchestration?: Project['orchestration'];
   graphify?: Project['graphify'];
+  git?: Project['git'];
 };
 function serializeProjectPatch(data: ProjectPatch) {
   if (!data.orchestration) return JSON.stringify(data);
@@ -300,6 +303,49 @@ export const api = {
       `/api/projects/${encodeURIComponent(projectId)}/files?${new URLSearchParams({ query, limit: String(limit) })}`,
       { signal },
     ),
+  /** Git panel (docs/specs/git-panel.md). */
+  git: {
+    repo: (id: string) => request<{ repo: boolean }>(`/api/projects/${encodeURIComponent(id)}/git/repo`),
+    status: (id: string) => request<GitStatus>(`/api/projects/${encodeURIComponent(id)}/git/status`),
+    diff: (id: string, path: string, staged: boolean) =>
+      request<{ path: string; staged: boolean; diff: string; truncated: boolean }>(
+        `/api/projects/${encodeURIComponent(id)}/git/diff?${new URLSearchParams({ path, staged: staged ? '1' : '0' })}`,
+      ),
+    log: (id: string) => request<{ commits: GitCommitInfo[] }>(`/api/projects/${encodeURIComponent(id)}/git/log`),
+    pushTarget: (id: string) =>
+      request<{ target: { remote: string; branch: string; remoteBranch: string } | null }>(
+        `/api/projects/${encodeURIComponent(id)}/git/push-target`,
+      ),
+    prUrl: (id: string) =>
+      request<{ provider: 'github' | 'gitlab'; url: string; base: string | null; branch: string }>(
+        `/api/projects/${encodeURIComponent(id)}/git/pr-url`,
+      ),
+    stage: (id: string, body: { paths?: string[]; all?: boolean }) =>
+      request<GitStatus>(`/api/projects/${encodeURIComponent(id)}/git/stage`, {
+        method: 'POST',
+        body: JSON.stringify(body),
+      }),
+    unstage: (id: string, body: { paths?: string[]; all?: boolean }) =>
+      request<GitStatus>(`/api/projects/${encodeURIComponent(id)}/git/unstage`, {
+        method: 'POST',
+        body: JSON.stringify(body),
+      }),
+    discard: (id: string, paths: string[], mixed: boolean) =>
+      request<GitStatus>(`/api/projects/${encodeURIComponent(id)}/git/discard`, {
+        method: 'POST',
+        body: JSON.stringify({ paths, confirm: true, mixed }),
+      }),
+    commit: (id: string, message: string) =>
+      request<{ hash: string }>(`/api/projects/${encodeURIComponent(id)}/git/commit`, {
+        method: 'POST',
+        body: JSON.stringify({ message }),
+      }),
+    push: (id: string) =>
+      request<{ remote: string; branch: string; remoteBranch: string }>(
+        `/api/projects/${encodeURIComponent(id)}/git/push`,
+        { method: 'POST', body: JSON.stringify({ confirm: true }) },
+      ),
+  },
   commands: (projectId?: string | null) =>
     request<CommandList>(`/api/commands${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ''}`),
   createCommand: (data: CommandInput & { projectId: string | null }) =>

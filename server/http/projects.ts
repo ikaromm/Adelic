@@ -80,6 +80,7 @@ export function projectsRoutes({ store, orchestrator }: BackendContext) {
     p.name = fields.data.name ?? p.name;
     p.memoryWorkspace = fields.data.memoryWorkspace ?? p.memoryWorkspace;
     p.memoryProject = fields.data.memoryProject ?? p.memoryProject;
+    if (fields.data.git) p.git = fields.data.git;
     res.json(store.updateProject(p));
   });
   return app;

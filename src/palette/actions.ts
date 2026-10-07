@@ -20,7 +20,7 @@ export type PaletteIcon =
   | 'agent'
   | 'mode'
   | 'command';
-export type PalettePage = 'chat' | 'activity' | 'memory' | 'settings';
+export type PalettePage = 'chat' | 'activity' | 'memory' | 'settings' | 'git';
 
 export interface PaletteAction {
   /** Stable id, also what the recents list stores (never titles or content). */

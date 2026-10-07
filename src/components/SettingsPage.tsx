@@ -9,6 +9,7 @@ import type {
   ProjectCoordination,
 } from '../../shared/contracts';
 import { integrationName } from '../labels';
+import { notificationPermission, notificationsEnabled } from '../hooks/useRunNotifications';
 import { DiagnosticsCard } from './DiagnosticsCard';
 import { ProjectTools } from './ProjectTools';
 
@@ -56,7 +57,8 @@ export function SettingsPage({
       | 'responseStyle'
       | 'approvalMode'
       | 'updateCheck'
-      | 'autoRetry',
+      | 'autoRetry'
+      | 'notifications',
     value: string | boolean,
   ) => void;
   onSkill: (id: string, enabled: boolean) => void;
@@ -192,6 +194,10 @@ export function SettingsPage({
                 <span />
               </button>
             </div>
+            <NotificationSetting
+              enabled={notificationsEnabled(data.settings)}
+              onChange={(enabled) => onSetting('notifications', enabled)}
+            />
           </section>
           <section className="settings-card">
             <div className="settings-card-heading">
@@ -383,5 +389,65 @@ export function SettingsPage({
         </aside>
       </div>
     </section>
+  );
+}
+
+/**
+ * "Notificar quando terminar". Turning it on asks the browser for permission first; when the
+ * permission is denied (or was revoked later) the setting explains why nothing appears.
+ */
+function NotificationSetting({ enabled, onChange }: { enabled: boolean; onChange: (enabled: boolean) => void }) {
+  const [permission, setPermission] = useState(notificationPermission);
+  const [asking, setAsking] = useState(false);
+  async function toggle() {
+    if (enabled) return onChange(false);
+    let current = notificationPermission();
+    if (current === 'default') {
+      setAsking(true);
+      try {
+        current = await Notification.requestPermission();
+      } catch {
+        current = notificationPermission();
+      } finally {
+        setAsking(false);
+      }
+    }
+    setPermission(current);
+    if (current === 'granted') onChange(true);
+  }
+  const problem =
+    permission === 'unsupported'
+      ? 'Este navegador não oferece notificações do sistema.'
+      : permission === 'denied'
+        ? 'As notificações estão bloqueadas para este endereço. Libere-as nas permissões do navegador e tente de novo.'
+        : enabled && permission === 'default'
+          ? 'Ative de novo para permitir as notificações neste navegador.'
+          : '';
+  return (
+    <>
+      <div className="setting-row">
+        <div>
+          <strong>Notificar quando terminar</strong>
+          <span>
+            Com a janela em segundo plano: resposta pronta, falha ou aprovação pendente. Mostra só o título da conversa.
+          </span>
+        </div>
+        <button
+          className={`toggle ${enabled ? 'on' : ''}`}
+          role="switch"
+          aria-checked={enabled}
+          aria-label="Notificar quando terminar"
+          disabled={asking}
+          onClick={() => void toggle()}
+        >
+          <span />
+        </button>
+      </div>
+      {problem && (
+        <div className="inline-notice" role="status">
+          {problem}
+        </div>
+      )}
+    </>
   );
 }

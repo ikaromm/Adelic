@@ -1,4 +1,5 @@
-import { mkdirSync } from 'node:fs';
+import { chmodSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
@@ -16,6 +17,7 @@ import {
   type Settings,
   type Skill,
   type ConversationSearchHit,
+  type StoredAttachment,
 } from '../shared/contracts.js';
 import { migrate, type MigrationResult } from './migrations.js';
 
@@ -201,12 +203,68 @@ export class Store {
     this.db.exec('BEGIN IMMEDIATE');
     try {
       this.db.prepare('DELETE FROM delegated_tasks WHERE session_id=?').run(id);
+      // attachments rows go with the session (ON DELETE CASCADE); the files are removed below.
       this.db.prepare('DELETE FROM sessions WHERE id=?').run(id);
       this.db.exec('COMMIT');
     } catch (error) {
       this.db.exec('ROLLBACK');
       throw error;
     }
+    rmSync(this.attachmentDir(id), { recursive: true, force: true });
+  }
+  /** Folder holding one conversation's attachment files (`<dataDir>/attachments/<sessionId>`). */
+  attachmentDir(sessionId: string) {
+    if (!/^[\w-]{1,128}$/.test(sessionId)) throw new Error('Identificador de conversa inválido');
+    return join(this.dataDir, 'attachments', sessionId);
+  }
+  /** Absolute path of an attachment's file. */
+  attachmentPath(attachment: StoredAttachment) {
+    return join(this.attachmentDir(attachment.sessionId), attachment.file);
+  }
+  /**
+   * Writes an attachment file (0600, folders 0700) and its row. The stored name keeps only
+   * safe characters; the original name stays in the metadata for display.
+   */
+  saveAttachment(sessionId: string, name: string, kind: StoredAttachment['kind'], mime: string, bytes: Uint8Array) {
+    const id = randomUUID();
+    const safe =
+      name
+        .normalize('NFKD')
+        .replace(/[^\w.-]+/g, '_')
+        .replace(/^[.]+/, '')
+        .slice(-80) || 'arquivo';
+    const file = `${id}-${safe}`;
+    const root = join(this.dataDir, 'attachments');
+    mkdirSync(root, { recursive: true, mode: 0o700 });
+    const dir = this.attachmentDir(sessionId);
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    chmodSync(dir, 0o700);
+    writeFileSync(join(dir, file), bytes, { mode: 0o600, flag: 'wx' });
+    const attachment: StoredAttachment = {
+      id,
+      sessionId,
+      name: name.slice(0, 200),
+      mime,
+      size: bytes.byteLength,
+      kind,
+      file,
+      createdAt: new Date().toISOString(),
+    };
+    try {
+      this.db
+        .prepare('INSERT INTO attachments(id,session_id,data) VALUES(?,?,?)')
+        .run(id, sessionId, JSON.stringify(attachment));
+    } catch (error) {
+      rmSync(join(dir, file), { force: true });
+      throw error;
+    }
+    return attachment;
+  }
+  getAttachment(id: string) {
+    return this.get<StoredAttachment>('attachments', id);
+  }
+  listAttachments(sessionId: string) {
+    return this.rows<StoredAttachment>('attachments', 'WHERE session_id=? ORDER BY rowid', [sessionId]);
   }
   addMessage(m: Message, clientId?: string) {
     this.db

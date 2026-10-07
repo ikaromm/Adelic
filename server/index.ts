@@ -12,7 +12,7 @@ import { accessGuard, authRoutes, type RemoteAccess } from './http/auth.js';
 import { diagnosticsRoutes } from './http/diagnostics.js';
 import { memoryRoutes } from './http/memory.js';
 import { projectsRoutes } from './http/projects.js';
-import { sessionsRoutes } from './http/sessions.js';
+import { isAttachmentUpload, sessionsRoutes } from './http/sessions.js';
 import { settingsRoutes } from './http/settings.js';
 
 export function createBackend(
@@ -26,7 +26,10 @@ export function createBackend(
 ) {
   const app = express();
   app.disable('x-powered-by');
-  app.use(express.json({ limit: '128kb', strict: true }));
+  // Attachment uploads carry base64 files: that one route parses its own larger body, after
+  // the access guard, so unauthenticated requests never get the 15 MB parser.
+  const json = express.json({ limit: '128kb', strict: true });
+  app.use((req, res, next) => (isAttachmentUpload(req) ? next() : json(req, res, next)));
   const orchestrator = new Orchestrator(store, providers, undefined, graphifyService, providerList, retryOverrides);
   let providersCache: { at: number; value: Awaited<ReturnType<typeof providers.list>> } | undefined;
   let providersPending: Promise<Awaited<ReturnType<typeof providers.list>>> | undefined;

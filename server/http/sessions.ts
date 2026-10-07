@@ -1,12 +1,15 @@
-import { Router } from 'express';
+import express, { Router, type NextFunction, type Request, type Response } from 'express';
 import { randomUUID } from 'node:crypto';
-import type { Message, ProviderInfo, Session } from '../../shared/contracts.js';
+import { readFile } from 'node:fs/promises';
+import type { Message, ProviderInfo, Session, StoredAttachment } from '../../shared/contracts.js';
+import { attachmentMeta, decodeUpload } from '../attachments.js';
 import { supportsEffort } from '../../shared/reasoning.js';
 import {
   ApprovalDecisionSchema,
   CreateSessionSchema,
   PatchSessionSchema,
   SendMessageSchema,
+  UploadAttachmentSchema,
   parseBody,
   text,
 } from '../../shared/schemas.js';
@@ -14,6 +17,19 @@ import { error, errorStatus, message } from './common.js';
 
 const titleSchema = text(160);
 import type { BackendContext } from './context.js';
+
+const UPLOAD_PATH = /^\/api\/sessions\/[^/]+\/attachments\/?$/;
+/** The upload route parses its own (larger) JSON body; the global 128 KB parser skips it. */
+export const isAttachmentUpload = (req: Request) => req.method === 'POST' && UPLOAD_PATH.test(req.path);
+const uploadJson = express.json({ limit: '15mb', strict: true });
+function parseUpload(req: Request, res: Response, next: NextFunction) {
+  uploadJson(req, res, (e?: unknown) => {
+    if ((e as { type?: string } | undefined)?.type === 'entity.too.large')
+      return error(res, 413, 'Arquivo grande demais: imagens até 10 MB, textos até 512 KB.');
+    if (e) return error(res, 400, 'Corpo JSON inválido');
+    next();
+  });
+}
 
 const roleName: Record<Message['role'], string> = { user: 'Você', assistant: 'Agente', system: 'Sistema' };
 /** Markdown transcript of a conversation's visible messages (no internal events or tasks). */
@@ -172,14 +188,55 @@ export function sessionsRoutes({ store, orchestrator, providerList }: BackendCon
     store.deleteSession(s.id);
     res.status(204).end();
   });
+  app.post('/api/sessions/:id/attachments', parseUpload, (req, res) => {
+    const s = store.getSession(String(req.params.id));
+    if (!s) return error(res, 404, 'Conversa não encontrada');
+    const parsed = parseBody(UploadAttachmentSchema, req.body, 'Anexo inválido');
+    if (!parsed.ok) return error(res, 400, parsed.message);
+    const { name, mime, data } = parsed.data;
+    const decoded = decodeUpload(name, mime ?? '', data);
+    if (!decoded.ok) return error(res, 400, decoded.message);
+    try {
+      const saved = store.saveAttachment(s.id, name, decoded.kind, decoded.mime, decoded.bytes);
+      res.status(201).json(attachmentMeta(saved));
+    } catch (e) {
+      error(res, 500, `Não foi possível salvar o anexo: ${message(e)}`);
+    }
+  });
+  // Serves a stored attachment (thumbnails, opening a file). Only ids known to the store.
+  app.get('/api/attachments/:id', async (req, res) => {
+    const attachment = store.getAttachment(req.params.id);
+    if (!attachment) return error(res, 404, 'Anexo não encontrado');
+    let body: Buffer;
+    try {
+      body = await readFile(store.attachmentPath(attachment));
+    } catch {
+      return error(res, 404, 'Anexo não encontrado');
+    }
+    res.set({
+      'Content-Type': attachment.kind === 'image' ? attachment.mime : 'text/plain; charset=utf-8',
+      'X-Content-Type-Options': 'nosniff',
+      'Content-Security-Policy': "default-src 'none'; sandbox",
+      'Cache-Control': 'private, max-age=3600',
+      'Content-Disposition': `inline; filename*=UTF-8''${encodeURIComponent(attachment.name)}`,
+    });
+    res.send(body);
+  });
   app.post('/api/sessions/:id/messages', async (req, res) => {
     const s = store.getSession(req.params.id);
     if (!s) return error(res, 404, 'Conversa não encontrada');
     const parsed = parseBody(SendMessageSchema, req.body, 'content obrigatório (máximo 32000 caracteres)');
     if (!parsed.ok) return error(res, 400, parsed.message);
-    const { content, clientMessageId } = parsed.data;
+    const { content, clientMessageId, attachmentIds = [] } = parsed.data;
+    const attachments: StoredAttachment[] = [];
+    for (const id of attachmentIds) {
+      const attachment = store.getAttachment(id);
+      if (!attachment || attachment.sessionId !== s.id)
+        return error(res, 400, 'Anexo não encontrado nesta conversa; envie o arquivo de novo.');
+      attachments.push(attachment);
+    }
     try {
-      const result = await orchestrator.start(s, content, clientMessageId);
+      const result = await orchestrator.start(s, content, clientMessageId, attachments);
       res.status(202).json(result);
     } catch (e) {
       const status = errorStatus(e) || 500;

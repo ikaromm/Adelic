@@ -1006,6 +1006,8 @@
 .composer-input:focus-visible {
   border: 0;
   outline: none;
+  /* .composer-box:focus-within draws the ring; an inner one shows once chips sit above. */
+  box-shadow: none;
 }
 
 .composer-input::placeholder {
@@ -1641,5 +1643,96 @@
   .retry-notice {
     flex-direction: column;
     align-items: stretch;
+  }
+}
+
+/* Attachments: pending chips in the composer and thumbnails/chips in sent messages. */
+.composer-box.is-dragging {
+  border-color: var(--accent);
+  border-style: dashed;
+}
+.attach-button {
+  padding: 0 8px;
+}
+.attachment-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.composer-attachments {
+  padding: 10px 12px 0;
+}
+.message-attachments {
+  justify-content: flex-end;
+  max-width: min(80%, 640px);
+}
+.attachment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  max-width: 240px;
+  padding: 4px 4px 4px 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+  color: var(--text);
+  font-size: var(--text-xs);
+}
+.message-attachments .attachment-chip {
+  padding: 6px 10px 6px 8px;
+}
+.message-attachments .attachment-chip.image {
+  padding: 0;
+  overflow: hidden;
+}
+.attachment-chip.uploading {
+  color: var(--text-secondary);
+}
+.attachment-thumb {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-xs);
+  object-fit: cover;
+}
+.attachment-thumb.large {
+  display: block;
+  width: auto;
+  max-width: 220px;
+  height: 140px;
+  border-radius: 0;
+}
+.attachment-icon {
+  flex: none;
+  color: var(--text-muted);
+}
+.attachment-text {
+  display: grid;
+  min-width: 0;
+}
+.attachment-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.attachment-text small {
+  color: var(--text-muted);
+}
+.attachment-remove {
+  flex: none;
+  width: 24px;
+  height: 24px;
+}
+@media (max-width: 520px) {
+  .attachment-chip {
+    max-width: 100%;
+  }
+  .attachment-thumb.large {
+    max-width: 160px;
+    height: 110px;
   }
 }

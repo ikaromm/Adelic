@@ -14,7 +14,9 @@ import {
 import { stopUtilityProcess, type UtilityState } from './utility-lifecycle.js';
 
 type BackendMessage =
-  { type: 'ready'; url: string; port: number; nodeVersion: string } | { type: 'error'; message: string };
+  | { type: 'ready'; url: string; port: number; nodeVersion: string }
+  | { type: 'error'; message: string }
+  | { type: 'relaunch' };
 type SmokeResult = {
   ok: boolean;
   forwarded?: boolean;
@@ -134,6 +136,18 @@ function requestQuit(exitCode = 0) {
     });
   }
   return shutdownPromise;
+}
+
+/**
+ * After "Atualizar Adelic" replaced the AppImage (docs/specs/self-update.md): stop the
+ * backend like a normal quit, then start the file at $APPIMAGE again, which is the new one.
+ */
+function relaunchAfterUpdate() {
+  if (shutdownRequested) return;
+  logLifecycle('reiniciando após atualização');
+  const appImage = process.env.APPIMAGE;
+  app.relaunch(appImage ? { execPath: appImage, args: process.argv.slice(1) } : undefined);
+  void requestQuit(0);
 }
 
 function handleExternalLink(url: string) {
@@ -301,6 +315,10 @@ async function startDesktop() {
   child.on('exit', (code) => {
     backendState.exited = true;
     if (!shutdownRequested && backendUrl) void showBackendExitFailure(code);
+  });
+  child.on('message', (raw: unknown) => {
+    if (raw && typeof raw === 'object' && (raw as { type?: unknown }).type === 'relaunch' && backendUrl)
+      relaunchAfterUpdate();
   });
 
   const ready = await waitForBackendReady(child, resources.backend);

@@ -23,6 +23,8 @@ npm run dev
 
 Acesse **http://127.0.0.1:4317**. O servidor escuta somente no loopback. Para servir o build local: `npm run build` e `npm start`.
 
+Para atualizar, use **Configurações › Diagnóstico › Atualizar Adelic**, neste computador: num checkout git ele avança o branch do canal escolhido (`master` ou `develop`) só por fast-forward, recompila e reinicia o servidor; no AppImage baixa a nova release, confere o SHA-256 e reinicia. Ele se recusa com alterações locais, commits à frente ou execuções em andamento. Veja [atualizar o Adelic](docs/specs/self-update.md). À mão, num checkout: `git pull --ff-only`, `npm ci` se o `package-lock.json` mudou, `npm run build` e reinicie.
+
 - **Auto** escolhe a rota por regras locais, sem uma chamada adicional de IA. Perguntas diretas usam esforço baixo e histórico reduzido; pedidos de arquivos, pesquisa e execução recebem recursos adicionais.
 - **Rápido** força o caminho curto, com um executor e ferramentas locais disponíveis quando necessárias, sem busca automática de memória, grafo ou planejamento. Perguntas diretas podem ser respondidas sem executar comandos. **Completo** aumenta o contexto e o esforço; ferramentas são habilitadas quando o pedido exige.
 - **Thinking** oferece Auto e os níveis anunciados pelo modelo escolhido, inclusive Muito alto, Máximo e Ultra quando disponíveis. A escolha explícita chega às tarefas delegadas com adaptação à capacidade de cada modelo; não ativa ferramentas ou memória por si só. Sem níveis anunciados, o seletor oferece somente Auto.

@@ -7,8 +7,6 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
 import { precacheEntries } from './src/pwa/sw-core.js';
 
-const outDir = resolve(import.meta.dirname, 'dist');
-
 function files(dir: string): string[] {
   return readdirSync(dir, { withFileTypes: true }).flatMap((entry) =>
     entry.isDirectory() ? files(join(dir, entry.name)) : [join(dir, entry.name)],
@@ -16,14 +14,19 @@ function files(dir: string): string[] {
 }
 
 /**
- * Writes dist/sw.js after the build (docs/specs/pwa.md). The precache list is the whole
+ * Writes sw.js into the output folder after the build (docs/specs/pwa.md). The precache list is the whole
  * output (index.html, hashed assets, offline page, manifest and icons), and the version is
  * a hash of those files, so any change to the shell installs a new worker and cache.
  */
 function serviceWorker(): Plugin {
+  // The resolved output folder: `vite build --outDir <tmp>` (self-update builds aside, then swaps).
+  let outDir = resolve(import.meta.dirname, 'dist');
   return {
     name: 'adelic-service-worker',
     apply: 'build',
+    configResolved(config) {
+      outDir = resolve(config.root, config.build.outDir);
+    },
     async closeBundle() {
       const precache = precacheEntries(files(outDir).map((file) => relative(outDir, file)));
       const hash = createHash('sha256');

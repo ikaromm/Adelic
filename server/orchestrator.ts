@@ -134,6 +134,8 @@ export class Orchestrator {
   private worktreeBusy = new Set<string>();
   private starting = new Map<string, StartingRun>();
   private shuttingDown = false;
+  /** An app update is running (docs/specs/self-update.md): nothing new may start. */
+  private updating = false;
   private deciding = new Set<string>();
   private listeners = new Set<(event: StreamEvent) => void>();
   private writingProjects = new Set<string>();
@@ -224,6 +226,7 @@ export class Orchestrator {
     options: StartOptions = {},
   ): Promise<{ runId: string; messageId: string }> {
     if (this.shuttingDown) throw Object.assign(new Error('Orquestrador está encerrando'), { status: 503 });
+    this.assertNotUpdating();
     // `/compactar` alone is a built-in action, checked before saved commands: no user message,
     // just the summary card (docs/specs/compaction.md).
     const compact = options.planTask || options.hookFix ? undefined : compactCommand(content);
@@ -270,6 +273,7 @@ export class Orchestrator {
       const catalog =
         (initialThinking && initialThinking !== 'auto') || hasImages ? await this.providerList() : undefined;
       if (this.shuttingDown) throw Object.assign(new Error('Orquestrador está encerrando'), { status: 503 });
+      this.assertNotUpdating();
       if (controller.signal.aborted) throw cancelledError('Execução cancelada antes de iniciar');
       // Re-read after discovery. PATCH is blocked by this reservation, and using the
       // stored snapshot here prevents an older request object from overwriting it.
@@ -534,6 +538,7 @@ export class Orchestrator {
    */
   async compact(sessionId: string, options: { overrideLimit?: boolean } = {}): Promise<Started> {
     if (this.shuttingDown) throw Object.assign(new Error('Orquestrador está encerrando'), { status: 503 });
+    this.assertNotUpdating();
     const session = this.requireSession(sessionId);
     if (this.isActive(sessionId) || session.activeRunId)
       throw Object.assign(new Error('Há uma execução em andamento nesta conversa; aguarde ou cancele antes'), {
@@ -768,6 +773,7 @@ export class Orchestrator {
    */
   async handoff(sessionId: string, request: HandoffRequest, options: { overrideLimit?: boolean } = {}) {
     if (this.shuttingDown) throw Object.assign(new Error('Orquestrador está encerrando'), { status: 503 });
+    this.assertNotUpdating();
     const session = this.requireSession(sessionId);
     if (this.isActive(sessionId) || session.activeRunId)
       throw Object.assign(new Error('Não é possível trocar de agente durante uma execução'), { status: 409 });
@@ -853,6 +859,7 @@ export class Orchestrator {
   }
   /** Runs one worktree operation at a time per conversation; runs there wait for 409 meanwhile. */
   private async withWorktree<T>(sessionId: string, work: () => Promise<T>) {
+    this.assertNotUpdating();
     this.worktreeBusy.add(sessionId);
     try {
       return await work();
@@ -2028,6 +2035,7 @@ export class Orchestrator {
   }
   /** Runs a git panel mutation in `path`; 409 when gitBlock refuses. New runs there wait for 409. */
   async withGitOperation<T>(path: string, work: () => Promise<T>): Promise<T> {
+    this.assertNotUpdating();
     const reason = this.gitBlock(path);
     if (reason) throw Object.assign(new Error(reason), { status: 409 });
     const root = realPath(path);
@@ -2043,6 +2051,7 @@ export class Orchestrator {
    * run is active in that folder, and new runs there wait for 409 until it finishes.
    */
   async restoreRun(runId: string) {
+    this.assertNotUpdating();
     const run = this.store.getRun(runId);
     if (!run) throw Object.assign(new Error('Execução não encontrada'), { status: 404 });
     if (run.status === 'running') throw new CheckpointError('A execução ainda está em andamento');
@@ -2120,6 +2129,7 @@ export class Orchestrator {
   /** "Testar" in the project settings: one check now; 409 while a run may write there. */
   async testHook(projectId: string, index: number) {
     if (this.shuttingDown) throw Object.assign(new Error('Orquestrador está encerrando'), { status: 503 });
+    this.assertNotUpdating();
     const project = this.store.getProject(projectId);
     if (!project) throw Object.assign(new Error('Projeto não encontrado'), { status: 404 });
     const check = this.store.getHooks(projectId).afterEdit[index];
@@ -2618,6 +2628,45 @@ export class Orchestrator {
       `${taskTitle ? `${taskTitle}: ` : ''}${progress.reason}; tentando de novo (${progress.attempt}/${progress.of}) em ${seconds} s`,
       { attempt: progress.attempt, of: progress.of, delayMs: progress.delayMs, error: progress.error.slice(0, 300) },
     );
+  }
+  private assertNotUpdating() {
+    if (this.updating)
+      throw Object.assign(new Error('O Adelic está sendo atualizado; tente de novo depois de reiniciar'), {
+        status: 409,
+      });
+  }
+  /**
+   * Why an app update cannot start now: any run (starting or active), queue drain, undo,
+   * git panel operation, worktree change or after-edit check. Undefined when idle.
+   */
+  updateBlock(): string | undefined {
+    if (this.shuttingDown) return 'O Adelic está encerrando';
+    if (this.updating) return 'Uma atualização já está em andamento';
+    if (this.active.size || this.starting.size || this.drains.size)
+      return 'Há uma execução em andamento; aguarde ou cancele antes de atualizar';
+    if (this.store.hasExecutingPlans()) return 'Um plano está em execução; aguarde ou pare antes de atualizar';
+    if (this.restoring.size) return 'As alterações de uma execução estão sendo desfeitas';
+    if (this.gitOps.size || this.applying.size || this.worktreeBusy.size)
+      return 'Uma operação do git está em andamento; aguarde';
+    if (this.store.listProjects().some((project) => this.hookChecks.running(project.id)))
+      return 'Há verificações de projeto rodando; aguarde';
+    return undefined;
+  }
+  /**
+   * Holds every new run and git operation off (409) until the returned release is called
+   * (an app update; after a successful one the process restarts instead). Throws 409 when
+   * updateBlock refuses.
+   */
+  beginUpdate(): () => void {
+    const reason = this.updateBlock();
+    if (reason) throw Object.assign(new Error(reason), { status: 409 });
+    this.updating = true;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.updating = false;
+    };
   }
   async shutdown() {
     this.shuttingDown = true;

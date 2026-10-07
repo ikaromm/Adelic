@@ -720,6 +720,12 @@ export class Store {
   getPlan(id: string) {
     return this.get<Plan>('plans', id);
   }
+  /** Any plan of any conversation is executing (between its task runs too). */
+  hasExecutingPlans() {
+    return Boolean(
+      this.db.prepare("SELECT 1 FROM plans WHERE json_extract(data,'$.status')='executing' LIMIT 1").get(),
+    );
+  }
   listPlans(sessionId: string) {
     return this.rows<Plan>('plans', 'WHERE session_id=? ORDER BY rowid', [sessionId]);
   }

@@ -12,6 +12,8 @@ import {
 import { api, type Diagnostics, type UpdateInfo } from '../api';
 import { promptInstall, usePwa } from '../pwa/client';
 import { copyText } from '../Markdown';
+import type { UpdateChannel } from '../../shared/contracts';
+import { SelfUpdate } from './SelfUpdate';
 
 const field = (label: string, value: string | number | null | undefined) => (
   <div className="diagnostics-row" key={label}>
@@ -46,9 +48,13 @@ function InstallRow() {
 export function DiagnosticsCard({
   updateCheck,
   onUpdateCheck,
+  updateChannel,
+  onUpdateChannel,
 }: {
   updateCheck: boolean;
   onUpdateCheck: (enabled: boolean) => void;
+  updateChannel: UpdateChannel;
+  onUpdateChannel: (channel: UpdateChannel) => void;
 }) {
   const [update, setUpdate] = useState<UpdateInfo | null>(null);
   const [checking, setChecking] = useState(false);
@@ -107,7 +113,10 @@ export function DiagnosticsCard({
       <div className="setting-row">
         <div>
           <strong>Verificar novas versões</strong>
-          <span>Consulta a última release no GitHub ao abrir o Adelic. Nunca baixa nem instala nada.</span>
+          <span>
+            Consulta a última versão (release no GitHub ou, num checkout, o branch do canal) ao abrir o Adelic. Nunca
+            instala nada sem você pedir.
+          </span>
         </div>
         <button
           className={`toggle ${updateCheck ? 'on' : ''}`}
@@ -140,6 +149,7 @@ export function DiagnosticsCard({
           )}
         </p>
       )}
+      <SelfUpdate channel={updateChannel} onChannel={onUpdateChannel} />
       <InstallRow />
       <div className="diagnostics-actions">
         <button type="button" className="secondary-button" onClick={() => void load()} disabled={busy}>

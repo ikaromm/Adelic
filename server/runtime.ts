@@ -13,6 +13,7 @@ import { funnelPortFromEnv, remoteAccessFromEnv, tagListener, type RemoteAccess 
 import type { FunnelListener } from './http/remote-access.js';
 import type { FunnelService } from './funnel.js';
 import { webAssets } from './http/web.js';
+import { SelfUpdateService, type RestartFn, type SelfUpdater } from './self-update.js';
 
 export interface StartServerOptions {
   port?: number;
@@ -30,6 +31,19 @@ export interface StartServerOptions {
   dataDir?: string;
   development?: boolean;
   seedProject?: Project;
+  /**
+   * Restarts the app after "Atualizar Adelic" (docs/specs/self-update.md); receives this
+   * server's close(). The CLI respawns the process, the desktop relaunches Electron.
+   * Without it the update still applies and asks for a manual restart.
+   */
+  restart?: (close: () => Promise<void>, context: { dataDir: string }) => Promise<void> | void;
+  /** Replaces the updater (tests): an instance, or a factory given the wired restart. */
+  selfUpdater?: SelfUpdater | ((restart: RestartFn | undefined) => SelfUpdater);
+  /**
+   * Keep retrying for this long while the ports or the data folder are still held (a restart
+   * waits for the previous process). Default: ADELIC_RESTART_WAIT (ms), else no retry.
+   */
+  restartWaitMs?: number;
 }
 
 export interface RunningServer {
@@ -63,6 +77,23 @@ function listen(server: HttpServer | NetServer, ...args: Parameters<HttpServer['
     // The common overload used here is also accepted by net.Server at runtime.
     (server.listen as (...params: unknown[]) => HttpServer | NetServer)(...args);
   });
+}
+
+const addressInUse = (error: unknown) =>
+  errorCode(error) === 'EADDRINUSE' ||
+  (error instanceof Error && error.cause !== undefined && errorCode(error.cause) === 'EADDRINUSE');
+
+/** Repeats `work` while it fails with EADDRINUSE, with growing pauses, for up to `waitMs`. */
+export async function retryInUse<T>(work: () => Promise<T>, waitMs: number): Promise<T> {
+  const deadline = Date.now() + waitMs;
+  for (let pause = 100; ; pause = Math.min(pause * 2, 1000)) {
+    try {
+      return await work();
+    } catch (error) {
+      if (!addressInUse(error) || Date.now() + pause > deadline) throw error;
+      await new Promise((done) => setTimeout(done, pause));
+    }
+  }
 }
 
 async function closeServer(server: HttpServer) {
@@ -108,8 +139,13 @@ export async function startServer(options: StartServerOptions = {}): Promise<Run
   mkdirSync(resolve(requestedDataDir), { recursive: true });
   const realDataDir = realpathSync(requestedDataDir);
 
+  const envWait = Number(process.env.ADELIC_RESTART_WAIT);
+  const waitMs = options.restartWaitMs ?? (Number.isFinite(envWait) && envWait > 0 ? Math.min(envWait, 60_000) : 0);
+  // Read once: agents and terminals started by this process must not inherit it.
+  delete process.env.ADELIC_RESTART_WAIT;
+
   // Own the real database path before Store runs its startup repair statements.
-  const releaseLock = await acquireDataLock(realDataDir);
+  const releaseLock = await retryInUse(() => acquireDataLock(realDataDir), waitMs);
   let store: Store | undefined;
   let providers: ProviderRegistry | undefined;
   let orchestrator: ReturnType<typeof createBackend>['orchestrator'] | undefined;
@@ -163,6 +199,16 @@ export async function startServer(options: StartServerOptions = {}): Promise<Run
                 return funnelPort!;
               })()),
           };
+    // close() is defined below; the updater calls it only after the server is up.
+    const closeRef: { current?: () => Promise<void> } = {};
+    const restartOption = options.restart;
+    const restart: RestartFn | undefined = restartOption
+      ? () => restartOption(() => closeRef.current!(), { dataDir: realDataDir })
+      : undefined;
+    const selfUpdater =
+      typeof options.selfUpdater === 'function'
+        ? options.selfUpdater(restart)
+        : (options.selfUpdater ?? new SelfUpdateService(restart ? { restart } : {}));
     const backend = createBackend(
       store,
       providers,
@@ -174,6 +220,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Run
       undefined,
       undefined,
       { funnelListener, funnelService: options.funnelService },
+      selfUpdater,
     );
     holder.app = backend.app;
     orchestrator = backend.orchestrator;
@@ -190,15 +237,16 @@ export async function startServer(options: StartServerOptions = {}): Promise<Run
 
     http = createHttpServer(backend.app);
     tagListener(http, 'local');
-    await listen(http, { host: '127.0.0.1', port: options.port ?? 4317 });
+    const server = http;
+    await retryInUse(() => listen(server, { host: '127.0.0.1', port: options.port ?? 4317 }), waitMs);
     const address = http.address();
     if (!address || typeof address === 'string') throw new Error('O servidor iniciou sem uma porta TCP válida.');
     // Same app on a second, explicitly configured address; every request there needs the token.
     let remotePort: number | undefined;
     if (remote) {
-      remoteHttp = createHttpServer(backend.app);
-      tagListener(remoteHttp, 'tailnet');
-      await listen(remoteHttp, { host: remote.bind, port: remote.port });
+      const remoteServer = (remoteHttp = createHttpServer(backend.app));
+      tagListener(remoteServer, 'tailnet');
+      await retryInUse(() => listen(remoteServer, { host: remote.bind, port: remote.port }), waitMs);
       const remoteAddress = remoteHttp.address();
       remotePort = remoteAddress && typeof remoteAddress !== 'string' ? remoteAddress.port : remote.port;
     }
@@ -251,6 +299,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Run
         if (firstError) throw firstError;
       })());
 
+    closeRef.current = close;
     return {
       url: `http://127.0.0.1:${address.port}`,
       port: address.port,

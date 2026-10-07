@@ -1,5 +1,6 @@
-import { resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import { seedAdelicProject, startServer } from './runtime.js';
+import { respawnProcess } from './self-update.js';
 
 async function main() {
   const cwd = resolve(process.cwd());
@@ -11,6 +12,8 @@ async function main() {
     dataDir: process.env.ADELIC_DATA_DIR,
     development,
     seedProject: await seedAdelicProject(cwd),
+    // After "Atualizar Adelic": a copy of this process takes over the ports (docs/specs/self-update.md).
+    restart: (close, { dataDir }) => respawnProcess(close, join(dataDir, 'self-update.log'))(),
   });
   console.log(`Adelic disponível em ${server.url}`);
   if (server.remoteUrl) console.log(`Acesso remoto (com token) em ${server.remoteUrl}`);

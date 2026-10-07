@@ -24,9 +24,12 @@ import type {
   Run,
   Session,
   SessionDetail,
+  SelfUpdateStatus,
   Settings,
   Skill,
   SpendLimitStatus,
+  UpdateChannel,
+  UpdateProgress,
   UsageReport,
   WorktreeStatus,
 } from '../shared/contracts';
@@ -155,6 +158,16 @@ export const api = {
   searchConversations: (q: string) =>
     request<{ hits: ConversationSearchHit[] }>(`/api/search?q=${encodeURIComponent(q)}`),
   updates: (force = false) => request<UpdateInfo>(`/api/updates${force ? '?force=1' : ''}`),
+  /** "Atualizar Adelic" (docs/specs/self-update.md); only on this computer. */
+  updateStatus: () => request<SelfUpdateStatus>('/api/update/status'),
+  updateCheck: (channel?: UpdateChannel) =>
+    request<SelfUpdateStatus>('/api/update/check', {
+      method: 'POST',
+      body: JSON.stringify(channel ? { channel } : {}),
+    }),
+  updateApply: (data: { channel?: UpdateChannel; target?: string }) =>
+    request<UpdateProgress>('/api/update/apply', { method: 'POST', body: JSON.stringify({ confirm: true, ...data }) }),
+  updateProgress: () => request<UpdateProgress>('/api/update/progress'),
   detail: (id: string) => request<SessionDetail>(`/api/sessions/${encodeURIComponent(id)}`),
   task: (id: string) => request<DelegatedTask>(`/api/tasks/${encodeURIComponent(id)}`),
   createProject: (data: { name: string; path: string; memoryWorkspace?: string; memoryProject?: string }) =>

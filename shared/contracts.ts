@@ -475,8 +475,10 @@ export interface Settings {
    * these models in order, once each, for that run only (docs/specs/retries.md).
    */
   modelFallback?: { enabled: boolean; models: { providerId: ProviderId; model: string }[] };
-  /** Opt-in: check GitHub for a newer release (one anonymous request, never installs). */
+  /** Opt-in: check GitHub (or the git remote, in a checkout) for a newer version; never installs by itself. */
   updateCheck?: boolean;
+  /** "Canal de atualização" of a git checkout (docs/specs/self-update.md). Absent: master. */
+  updateChannel?: UpdateChannel;
   /** System notification when a run finishes, fails or needs approval while the window is in the background. Absent: on in the desktop app, off in a browser. */
   notifications?: boolean;
   /** Opt-in: compact long conversations before the next message (off by default). */
@@ -684,4 +686,75 @@ export interface ProviderRegistry {
   /** Sends extra input to the single active turn of `runId`; absent when no provider supports it. */
   steer?(runId: string, content: string): Promise<void>;
   shutdown(): Promise<void>;
+}
+
+/** Self-update (docs/specs/self-update.md): branch followed by a git checkout. */
+export type UpdateChannel = 'master' | 'develop';
+export const UPDATE_CHANNELS: readonly UpdateChannel[] = ['master', 'develop'];
+/** How this Adelic was installed, detected at runtime. */
+export type InstallKind = 'checkout' | 'appimage' | 'other';
+export interface UpdateCommit {
+  hash: string;
+  subject: string;
+}
+/** GET /api/update/status, POST /api/update/check. */
+export interface SelfUpdateStatus {
+  kind: InstallKind;
+  version: string;
+  /** Short HEAD commit (checkout mode). */
+  commit?: string;
+  /** Random per server process; the UI waits for a new one after a restart. */
+  bootId: string;
+  channel: UpdateChannel;
+  /** GitHub releases page (always shown). */
+  releaseUrl: string;
+  /** When the last network check ran; absent until one did. */
+  checkedAt?: string;
+  /** A newer version exists for this channel or release. */
+  available: boolean;
+  /** "Atualizar agora" may run: available and nothing below blocks it. */
+  canApply: boolean;
+  /** Why the update cannot run right now. */
+  blocked?: string;
+  error?: string;
+  /** What the apply must reach: a commit (checkout) or a version (AppImage). */
+  target?: string;
+  /** An update is running. */
+  busy: boolean;
+  checkout?: {
+    branch: string | null;
+    head: string;
+    behind: number;
+    ahead: number;
+    /** No changes in tracked files (untracked files are allowed). */
+    clean: boolean;
+    /** Up to 10 commits that the update brings, newest first. */
+    commits: UpdateCommit[];
+    /** The update first switches to this branch ("Trocar para …"). */
+    switchTo?: UpdateChannel;
+    /** package-lock.json changes, so `npm ci` runs. */
+    install: boolean;
+  };
+  release?: {
+    latest: string;
+    url: string;
+    /** The AppImage file can be replaced in place. */
+    writable: boolean;
+    size?: number;
+  };
+}
+export type UpdateStepId =
+  'fetch' | 'switch' | 'merge' | 'install' | 'build' | 'download' | 'verify' | 'replace' | 'restart';
+export type UpdateStepStatus = 'pending' | 'running' | 'done' | 'failed' | 'skipped';
+/** GET /api/update/progress. */
+export interface UpdateProgress {
+  state: 'idle' | 'running' | 'failed' | 'restarting';
+  steps: { id: UpdateStepId; label: string; status: UpdateStepStatus }[];
+  /** Last 64 KB of command output. */
+  log: string;
+  error?: string;
+  /** Commit or version expected after the restart. */
+  target?: string;
+  startedAt?: string;
+  finishedAt?: string;
 }

@@ -2,8 +2,8 @@ import { z } from 'zod';
 import pkg from '../package.json' with { type: 'json' };
 
 // Checks GitHub for a newer Adelic release. Opt-in (Settings): it sends one anonymous GET
-// to api.github.com and nothing else. It never downloads or installs; the UI links to the
-// release page, where the AppImage is verified with its SHA-256 as usual.
+// to api.github.com and nothing else. It never downloads or installs by itself; the explicit
+// "Atualizar agora" of the desktop app (server/self-update.ts) reuses latestRelease().
 
 export const RELEASES_URL = 'https://api.github.com/repos/ikaromm/Adelic/releases/latest';
 /** Tests may point the check at a local server; anything that is not loopback is ignored. */
@@ -24,7 +24,30 @@ const ReleaseSchema = z.object({
   published_at: z.string().nullable().optional(),
   draft: z.boolean().optional(),
   prerelease: z.boolean().optional(),
+  assets: z
+    .array(z.object({ name: z.string(), browser_download_url: z.string().url(), size: z.number().optional() }))
+    .optional(),
 });
+export type Release = z.infer<typeof ReleaseSchema>;
+
+/** The latest published release from GitHub (throws on HTTP or payload errors, 5 s timeout). */
+export async function latestRelease(fetcher: typeof fetch = fetch): Promise<Release> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 5000);
+  try {
+    const response = await fetcher(releasesUrl(), {
+      headers: { accept: 'application/vnd.github+json', 'user-agent': `adelic/${pkg.version}` },
+      signal: controller.signal,
+    });
+    if (!response.ok) throw new Error(`GitHub respondeu HTTP ${response.status}`);
+    return ReleaseSchema.parse(await response.json());
+  } catch (e) {
+    if (controller.signal.aborted) throw new Error('sem resposta em 5 s', { cause: e });
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 export interface UpdateStatus {
   current: string;
@@ -56,16 +79,9 @@ export async function checkForUpdate(options: { force?: boolean; fetcher?: typeo
   if (!options.force && cache && Date.now() - cache.at < TTL) return cache.value;
   const current = pkg.version;
   const checkedAt = new Date().toISOString();
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 5000);
   let value: UpdateStatus;
   try {
-    const response = await (options.fetcher ?? fetch)(releasesUrl(), {
-      headers: { accept: 'application/vnd.github+json', 'user-agent': `adelic/${current}` },
-      signal: controller.signal,
-    });
-    if (!response.ok) throw new Error(`GitHub respondeu HTTP ${response.status}`);
-    const release = ReleaseSchema.parse(await response.json());
+    const release = await latestRelease(options.fetcher);
     const usable = !release.draft && !release.prerelease;
     value = {
       current,
@@ -76,10 +92,8 @@ export async function checkForUpdate(options: { force?: boolean; fetcher?: typeo
       checkedAt,
     };
   } catch (e) {
-    const reason = controller.signal.aborted ? 'sem resposta em 5 s' : e instanceof Error ? e.message : String(e);
+    const reason = e instanceof Error ? e.message : String(e);
     value = { current, available: false, checkedAt, error: `Não foi possível verificar atualizações: ${reason}` };
-  } finally {
-    clearTimeout(timer);
   }
   // Failures are cached briefly, successes for TTL.
   cache = { at: value.error ? Date.now() - TTL + 10 * 60_000 : Date.now(), value };

@@ -2,7 +2,7 @@
 
 Aplicativo local para conversar com agentes, organizar projetos e compartilhar contexto, com interface web e pacote desktop Linux. A primeira versão usa os runtimes instalados no computador; o login continua no Codex, Claude Code ou Kiro.
 
-Baixe a **[v0.2.0 para Linux x86_64](https://github.com/ikaromm/Adelic/releases/tag/v0.2.0)**: AppImage, checksum e instalador opcional estão nos assets da release. As [notas da versão](docs/releases/v0.2.0.md) descrevem os recursos e limites; o [changelog](CHANGELOG.md) registra as versões.
+Baixe a **[v0.4.0 para Linux x86_64](https://github.com/ikaromm/Adelic/releases/tag/v0.4.0)**: AppImage, checksum e instalador opcional estão nos assets da release. As [notas da versão](docs/releases/v0.4.0.md) descrevem os recursos e limites; o [changelog](CHANGELOG.md) registra as versões, e a seção "Não publicado" lista o que já está no código e ainda não saiu em release.
 
 O desktop Linux x86_64 usa Electron e AppImage, com Node e SQLite incorporados. Para gerar e instalar o pacote local:
 
@@ -46,7 +46,20 @@ Codex e Kiro foram testados com respostas reais e leitura de arquivo. O adaptado
 
 Codex, Kiro e Claude usam bubblewrap no Linux para limitar escrita, além dos controles nativos disponíveis; a política padrão é somente leitura. Aprovação automática permite consultas locais reconhecidas; comandos ambíguos, scripts e pedidos sensíveis ficam para confirmação. O Kiro continua com aprovação manual porque o protocolo não comprova todos os dados do comando. Isso não isola a rede. A integração `ai-jail` está prevista e o aplicativo informa a disponibilidade real do binário. Provedores indisponíveis exibem o motivo; as assinaturas mantêm os limites dos runtimes oficiais. Após autenticar um CLI, reinicie o servidor para atualizar imediatamente a descoberta, que tem cache de cinco minutos.
 
-O Adelic escuta só em `127.0.0.1` por padrão. Acesso remoto (por exemplo pela Tailscale) é opcional e fica desligado: veja [acesso remoto](docs/specs/remote-access.md). A avaliação do ai-jail está em [ai-jail](docs/specs/ai-jail.md); catálogo geral de MCPs e automações ficam para etapas seguintes.
+O Adelic escuta só em `127.0.0.1` por padrão. Acesso remoto (por exemplo pela Tailscale) é opcional e fica desligado: veja [acesso remoto](docs/specs/remote-access.md). A avaliação do ai-jail está em [ai-jail](docs/specs/ai-jail.md).
+
+### Recursos ainda não publicados
+
+Estes recursos já estão em `develop` e entram na próxima release. Os que executam algo por conta própria ou saem do computador começam desligados.
+
+- **Conversa:** [anexos](docs/specs/attachments.md) de imagens e arquivos de texto, [menções `@arquivo`](docs/specs/mentions.md), [fila de mensagens](docs/specs/message-queue.md) com Enviar agora e Orientar, [editar e ramificar](docs/specs/edit-branch.md), [compactação com resumo](docs/specs/compaction.md), [continuar em outro agente](docs/specs/provider-handoff.md) e [ditado por voz local](docs/specs/voice.md).
+- **Planejamento e comandos:** [modo plano](docs/specs/plan-mode.md) (planeja somente leitura, você aprova, depois executa tarefa por tarefa), [comandos salvos](docs/specs/saved-commands.md) (`/revisar`, `/testes`…), [paleta Ctrl+P](docs/specs/command-palette.md) e [troca de modelo em sobrecarga](docs/specs/retries.md).
+- **Arquivos e git:**
+  - [alterações por execução e desfazer](docs/specs/checkpoints.md), em refs privadas;
+  - [painel Git](docs/specs/git-panel.md), com hooks do repositório desligados por padrão;
+  - [cópia isolada (worktree) por conversa](docs/specs/worktrees.md);
+  - [verificações e bloqueios por projeto](docs/specs/project-hooks.md).
+- **Ferramentas:** [terminal no sandbox e preview local](docs/specs/terminal-preview.md), [catálogo MCP por projeto](docs/specs/mcp-catalog.md) (opt-in, falha fechado), [automações agendadas](docs/specs/automations.md) (só com o Adelic aberto), [limites de uso](docs/specs/spend-limits.md), [notificações](docs/specs/notifications.md) e [instalação como app (PWA)](docs/specs/pwa.md).
 
 Verificação local (a mesma do CI no GitHub Actions, em todo push para `develop` e em PRs):
 

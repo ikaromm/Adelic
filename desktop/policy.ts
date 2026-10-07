@@ -32,11 +32,33 @@ export function navigationPolicy(target: string, appUrl: string): NavigationPoli
   return 'blocked';
 }
 
+/** Media details Electron passes with a `media` permission request (`mediaTypes`) or check (`mediaType`). */
+export interface MediaPermissionDetails {
+  mediaTypes?: readonly string[];
+  mediaType?: string;
+}
+
+/** True only for a request or check that asks for the microphone and nothing else. */
+function audioOnly(media: MediaPermissionDetails | undefined) {
+  if (!media) return false;
+  if (media.mediaTypes !== undefined)
+    return media.mediaTypes.length > 0 && media.mediaTypes.every((type) => type === 'audio');
+  return media.mediaType === 'audio';
+}
+
 /**
- * Web permissions granted to the window: only system notifications, and only to the app's own
- * origin. Everything else (camera, clipboard, geolocation…) stays denied.
+ * Web permissions granted to the window, only to the app's own origin: system notifications,
+ * and the microphone for local voice dictation (`media` with audio only, docs/specs/voice.md).
+ * Everything else (camera, screen capture, clipboard, geolocation…) stays denied.
  */
-export function permissionPolicy(permission: string, requestingUrl: string, appUrl: string): boolean {
-  if (permission !== 'notifications' || !appUrl) return false;
-  return navigationPolicy(requestingUrl, appUrl) === 'internal';
+export function permissionPolicy(
+  permission: string,
+  requestingUrl: string,
+  appUrl: string,
+  media?: MediaPermissionDetails,
+): boolean {
+  if (!appUrl || navigationPolicy(requestingUrl, appUrl) !== 'internal') return false;
+  if (permission === 'notifications') return true;
+  if (permission === 'media') return audioOnly(media);
+  return false;
 }

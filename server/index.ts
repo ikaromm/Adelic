@@ -17,6 +17,8 @@ import { plansRoutes } from './http/plans.js';
 import { runsRoutes } from './http/runs.js';
 import { isAttachmentUpload, sessionsRoutes } from './http/sessions.js';
 import { settingsRoutes } from './http/settings.js';
+import { isVoiceUpload, voiceRoutes } from './http/voice.js';
+import { VoiceService } from './voice.js';
 
 export function createBackend(
   store: Store,
@@ -26,13 +28,15 @@ export function createBackend(
   remote?: RemoteAccess,
   // Test hook for the retry delays (production uses DEFAULT_RETRY).
   retryOverrides?: Partial<RetryPolicy>,
+  // Local voice dictation (server/voice.ts); tests inject fake command runners.
+  voice: VoiceService = new VoiceService(),
 ) {
   const app = express();
   app.disable('x-powered-by');
-  // Attachment uploads carry base64 files: that one route parses its own larger body, after
-  // the access guard, so unauthenticated requests never get the 15 MB parser.
+  // Attachment and dictation uploads carry base64 data: those routes parse their own larger
+  // body, after the access guard, so unauthenticated requests never get the bigger parsers.
   const json = express.json({ limit: '128kb', strict: true });
-  app.use((req, res, next) => (isAttachmentUpload(req) ? next() : json(req, res, next)));
+  app.use((req, res, next) => (isAttachmentUpload(req) || isVoiceUpload(req) ? next() : json(req, res, next)));
   const orchestrator = new Orchestrator(store, providers, undefined, graphifyService, providerList, retryOverrides);
   let providersCache: { at: number; value: Awaited<ReturnType<typeof providers.list>> } | undefined;
   let providersPending: Promise<Awaited<ReturnType<typeof providers.list>>> | undefined;
@@ -105,6 +109,7 @@ export function createBackend(
   app.use(commandsRoutes(context));
   app.use(memoryRoutes(context));
   app.use(diagnosticsRoutes(context));
+  app.use(voiceRoutes(context, voice));
   app.get('/api/health', async (_req, res) => {
     res.json({
       status: 'ok',

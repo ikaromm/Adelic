@@ -26,6 +26,7 @@ import type {
   Skill,
 } from '../shared/contracts';
 import type { CommandList, CommandMode, SavedCommand } from '../shared/commands';
+import type { VoiceStatus } from '../shared/voice';
 /** Report from /api/diagnostics: versions, paths and status only, without secrets or content. */
 export interface Diagnostics {
   generatedAt: string;
@@ -175,6 +176,10 @@ export const api = {
       body: JSON.stringify(file),
       signal,
     }),
+  /** Local voice dictation (docs/specs/voice.md). */
+  voiceStatus: () => request<VoiceStatus>('/api/transcribe/status'),
+  transcribe: (audio: { mime: string; data: string }, signal?: AbortSignal) =>
+    request<{ text: string }>('/api/transcribe', { method: 'POST', body: JSON.stringify(audio), signal }),
   attachmentUrl: (id: string) => `/api/attachments/${encodeURIComponent(id)}`,
   queue: (id: string) => request<MessageQueue>(`/api/sessions/${encodeURIComponent(id)}/queue`),
   enqueue: (id: string, content: string, clientId: string, attachmentIds: string[] = []) =>

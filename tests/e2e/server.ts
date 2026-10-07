@@ -22,6 +22,8 @@
 //   [pesado]  → reports 500k input tokens, so the automatic compaction threshold trips
 // Compaction: a compaction prompt answers a fixed summary (the prompt with [falhar-resumo]
 // in the transcript fails, so the automatic fallback can be seen).
+// Voice dictation: a fake voxtype/ffmpeg runner (never the real binaries) transcribes any
+// recording as "texto ditado"; GET /e2e/voice?mode=local|remote|missing switches its setup.
 import { createServer } from 'node:http';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -34,6 +36,7 @@ import { emitApproval } from '../../server/providers/common.js';
 import { PLAN_PROMPT_MARKER, TASK_PROMPT_MARKER } from '../../server/plan-markdown.js';
 import { HANDOFF_PROMPT_MARKER } from '../../server/provider-handoff.js';
 import { COMPACTION_PROMPT_MARKER } from '../../server/compaction.js';
+import { VoiceService, type CommandRunner } from '../../server/voice.js';
 import { startFakeMemory } from './fake-memory.js';
 
 const port = Number(process.env.E2E_PORT || 4399);
@@ -253,8 +256,34 @@ const providers: ProviderRegistry = {
   async shutdown() {},
 };
 
+let voiceMode: 'local' | 'remote' | 'missing' = 'local';
+const fakeVoxtype: CommandRunner = async (file, args, { signal }) => {
+  if (file.endsWith('ffmpeg')) return { stdout: '' };
+  if (args.includes('transcribe')) {
+    await sleep(400, signal ?? new AbortController().signal);
+    return { stdout: 'Processing 16000 samples (1.00s)...\n\ntexto ditado\n' };
+  }
+  if (args[0] === 'config')
+    return { stdout: JSON.stringify({ engine: 'whisper', 'whisper.mode': voiceMode, 'whisper.model': 'base' }) };
+  if (args[0] === 'info' && args[1] === 'engines')
+    return { stdout: JSON.stringify([{ name: 'whisper', compiled: true }]) };
+  if (args[0] === 'info' && args[1] === 'models')
+    return { stdout: JSON.stringify({ engines: { whisper: { models: [{ name: 'base', installed: true }] } } }) };
+  return { stdout: '-q, --quiet\n--engine <ENGINE>\n--whisper-mode <MODE>' };
+};
+const voice = new VoiceService({
+  run: fakeVoxtype,
+  find: async (name) => (voiceMode === 'missing' && name === 'voxtype' ? undefined : `/e2e/${name}`),
+  statusTtlMs: 0,
+});
+
 // Short retry delays so the retry flows finish quickly.
-const { app } = createBackend(store, providers, undefined, undefined, { baseDelayMs: 150, maxDelayMs: 400 });
+const { app } = createBackend(store, providers, undefined, undefined, { baseDelayMs: 150, maxDelayMs: 400 }, voice);
+app.get('/e2e/voice', (req, res) => {
+  const mode = String(req.query.mode);
+  if (mode === 'local' || mode === 'remote' || mode === 'missing') voiceMode = mode;
+  res.json({ mode: voiceMode });
+});
 const web = resolve(import.meta.dirname, '../../dist');
 // Fake GitHub "latest release" for the opt-in update check (ADELIC_RELEASES_URL points here).
 app.get('/e2e/releases/latest', (_req, res) =>

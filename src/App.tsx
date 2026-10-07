@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import {
   ArrowDown,
   ArrowUp,
@@ -53,6 +53,9 @@ import { useTaskOutputs } from './hooks/useTaskOutputs';
 import { notificationsEnabled, useRunNotifications } from './hooks/useRunNotifications';
 import { useComposerAttachments } from './hooks/useComposerAttachments';
 import { AttachButton, PendingAttachments } from './components/ComposerAttachments';
+import { useVoiceDictation } from './hooks/useVoiceDictation';
+import { VoiceButton } from './components/VoiceButton';
+import { insertDictation } from '../shared/voice';
 import { composerKeyAction, useMessageQueue } from './hooks/useMessageQueue';
 import { useSlashCommands } from './hooks/useSlashCommands';
 import { CommandPopup } from './components/CommandPopup';
@@ -514,6 +517,41 @@ export default function App() {
     composerRef,
     slash.open,
   );
+  // Dictated text goes to the conversation where the recording started, at its caret.
+  const dictationTargetRef = useRef('');
+  const dictationCaretRef = useRef<{ session: string; value: string; caret: number } | undefined>(undefined);
+  const voiceEnabled = data?.settings.voiceDictation !== false;
+  const voice = useVoiceDictation({
+    enabled: voiceEnabled,
+    onError: setNotice,
+    onText: (text) => {
+      const target = dictationTargetRef.current;
+      if (!target) return;
+      const element = selectedSessionRef.current === target ? composerRef.current : null;
+      if (!element) {
+        // Another conversation is open: append to the recording's own draft.
+        setDrafts((current) => {
+          const value = current[target] || '';
+          return { ...current, [target]: insertDictation(value, value.length, value.length, text).value };
+        });
+        return;
+      }
+      // The open composer mirrors its draft, so its value and selection are current.
+      const next = insertDictation(element.value, element.selectionStart, element.selectionEnd, text);
+      dictationCaretRef.current = { session: target, value: next.value, caret: next.caret };
+      setDrafts((current) => ({ ...current, [target]: next.value }));
+    },
+  });
+  // Once the dictated draft is rendered: focus with the caret right after the inserted text.
+  useLayoutEffect(() => {
+    const pending = dictationCaretRef.current;
+    const element = composerRef.current;
+    if (!pending || !element || pending.session !== selectedSession || element.value !== pending.value) return;
+    dictationCaretRef.current = undefined;
+    if (element.disabled) return;
+    element.focus();
+    element.setSelectionRange(pending.caret, pending.caret);
+  }, [composer, selectedSession, composerRef]);
   useEffect(() => {
     if (!focusComposerRef.current || page !== 'chat') return;
     const element = composerRef.current;
@@ -1082,7 +1120,8 @@ export default function App() {
       | 'autoRetry'
       | 'notifications'
       | 'autoCompact'
-      | 'autoCompactTokens',
+      | 'autoCompactTokens'
+      | 'voiceDictation',
     value: string | boolean | number,
   ) {
     if (!data) return;
@@ -1765,6 +1804,20 @@ export default function App() {
                     <div className="composer-toolbar">
                       <div className="composer-controls">
                         <AttachButton disabled={busy} full={attachments.full} onFiles={attachments.add} />
+                        {voiceEnabled && (
+                          <VoiceButton
+                            state={voice.state}
+                            elapsed={voice.elapsed}
+                            level={voice.level}
+                            blocker={voice.blocker}
+                            disabled={busy && voice.state === 'idle'}
+                            onToggle={() => {
+                              if (voice.blocker) return setNotice(voice.blocker);
+                              if (voice.state === 'idle') dictationTargetRef.current = session.id;
+                              voice.toggle();
+                            }}
+                          />
+                        )}
                         <ModelMenu
                           providers={data.providers}
                           providerId={session.providerId}

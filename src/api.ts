@@ -22,6 +22,7 @@ import type {
   Settings,
   Skill,
 } from '../shared/contracts';
+import type { CommandList, CommandMode, SavedCommand } from '../shared/commands';
 /** Report from /api/diagnostics: versions, paths and status only, without secrets or content. */
 export interface Diagnostics {
   generatedAt: string;
@@ -258,4 +259,20 @@ export const api = {
     }),
   skill: (id: string, enabled: boolean) =>
     request<Skill>(`/api/skills/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ enabled }) }),
+  commands: (projectId?: string | null) =>
+    request<CommandList>(`/api/commands${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ''}`),
+  createCommand: (data: CommandInput & { projectId: string | null }) =>
+    request<SavedCommand>('/api/commands', { method: 'POST', body: JSON.stringify(data) }),
+  updateCommand: (id: string, data: Partial<CommandInput>) =>
+    request<SavedCommand>(`/api/commands/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  // The origin guard requires a JSON body on every mutation, DELETE included.
+  deleteCommand: (id: string) =>
+    request<void>(`/api/commands/${encodeURIComponent(id)}`, { method: 'DELETE', body: JSON.stringify({}) }),
 };
+/** Editable fields of a saved command; `mode: null` removes the override on PATCH. */
+export interface CommandInput {
+  name: string;
+  description: string;
+  template: string;
+  mode?: CommandMode | null;
+}

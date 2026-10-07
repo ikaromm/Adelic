@@ -121,7 +121,17 @@ export const migrations: Migration[] = [
           FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE);`);
     },
   },
-  // Version 5 is reserved for a parallel branch; pending versions run in order.
+  {
+    version: 5,
+    description: 'Comandos salvos: globais (project_id nulo) ou por projeto',
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS commands(
+          id TEXT PRIMARY KEY, project_id TEXT, data TEXT NOT NULL,
+          FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE);
+        CREATE INDEX IF NOT EXISTS commands_project ON commands(project_id);`);
+    },
+  },
   {
     version: 6,
     description: 'Modo de planejamento: planos por conversa',

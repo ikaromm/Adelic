@@ -1,6 +1,13 @@
 import { z } from 'zod';
 import { validReasoningEffort } from './reasoning.js';
 import { MAX_ATTACHMENTS_PER_MESSAGE, MAX_IMAGE_BYTES } from './attachments.js';
+import {
+  COMMAND_DESCRIPTION_MAX,
+  COMMAND_MESSAGES,
+  COMMAND_NAME,
+  COMMAND_TEMPLATE_MAX,
+  commandModes,
+} from './commands.js';
 
 // Request schemas shared by the server routes (and usable by the UI). Each field keeps
 // the exact error message the API returned before zod, so clients see no change.
@@ -168,6 +175,29 @@ export const PlanSaveSchema = z.object({
   overwrite: optional(z.boolean(), 'overwrite deve ser booleano'),
 });
 export const SkillPatchSchema = z.object({ enabled: required(z.boolean(), 'enabled deve ser booleano') });
+
+// Saved commands (docs/specs/saved-commands.md).
+const commandName = z.string().regex(COMMAND_NAME);
+const commandDescription = z
+  .string()
+  .max(COMMAND_DESCRIPTION_MAX)
+  .transform((value) => value.trim());
+const commandTemplate = text(COMMAND_TEMPLATE_MAX);
+const commandMessages = COMMAND_MESSAGES;
+export const CreateCommandSchema = z.object({
+  name: required(commandName, commandMessages.name),
+  description: optional(commandDescription, commandMessages.description),
+  template: required(commandTemplate, commandMessages.template),
+  mode: optional(z.enum(commandModes), commandMessages.mode),
+  projectId: optional(projectRef, 'projectId inválido'),
+});
+/** `mode: null` removes the override. The scope (global or project) cannot change. */
+export const PatchCommandSchema = z.object({
+  name: optional(commandName, commandMessages.name),
+  description: optional(commandDescription, commandMessages.description),
+  template: optional(commandTemplate, commandMessages.template),
+  mode: optional(z.union([z.null(), z.enum(commandModes)]), commandMessages.mode),
+});
 
 export type ParseResult<T> = { ok: true; data: T } | { ok: false; message: string };
 /**

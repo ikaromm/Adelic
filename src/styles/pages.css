@@ -1789,3 +1789,193 @@ label.setting-row > input {
   color: var(--text-muted);
   font-size: var(--text-sm);
 }
+
+/* Saved commands card (Settings). */
+.commands-card code,
+.command-issues code {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--code-inline);
+}
+.commands-list {
+  margin: 0;
+  padding: 0;
+  border-top: 1px solid var(--border-soft);
+  list-style: none;
+}
+.commands-list > li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 4px 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border-soft);
+}
+.commands-list > li.shadowed .command-row-main > strong {
+  color: var(--text-muted);
+  text-decoration: line-through;
+}
+.command-row-main {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+.command-row-main > strong {
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+}
+.command-badge {
+  padding: 2px 7px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  color: var(--text-secondary);
+  font-size: var(--text-2xs);
+  font-weight: 500;
+}
+.command-badge.muted {
+  color: var(--text-muted);
+}
+.command-description {
+  grid-column: 1;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.command-actions {
+  display: flex;
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  align-items: flex-start;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.command-actions .ghost-button,
+.command-actions .danger-button {
+  min-height: var(--control-h-sm);
+  padding: 0 9px;
+}
+.command-actions details {
+  max-width: 100%;
+}
+.command-actions summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: var(--control-h-sm);
+  padding: 0 9px;
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  cursor: pointer;
+}
+.command-actions summary:hover {
+  background: var(--row-hover);
+}
+.command-actions details[open] {
+  grid-column: 1 / -1;
+}
+.command-actions pre {
+  max-width: min(520px, 70vw);
+  max-height: 240px;
+  margin: 6px 0 0;
+  padding: 10px;
+  overflow: auto;
+  border-radius: var(--radius-sm);
+  background: var(--code-bg);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  white-space: pre-wrap;
+}
+.command-issues {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--warning-border);
+  border-radius: var(--radius-sm);
+  background: var(--warning-soft);
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+}
+.command-issues > strong {
+  color: var(--warning);
+  font-size: var(--text-sm);
+}
+.command-issues ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
+}
+.command-issues li {
+  overflow-wrap: anywhere;
+}
+.command-form {
+  margin-top: 14px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--canvas);
+}
+.command-form-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+  color: var(--text);
+  font-size: var(--text-md);
+}
+.command-form label {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 12px;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  font-weight: 500;
+}
+.command-form label > small {
+  align-self: flex-end;
+  color: var(--text-muted);
+  font-size: var(--text-2xs);
+}
+.command-form textarea {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+}
+.command-form-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 12px;
+}
+.command-form-row > label {
+  flex: 1 1 180px;
+}
+.commands-card > .secondary-button {
+  margin-top: 12px;
+}
+@container main-area (max-width: 560px) {
+  .commands-list > li {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .command-actions {
+    grid-column: 1;
+    grid-row: auto;
+    justify-content: flex-start;
+  }
+  .command-actions pre {
+    max-width: 100%;
+  }
+  .command-form .modal-actions {
+    flex-wrap: wrap;
+  }
+  .command-form .modal-actions > button {
+    flex: 1 1 auto;
+  }
+}

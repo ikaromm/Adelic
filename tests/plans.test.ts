@@ -269,6 +269,34 @@ describe('plan runs', () => {
     await expect(t.orchestrator.start(t.store.getSession('s')!, '/plano   ')).rejects.toMatchObject({ status: 400 });
   });
 
+  it('plans the expanded saved command with "Planejar antes", and /plano wins over a command named plano', async () => {
+    const t = await setup();
+    const now = new Date().toISOString();
+    for (const [name, template] of [
+      ['refatorar', 'Refatore {{args}} sem mudar o comportamento'],
+      ['plano', 'NÃO USAR'],
+    ])
+      t.store.putCommand({
+        id: `cmd-${name}`,
+        name,
+        description: '',
+        template,
+        projectId: null,
+        createdAt: now,
+        updatedAt: now,
+      });
+    await t.call('PATCH', '/api/sessions/s', { planFirst: true });
+    const planned = await t.orchestrator.start(t.store.getSession('s')!, '/refatorar o parser');
+    await t.finished(planned.runId);
+    expect(t.provider.inputs[0].prompt).toContain('Refatore o parser sem mudar o comportamento');
+    expect(t.provider.inputs[0].sandbox).toBe('read-only');
+    await t.call('PATCH', '/api/sessions/s', { planFirst: false });
+    const direct = await t.orchestrator.start(t.store.getSession('s')!, '/plano exportar CSV');
+    await t.finished(direct.runId);
+    expect(t.provider.inputs[1].prompt).toContain('Pedido do usuário:\nexportar CSV');
+    expect(t.provider.inputs[1].prompt).not.toContain('NÃO USAR');
+  });
+
   it('keeps a plan without tasks as a draft that cannot be approved until edited', async () => {
     const t = await setup({ planAnswer: 'Não sei bem; preciso de mais detalhes.' });
     const plan = await makePlan(t);

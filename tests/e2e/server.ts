@@ -10,6 +10,8 @@
 //   [anexos]  → lists the images it received and the text files inlined in the prompt
 // Plan mode: a planning prompt answers a fixed spec with two tasks (a planning prompt with
 // [falhar-tarefa] adds a third task whose run fails); task runs answer "Tarefa concluída".
+//   [eco]     → answers "Eco: <current request>" so tests can see what the agent received
+//               (saved commands: the expanded template, not the typed `/name`)
 import { createServer } from 'node:http';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -83,8 +85,8 @@ const providers: ProviderRegistry = {
     }
     const current = (input.prompt.split('Pedido atual:').at(-1) ?? input.prompt).split('\n\nMensagens recentes')[0];
     const marker =
-      ['[aprovar]', '[lento]', '[medio]', '[normal]', '[instavel]', '[quebra]', '[anexos]', '[escrever]'].find((m) =>
-        current.toLowerCase().includes(m),
+      ['[aprovar]', '[lento]', '[medio]', '[normal]', '[instavel]', '[quebra]', '[anexos]', '[escrever]', '[eco]'].find(
+        (m) => current.toLowerCase().includes(m),
       ) ?? '';
     try {
       // Fails once with a timeout before any output, then answers: retried automatically.
@@ -104,6 +106,12 @@ const providers: ProviderRegistry = {
         const images = (input.attachments ?? []).map((a) => a.name);
         const files = [...input.prompt.matchAll(/\[Arquivo anexado: ([^\]]+)\]/g)].map((m) => m[1]);
         const text = `Imagens recebidas: ${images.join(', ') || 'nenhuma'}. Arquivos recebidos: ${[...new Set(files)].join(', ') || 'nenhum'}.`;
+        emit({ type: 'delta', text });
+        return { text, stopReason: 'completed' };
+      }
+      if (marker === '[eco]') {
+        // Detached conversations run the coordinated fast path: the request follows "Pedido atual:".
+        const text = `Eco: ${current.replace(/\s+/g, ' ').trim()}`;
         emit({ type: 'delta', text });
         return { text, stopReason: 'completed' };
       }

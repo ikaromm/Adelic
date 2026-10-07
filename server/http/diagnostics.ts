@@ -90,6 +90,7 @@ export function diagnosticsRoutes({ store, providerList }: BackendContext) {
           messages: count('messages'),
           runs: count('runs'),
           approvals: count('approvals'),
+          attachments: count('attachments'),
         },
         backups: backups(store.dataDir),
       },

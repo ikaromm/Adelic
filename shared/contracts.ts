@@ -96,7 +96,29 @@ export interface ProviderInfo {
     isDefault?: boolean;
   }[];
   defaultModel?: string;
-  capabilities: { fast: boolean; tools: boolean; approvals: boolean; cancel: boolean; reasoning?: boolean };
+  capabilities: {
+    fast: boolean;
+    tools: boolean;
+    approvals: boolean;
+    cancel: boolean;
+    reasoning?: boolean;
+    /** Accepts image attachments. Kiro confirms it again at run time from its ACP initialize. */
+    images?: boolean;
+  };
+}
+/** Attachment as shown to clients: no paths. */
+export interface AttachmentMeta {
+  id: string;
+  name: string;
+  mime: string;
+  size: number;
+}
+/** Server-side record (attachments table); `file` is relative to the session's attachment folder. */
+export interface StoredAttachment extends AttachmentMeta {
+  sessionId: string;
+  kind: 'image' | 'text';
+  file: string;
+  createdAt: string;
 }
 export interface Session {
   id: string;
@@ -140,6 +162,8 @@ export interface Message {
   route?: RoutePlan;
   durationMs?: number;
   firstTokenMs?: number;
+  /** Files sent with a user message. */
+  attachments?: AttachmentMeta[];
 }
 export interface Run {
   id: string;
@@ -282,6 +306,11 @@ export interface RunInput {
   sandbox: Sandbox;
   approvalMode?: 'auto-safe' | 'manual';
   memoryContext?: string;
+  /**
+   * Images attached to the current request, as absolute host paths. Text attachments are
+   * not listed here: the orchestrator already inlined them into `prompt`.
+   */
+  attachments?: { path: string; name: string; mime: string }[];
 }
 export type ProviderEvent =
   | { type: 'delta'; text: string }

@@ -21,6 +21,7 @@ import {
   Download,
 } from 'lucide-react';
 import type {
+  AttachmentMeta,
   Bootstrap,
   GraphifyQueryResult,
   GraphifyStatus,
@@ -45,6 +46,8 @@ import { useAutosize } from './hooks/useAutosize';
 import { useGlobalShortcuts } from './hooks/useGlobalShortcuts';
 import { useStickToBottom } from './hooks/useStickToBottom';
 import { useTaskOutputs } from './hooks/useTaskOutputs';
+import { useComposerAttachments } from './hooks/useComposerAttachments';
+import { AttachButton, PendingAttachments } from './components/ComposerAttachments';
 import { projectOrchestration } from '../shared/contracts';
 import { ActivityPage } from './components/ActivityPage';
 import { ConversationSearch } from './components/ConversationSearch';
@@ -388,6 +391,7 @@ export default function App() {
   const lastFailedMessageId = lastAssistant?.status === 'failed' ? lastAssistant.id : undefined;
 
   const composerRef = useAutosize([composer, selectedSession, page, session?.activeRunId]);
+  const attachments = useComposerAttachments(session?.id, setNotice);
   useEffect(() => {
     if (!focusComposerRef.current || page !== 'chat') return;
     const element = composerRef.current;
@@ -474,10 +478,13 @@ export default function App() {
     }
   }
 
-  async function sendMessage(value = composer) {
+  /** `explicit` resends given attachments (retry, suggestions) instead of the composer's. */
+  async function sendMessage(value = composer, explicit?: AttachmentMeta[]) {
     const content = value.trim();
     if (!content || !session || busy || session.activeRunId || settingsPendingRef.current) return;
+    if (!explicit && attachments.uploading) return setNotice('Aguarde o envio dos anexos terminar.');
     const sessionId = session.id;
+    const sentAttachments = explicit ?? attachments.ready;
     const pendingSend: NonNullable<typeof pendingSendRef.current> = {
       sessionId,
       cancelRequested: false,
@@ -495,14 +502,21 @@ export default function App() {
       role: 'user',
       content,
       createdAt: new Date().toISOString(),
+      ...(sentAttachments.length ? { attachments: sentAttachments } : {}),
     };
     setDetail((current) =>
       current?.session.id === sessionId ? { ...current, messages: [...current.messages, optimistic] } : current,
     );
     let accepted = false;
     try {
-      const acceptedRun = await api.send(sessionId, content, crypto.randomUUID());
+      const acceptedRun = await api.send(
+        sessionId,
+        content,
+        crypto.randomUUID(),
+        sentAttachments.map((item) => item.id),
+      );
       accepted = true;
+      if (!explicit) attachments.clear(sessionId);
       pendingSend.accepted = true;
       setDetail((current) =>
         current?.session.id === sessionId
@@ -1145,7 +1159,7 @@ export default function App() {
                                 'Me ajude a resolver um problema',
                               ]
                           ).map((text) => (
-                            <button key={text} onClick={() => void sendMessage(text)}>
+                            <button key={text} onClick={() => void sendMessage(text, [])}>
                               <span>{text}</span>
                               <ArrowUp size={13} aria-hidden="true" />
                             </button>
@@ -1172,7 +1186,7 @@ export default function App() {
                                 disabled={busy || Boolean(session.activeRunId)}
                                 onRetry={() => {
                                   const prompt = messages.find((m) => m.role === 'user' && m.runId === message.runId);
-                                  if (prompt) void sendMessage(prompt.content);
+                                  if (prompt) void sendMessage(prompt.content, prompt.attachments ?? []);
                                 }}
                               />
                             )}
@@ -1293,12 +1307,17 @@ export default function App() {
                       </button>
                     </div>
                   )}
-                  <div className={`composer-box ${session.activeRunId ? 'is-running' : ''}`}>
+                  <div
+                    className={`composer-box ${session.activeRunId ? 'is-running' : ''} ${attachments.dragging ? 'is-dragging' : ''}`}
+                    {...attachments.dropHandlers}
+                  >
+                    <PendingAttachments items={attachments.items} disabled={busy} onRemove={attachments.remove} />
                     <textarea
                       ref={composerRef}
                       className="composer-input"
                       value={composer}
                       onChange={(event) => setDrafts((current) => ({ ...current, [session.id]: event.target.value }))}
+                      onPaste={attachments.onPaste}
                       onKeyDown={(event) => {
                         if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
                           event.preventDefault();
@@ -1316,6 +1335,11 @@ export default function App() {
                     />
                     <div className="composer-toolbar">
                       <div className="composer-controls">
+                        <AttachButton
+                          disabled={busy || Boolean(session.activeRunId)}
+                          full={attachments.full}
+                          onFiles={attachments.add}
+                        />
                         <ModelMenu
                           providers={data.providers}
                           providerId={session.providerId}
@@ -1430,7 +1454,11 @@ export default function App() {
                               ? void cancelPendingSend(session.id)
                               : void sendMessage()
                         }
-                        disabled={canCancelCurrentSend ? false : !composer.trim() || busy || settingsPending}
+                        disabled={
+                          canCancelCurrentSend
+                            ? false
+                            : !composer.trim() || busy || settingsPending || attachments.uploading
+                        }
                       >
                         {canCancelCurrentSend ? (
                           <Square size={12} fill="currentColor" />

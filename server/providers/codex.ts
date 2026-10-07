@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { lstat, realpath, stat, mkdir, writeFile } from 'node:fs/promises';
+import { copyFile, lstat, realpath, stat, mkdir, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import { mkdtemp, chmod, rm } from 'node:fs/promises';
 import type { ProviderEvent, ProviderInfo, RunInput, RunResult, Sandbox } from '../../shared/contracts';
@@ -61,6 +61,36 @@ type CodexWrapper = (
   writableRuntimeDirs?: string[],
   readonlyFileBindings?: ReadonlyFileBinding[],
 ) => Promise<WrappedCommand>;
+
+/**
+ * `turn/start` input: the prompt text plus one `localImage` item per attached image.
+ * Codex 0.160 lists `localImage` (field `path`) among the UserInput variants; the
+ * app-server reads the file itself, so the path must be visible inside its sandbox.
+ */
+export function codexTurnInput(text: string, imagePaths: string[] = []) {
+  return [
+    { type: 'text', text, text_elements: [] as unknown[] },
+    ...imagePaths.map((imagePath) => ({ type: 'localImage', path: imagePath })),
+  ];
+}
+
+/**
+ * Copies attached images into the run's private scratch (0700, removed with the run), which
+ * the bubblewrap wrapper binds into the sandbox even when the data folder lives under /tmp.
+ */
+export async function stageCodexImages(scratch: string, images: NonNullable<RunInput['attachments']>) {
+  if (!images.length) return [];
+  const directory = path.join(scratch, 'attachments');
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  const staged: string[] = [];
+  for (const [index, image] of images.entries()) {
+    const target = path.join(directory, `${index}-${path.basename(image.path)}`);
+    await copyFile(image.path, target);
+    await chmod(target, 0o600);
+    staged.push(target);
+  }
+  return staged;
+}
 
 function approvalDetail(method: string, params: Record<string, unknown>) {
   if (method === 'item/commandExecution/requestApproval') {
@@ -204,7 +234,7 @@ export class CodexProvider {
         status: hasProviderBinaryOverride('codex') ? 'error' : 'missing',
         detail: providerBinaryMissingDetail('codex'),
         models: [],
-        capabilities: { fast: true, tools: true, approvals: true, cancel: true, reasoning: true },
+        capabilities: { fast: true, tools: true, approvals: true, cancel: true, reasoning: true, images: true },
       });
     const result = await this.commands.run(this.binary, ['login', 'status'], 3000);
     if (this.shuttingDown) return this.shutdownInfo();
@@ -233,7 +263,7 @@ export class CodexProvider {
       detail: `${authDetail}${available ? modelNote : ''}`,
       models,
       defaultModel: models.find((model) => model.isDefault)?.id,
-      capabilities: { fast: true, tools: true, approvals: true, cancel: true, reasoning: true },
+      capabilities: { fast: true, tools: true, approvals: true, cancel: true, reasoning: true, images: true },
     };
     return this.cacheInfo(value);
   }
@@ -302,7 +332,7 @@ export class CodexProvider {
       status: 'error',
       detail: 'Codex provider is shutting down.',
       models: [],
-      capabilities: { fast: true, tools: true, approvals: true, cancel: true, reasoning: true },
+      capabilities: { fast: true, tools: true, approvals: true, cancel: true, reasoning: true, images: true },
     };
   }
   private async serverArgs(cwd: string, profile: CodexToolProfile) {
@@ -731,6 +761,8 @@ export class CodexProvider {
       // Recheck on every run because the app-server caches its config while host files may change.
       await raceAbort(this.assertNoEnabledMcp(rpc, input.cwd), signal);
       if (signal.aborted) throw abortError(signal);
+      const imagePaths = await stageCodexImages(server.scratch, input.attachments ?? []);
+      if (signal.aborted) throw abortError(signal);
       const threadRaw = await raceAbort(
         rpc.request('thread/start', {
           cwd: server.cwd,
@@ -853,7 +885,7 @@ export class CodexProvider {
             'turn/start',
             {
               threadId,
-              input: [{ type: 'text', text: boundedPrompt(input), text_elements: [] }],
+              input: codexTurnInput(boundedPrompt(input), imagePaths),
               cwd: server.cwd,
               model: input.model ?? null,
               ...(input.plan.effort ? { effort: input.plan.effort } : {}),

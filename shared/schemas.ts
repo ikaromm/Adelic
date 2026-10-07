@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { validReasoningEffort } from './reasoning.js';
+import { MAX_ATTACHMENTS_PER_MESSAGE, MAX_IMAGE_BYTES } from './attachments.js';
 
 // Request schemas shared by the server routes (and usable by the UI). Each field keeps
 // the exact error message the API returned before zod, so clients see no change.
@@ -88,9 +89,31 @@ export const PatchSessionSchema = z.object({
   thinking: optional(effort, 'thinking inválido'),
 });
 
+export const AttachmentIdsSchema = z
+  .array(z.string().regex(/^[0-9a-f-]{36}$/i))
+  .max(MAX_ATTACHMENTS_PER_MESSAGE)
+  .refine((ids) => new Set(ids).size === ids.length);
 export const SendMessageSchema = z.object({
   content: required(text(32000), 'content obrigatório (máximo 32000 caracteres)'),
   clientMessageId: optional(text(128), 'clientMessageId inválido'),
+  // Ownership (each id belongs to this conversation) is checked by the route against the store.
+  attachmentIds: optional(
+    AttachmentIdsSchema,
+    `attachmentIds inválido (até ${MAX_ATTACHMENTS_PER_MESSAGE} anexos, sem repetição)`,
+  ),
+});
+/** Upload: file content in base64 (the route raises the JSON limit only for itself). */
+export const UploadAttachmentSchema = z.object({
+  name: required(text(200), 'name obrigatório (até 200 caracteres)'),
+  mime: optional(z.string().max(100), 'mime inválido'),
+  data: required(
+    z
+      .string()
+      .min(1)
+      .max(Math.ceil((MAX_IMAGE_BYTES * 4) / 3) + 4)
+      .regex(/^[A-Za-z0-9+/]*={0,2}$/),
+    'data deve ser o conteúdo do arquivo em base64',
+  ),
 });
 export const ApprovalDecisionSchema = z.object({
   decision: required(z.enum(['approve', 'deny']), 'decision deve ser approve ou deny'),

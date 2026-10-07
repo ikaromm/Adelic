@@ -14,11 +14,13 @@ import {
   statusLabel,
 } from '../run-activity';
 import { useNow } from '../useNow';
+import { MessageAttachments } from './ComposerAttachments';
 
 export function MessageCard({ message, providerName }: { message: Message; providerName: string }) {
   if (message.role === 'user')
     return (
       <div className="message-row user-row">
+        {message.attachments?.length ? <MessageAttachments attachments={message.attachments} /> : null}
         <div className="user-bubble">{message.content}</div>
         <div className="message-meta">
           <time dateTime={message.createdAt}>{timeLabel(message.createdAt)}</time>

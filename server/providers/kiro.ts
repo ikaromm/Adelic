@@ -1,8 +1,8 @@
 import path from 'node:path';
 import os from 'node:os';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import type { ProviderEvent, ProviderInfo, RunInput, RunResult } from '../../shared/contracts';
-import { abortError, boundedPrompt, emitApproval } from './common';
+import { abortError, boundedPrompt, emitApproval, IMAGES_UNSUPPORTED } from './common';
 import { CommandScope } from './command';
 import { bubblewrap } from './sandbox';
 import { errorMessage, isRecord, JsonRpcProcess, type JsonRpcMessage } from './process';
@@ -27,6 +27,21 @@ interface KiroApproval {
   sessionId: string;
   allowOptionId?: string;
   denyOptionId?: string;
+}
+
+/** Whether an ACP `initialize` result advertises image prompts (`agentCapabilities.promptCapabilities.image`). */
+export function kiroAcceptsImages(initializeResult: unknown) {
+  const agent = isRecord(initializeResult) ? initializeResult.agentCapabilities : undefined;
+  const prompt = isRecord(agent) ? agent.promptCapabilities : undefined;
+  return isRecord(prompt) && prompt.image === true;
+}
+
+/** `session/prompt` content blocks: the text, then one ACP image block per attached image. */
+export async function kiroPromptBlocks(text: string, images: NonNullable<RunInput['attachments']> = []) {
+  const blocks: Record<string, unknown>[] = [{ type: 'text', text }];
+  for (const image of images)
+    blocks.push({ type: 'image', mimeType: image.mime, data: (await readFile(image.path)).toString('base64') });
+  return blocks;
 }
 
 export function kiroToolEvent(
@@ -133,7 +148,7 @@ export class KiroProvider {
         status: hasProviderBinaryOverride('kiro') ? 'error' : 'missing',
         detail: providerBinaryMissingDetail('kiro'),
         models: [],
-        capabilities: { fast: true, tools: true, approvals: true, cancel: true, reasoning: true },
+        capabilities: { fast: true, tools: true, approvals: true, cancel: true, reasoning: true, images: true },
       });
     const [result, authResult] = await Promise.all([
       this.commands.run(this.binary, ['chat', '--list-models', '--format', 'json'], 6000),
@@ -157,7 +172,7 @@ export class KiroProvider {
       detail,
       models,
       defaultModel,
-      capabilities: { fast: true, tools: true, approvals: true, cancel: true, reasoning: true },
+      capabilities: { fast: true, tools: true, approvals: true, cancel: true, reasoning: true, images: true },
     });
   }
   private cache(value: ProviderInfo) {
@@ -173,7 +188,7 @@ export class KiroProvider {
       status: 'error',
       detail: 'Kiro provider is shutting down.',
       models: [],
-      capabilities: { fast: true, tools: true, approvals: true, cancel: true, reasoning: true },
+      capabilities: { fast: true, tools: true, approvals: true, cancel: true, reasoning: true, images: true },
     };
   }
 
@@ -304,7 +319,7 @@ export class KiroProvider {
     const abortStartup = () => process.kill();
     signal.addEventListener('abort', abortStartup, { once: true });
     try {
-      await raceAbort(
+      const initialized = await raceAbort(
         process.request('initialize', {
           protocolVersion: 1,
           clientCapabilities: {},
@@ -312,6 +327,11 @@ export class KiroProvider {
         }),
         signal,
       );
+      if (signal.aborted) throw abortError(signal);
+      // Images go only to an agent that advertises them; otherwise fail before any session.
+      const images = input.attachments ?? [];
+      if (images.length && !kiroAcceptsImages(initialized)) throw new Error(IMAGES_UNSUPPORTED);
+      const blocks = await kiroPromptBlocks(boundedPrompt(input), images);
       if (signal.aborted) throw abortError(signal);
       const sessionRaw = await raceAbort(process.request('session/new', { cwd: input.cwd, mcpServers: [] }), signal);
       signal.removeEventListener('abort', abortStartup);
@@ -349,15 +369,10 @@ export class KiroProvider {
         sessions.set(sessionId, current);
         signal.addEventListener('abort', current.abort, { once: true });
         emit({ type: 'session', nativeSessionId: sessionId });
-        const text = boundedPrompt(input);
         // Kiro 2.23 documents `content`; ACP v1 uses `prompt`. Send both for compatibility with
         // Kiro's legacy adapter and clients implementing the published protocol schema.
         void process
-          .request(
-            'session/prompt',
-            { sessionId, prompt: [{ type: 'text', text }], content: [{ type: 'text', text }] },
-            10 * 60_000,
-          )
+          .request('session/prompt', { sessionId, prompt: blocks, content: blocks }, 10 * 60_000)
           .then((response) => {
             if (!this.turns.has(input.runId)) return;
             const stopReason =

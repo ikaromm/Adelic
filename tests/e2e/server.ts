@@ -5,6 +5,7 @@
 //   [aprovar] → asks for approval, then answers with the decision
 //   [lento]   → streams slowly until cancelled
 //   [normal] or no marker → streams a short Markdown answer with a code block
+//   [anexos]  → lists the images it received and the text files inlined in the prompt
 import { createServer } from 'node:http';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -31,7 +32,7 @@ const codex: ProviderInfo = {
   detail: 'Provedor simulado para testes E2E',
   models: [{ id: 'e2e-model', name: 'E2E Model', isDefault: true, efforts: ['low', 'medium'] }],
   defaultModel: 'e2e-model',
-  capabilities: { fast: true, tools: true, approvals: true, cancel: true, reasoning: true },
+  capabilities: { fast: true, tools: true, approvals: true, cancel: true, reasoning: true, images: true },
 };
 const pending = new Map<string, (decision: 'approve' | 'deny') => void>();
 const flaky = new Map<string, number>();
@@ -58,8 +59,9 @@ const providers: ProviderRegistry = {
     }
     const current = (input.prompt.split('Pedido atual:').at(-1) ?? input.prompt).split('\n\nMensagens recentes')[0];
     const marker =
-      ['[aprovar]', '[lento]', '[normal]', '[instavel]', '[quebra]'].find((m) => current.toLowerCase().includes(m)) ??
-      '';
+      ['[aprovar]', '[lento]', '[normal]', '[instavel]', '[quebra]', '[anexos]'].find((m) =>
+        current.toLowerCase().includes(m),
+      ) ?? '';
     try {
       // Fails once with a timeout before any output, then answers: retried automatically.
       if (marker === '[instavel]') {
@@ -73,6 +75,13 @@ const providers: ProviderRegistry = {
       if (marker === '[quebra]') {
         emit({ type: 'delta', text: 'Começando a resposta…' });
         throw new Error('stream failed');
+      }
+      if (marker === '[anexos]') {
+        const images = (input.attachments ?? []).map((a) => a.name);
+        const files = [...input.prompt.matchAll(/\[Arquivo anexado: ([^\]]+)\]/g)].map((m) => m[1]);
+        const text = `Imagens recebidas: ${images.join(', ') || 'nenhuma'}. Arquivos recebidos: ${[...new Set(files)].join(', ') || 'nenhum'}.`;
+        emit({ type: 'delta', text });
+        return { text, stopReason: 'completed' };
       }
       if (marker === '[aprovar]') {
         const id = `e2e-approval-${input.runId}`;

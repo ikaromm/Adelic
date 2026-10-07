@@ -2,6 +2,7 @@
 
 ## Não publicado
 
+- Anexos nas mensagens: imagens (PNG, JPEG, WebP, GIF até 10 MB) para Codex e Kiro, e arquivos de texto (até 512 KB) para todos os agentes, pelo clipe, colando ou arrastando, até 5 por mensagem; veja [anexos](docs/specs/attachments.md).
 - Repetição automática de falhas temporárias (tempo esgotado, conexão interrompida, modelo sobrecarregado), com espera crescente e até 2 novas tentativas, só quando a tentativa não exibiu texto, não executou ferramenta nem pediu aprovação. Falhas mostram o motivo e um botão **Tentar de novo**; configurável em Configurações. Veja [repetição automática](docs/specs/retries.md).
 - Busca em todas as conversas (títulos e mensagens, sem diferenciar acentos) com Ctrl+Shift+F, e exportação da conversa aberta em Markdown ou JSON.
 - Tokens por execução, quando o provedor informa (Codex informa; custo continua "não informado", nunca zero).

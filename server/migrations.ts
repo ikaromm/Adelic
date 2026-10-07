@@ -93,6 +93,20 @@ export const migrations: Migration[] = [
         END;`);
     },
   },
+  {
+    version: 3,
+    description: 'Anexos de mensagens: tabela attachments ligada à conversa',
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS attachments(
+          id TEXT PRIMARY KEY,
+          session_id TEXT NOT NULL,
+          data TEXT NOT NULL,
+          FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS attachments_session ON attachments(session_id);`);
+    },
+  },
 ];
 
 export const schemaVersion = migrations.at(-1)!.version;

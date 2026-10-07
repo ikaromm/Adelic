@@ -1,5 +1,8 @@
 import type { Approval, ProviderEvent, RunInput, Sandbox } from '../../shared/contracts';
 
+/** Shown when a run carries images for a runtime that cannot receive them. */
+export const IMAGES_UNSUPPORTED = 'Este agente não aceita imagens nesta versão';
+
 export function boundedPrompt(input: RunInput): string {
   const budget = Math.max(0, input.plan.contextBudget);
   let remaining = Math.max(0, Math.min(budget, 30_000));

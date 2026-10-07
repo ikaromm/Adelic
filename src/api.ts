@@ -1,4 +1,5 @@
 import type {
+  AttachmentMeta,
   ConversationSearchHit,
   Bootstrap,
   DelegatedTask,
@@ -126,11 +127,19 @@ export const api = {
     },
   ) => request<Session>(`/api/sessions/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(data) }),
   deleteSession: (id: string) => request<void>(`/api/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' }),
-  send: (id: string, content: string, clientMessageId: string) =>
+  send: (id: string, content: string, clientMessageId: string, attachmentIds: string[] = []) =>
     request<{ runId: string; messageId: string }>(`/api/sessions/${encodeURIComponent(id)}/messages`, {
       method: 'POST',
-      body: JSON.stringify({ content, clientMessageId }),
+      body: JSON.stringify({ content, clientMessageId, ...(attachmentIds.length ? { attachmentIds } : {}) }),
     }),
+  /** Uploads one file (content in base64) to a conversation; returns its metadata. */
+  uploadAttachment: (sessionId: string, file: { name: string; mime: string; data: string }, signal?: AbortSignal) =>
+    request<AttachmentMeta>(`/api/sessions/${encodeURIComponent(sessionId)}/attachments`, {
+      method: 'POST',
+      body: JSON.stringify(file),
+      signal,
+    }),
+  attachmentUrl: (id: string) => `/api/attachments/${encodeURIComponent(id)}`,
   cancel: (id: string) => request<void>(`/api/sessions/${encodeURIComponent(id)}/cancel`, { method: 'POST' }),
   approve: (id: string, decision: 'approve' | 'deny') =>
     request<void>(`/api/approvals/${encodeURIComponent(id)}`, { method: 'POST', body: JSON.stringify({ decision }) }),

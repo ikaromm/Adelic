@@ -26,6 +26,7 @@ import type {
   Skill,
 } from '../shared/contracts';
 import type { CommandList, CommandMode, SavedCommand } from '../shared/commands';
+import type { McpEnvSource, McpServerView, ProjectMcpReport } from '../shared/mcp';
 /** Report from /api/diagnostics: versions, paths and status only, without secrets or content. */
 export interface Diagnostics {
   generatedAt: string;
@@ -309,7 +310,32 @@ export const api = {
   // The origin guard requires a JSON body on every mutation, DELETE included.
   deleteCommand: (id: string) =>
     request<void>(`/api/commands/${encodeURIComponent(id)}`, { method: 'DELETE', body: JSON.stringify({}) }),
+  mcpServers: () => request<{ servers: McpServerView[] }>('/api/mcp-servers'),
+  createMcpServer: (data: McpServerInput) =>
+    request<McpServerView>('/api/mcp-servers', { method: 'POST', body: JSON.stringify(data) }),
+  updateMcpServer: (id: string, data: Partial<Omit<McpServerInput, 'tools'>> & { tools?: string[] | null }) =>
+    request<McpServerView>(`/api/mcp-servers/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(data),
+    }),
+  deleteMcpServer: (id: string) =>
+    request<void>(`/api/mcp-servers/${encodeURIComponent(id)}`, { method: 'DELETE', body: JSON.stringify({}) }),
+  projectMcp: (projectId: string) => request<ProjectMcpReport>(`/api/projects/${encodeURIComponent(projectId)}/mcp`),
+  setProjectMcp: (projectId: string, enabled: string[]) =>
+    request<{ project: Project; report: ProjectMcpReport }>(`/api/projects/${encodeURIComponent(projectId)}/mcp`, {
+      method: 'PUT',
+      body: JSON.stringify({ enabled }),
+    }),
 };
+/** Editable fields of an MCP catalog entry; a literal without `value` keeps the stored one. */
+export interface McpServerInput {
+  name: string;
+  description: string;
+  command: string;
+  args: string[];
+  env: { name: string; from: McpEnvSource; value?: string }[];
+  tools?: string[];
+}
 /** Editable fields of a saved command; `mode: null` removes the override on PATCH. */
 export interface CommandInput {
   name: string;

@@ -26,6 +26,8 @@ import {
   QUEUE_LIMIT,
 } from '../shared/contracts.js';
 import type { SavedCommand } from '../shared/commands.js';
+import type { McpServerRecord } from '../shared/mcp.js';
+import { mcpServerView } from './mcp.js';
 import { migrate, type MigrationResult } from './migrations.js';
 
 const defaults: Settings = {
@@ -701,6 +703,31 @@ export class Store {
   deleteCommand(id: string) {
     return Number(this.db.prepare('DELETE FROM commands WHERE id=?').run(id).changes) > 0;
   }
+  listMcpServers() {
+    return this.rows<McpServerRecord>('mcp_servers', 'ORDER BY rowid');
+  }
+  getMcpServer(id: string) {
+    return this.get<McpServerRecord>('mcp_servers', id);
+  }
+  putMcpServer(server: McpServerRecord) {
+    this.db
+      .prepare(
+        'INSERT INTO mcp_servers(id,name,data) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,data=excluded.data',
+      )
+      .run(server.id, server.name, JSON.stringify(server));
+    return server;
+  }
+  /** Deletes a catalog entry and removes it from every project that enabled it. */
+  deleteMcpServer(id: string) {
+    return this.transaction(() => {
+      const deleted = Number(this.db.prepare('DELETE FROM mcp_servers WHERE id=?').run(id).changes) > 0;
+      if (deleted)
+        for (const project of this.listProjects())
+          if (project.enabledMcp?.includes(id))
+            this.putProject({ ...project, enabledMcp: project.enabledMcp.filter((item) => item !== id) });
+      return deleted;
+    });
+  }
   exportData() {
     return {
       projects: this.listProjects(),
@@ -713,6 +740,8 @@ export class Store {
       settings: this.getSettings(),
       skills: this.listSkills(),
       commands: this.rows<SavedCommand>('commands', 'ORDER BY rowid'),
+      // Literal environment values stay out of exports.
+      mcpServers: this.listMcpServers().map(mcpServerView),
     };
   }
 }

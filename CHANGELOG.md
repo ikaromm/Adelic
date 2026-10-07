@@ -2,6 +2,7 @@
 
 ## Não publicado
 
+- Servidores MCP por projeto, desligados por padrão: catálogo local (somente stdio) em Configurações e uma chave por projeto. O Codex e o Kiro recebem só os servidores ligados, chamadas de ferramenta continuam pedindo aprovação e a execução é bloqueada se aparecer qualquer outro servidor MCP. Veja [catálogo MCP](docs/specs/mcp-catalog.md).
 - Menções `@arquivo` no campo de mensagem: a lista sugere os arquivos do projeto enquanto você digita, e os arquivos de texto mencionados (até 5, 512 KB cada) entram no pedido ao agente, com o caminho conferido para não sair do projeto. Veja [menções de arquivos](docs/specs/mentions.md).
 - Troca de modelo quando o atual está sobrecarregado ou no limite de requisições: **Tentar com outro modelo** oferece até 3 alternativas e muda a conversa para a escolhida; opcionalmente, **Trocar de modelo se o atual estiver sobrecarregado** tenta até 3 modelos configurados, só naquela resposta, depois das novas tentativas e só sem efeito visível. Veja [troca de modelo](docs/specs/retries.md#troca-de-modelo).
 - Paleta de comandos com Ctrl+P (⌘P): ações, conversas, projetos, agente e modelo, modo e comandos salvos, com busca sem acentos e escolhas recentes primeiro. Veja [paleta de comandos](docs/specs/command-palette.md).

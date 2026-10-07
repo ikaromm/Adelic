@@ -1,3 +1,4 @@
+import type { RunMcpServer } from './mcp.js';
 export type ProviderId = 'codex' | 'claude' | 'kiro' | 'opencode';
 export type Mode = 'auto' | 'fast' | 'deep';
 export type ReasoningEffort = string;
@@ -14,6 +15,8 @@ export interface Project {
   memoryProject: string;
   orchestration?: OrchestrationConfig;
   graphify?: GraphifyConfig;
+  /** MCP catalog ids enabled for runs of this project (docs/specs/mcp-catalog.md); default none. */
+  enabledMcp?: string[];
 }
 export interface GraphifyConfig {
   enabled: boolean;
@@ -482,6 +485,11 @@ export interface RunInput {
    * not listed here: the orchestrator already inlined them into `prompt`.
    */
   attachments?: { path: string; name: string; mime: string }[];
+  /**
+   * MCP servers the project enabled (docs/specs/mcp-catalog.md). Absent or empty means none:
+   * providers keep failing closed on any MCP server. Never set for detached conversations.
+   */
+  mcpServers?: RunMcpServer[];
 }
 export type ProviderEvent =
   | { type: 'delta'; text: string }

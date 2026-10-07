@@ -22,6 +22,7 @@ import { integrationName } from '../labels';
 import { notificationPermission, notificationsEnabled } from '../hooks/useRunNotifications';
 import { CommandsCard } from './CommandsCard';
 import { DiagnosticsCard } from './DiagnosticsCard';
+import { McpCard } from './McpCard';
 import { ProjectTools } from './ProjectTools';
 
 export function SettingsPage({
@@ -43,6 +44,7 @@ export function SettingsPage({
   onSetting,
   onSkill,
   onModelFallback,
+  onProjectUpdated,
   notice,
 }: {
   data: Bootstrap;
@@ -77,6 +79,7 @@ export function SettingsPage({
   ) => void;
   onSkill: (id: string, enabled: boolean) => void;
   onModelFallback: (value: NonNullable<Settings['modelFallback']>) => void;
+  onProjectUpdated: (project: Project) => void;
   notice: string;
 }) {
   const [memoryWorkspace, setMemoryWorkspace] = useState(project?.memoryWorkspace || '');
@@ -372,6 +375,7 @@ export function SettingsPage({
             )}
           </section>
           <CommandsCard projects={data.projects} project={project} />
+          <McpCard project={project} onProjectUpdated={onProjectUpdated} />
           <DiagnosticsCard
             updateCheck={data.settings.updateCheck === true}
             onUpdateCheck={(enabled) => onSetting('updateCheck', enabled)}

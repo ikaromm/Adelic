@@ -11,6 +11,7 @@ import type { RetryPolicy } from './retry.js';
 import { accessGuard, authRoutes, type RemoteAccess } from './http/auth.js';
 import { commandsRoutes } from './http/commands.js';
 import { diagnosticsRoutes } from './http/diagnostics.js';
+import { mcpRoutes } from './http/mcp.js';
 import { memoryRoutes } from './http/memory.js';
 import { projectsRoutes } from './http/projects.js';
 import { plansRoutes } from './http/plans.js';
@@ -104,6 +105,7 @@ export function createBackend(
   app.use(settingsRoutes(context));
   app.use(commandsRoutes(context));
   app.use(memoryRoutes(context));
+  app.use(mcpRoutes(context));
   app.use(diagnosticsRoutes(context));
   app.get('/api/health', async (_req, res) => {
     res.json({

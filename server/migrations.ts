@@ -155,6 +155,16 @@ export const migrations: Migration[] = [
         CREATE INDEX IF NOT EXISTS compactions_session ON compactions(session_id);`);
     },
   },
+  // Versions 9 and 10 are reserved for parallel branches.
+  {
+    version: 11,
+    description: 'Catálogo de servidores MCP (opt-in por projeto)',
+    up(db) {
+      db.exec(
+        `CREATE TABLE IF NOT EXISTS mcp_servers(id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, data TEXT NOT NULL);`,
+      );
+    },
+  },
 ];
 
 export const schemaVersion = migrations.at(-1)!.version;

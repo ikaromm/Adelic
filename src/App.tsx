@@ -1967,6 +1967,16 @@ export default function App() {
               }
               onSetting={updateSetting}
               onModelFallback={(modelFallback) => void enqueueSettingsPatch({ modelFallback })}
+              onProjectUpdated={(updated) =>
+                setData((current) =>
+                  current
+                    ? {
+                        ...current,
+                        projects: current.projects.map((item) => (item.id === updated.id ? updated : item)),
+                      }
+                    : current,
+                )
+              }
               onSkill={async (id, enabled) => {
                 try {
                   const result = await api.skill(id, enabled);

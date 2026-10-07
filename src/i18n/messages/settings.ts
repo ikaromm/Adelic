@@ -1,0 +1,202 @@
+import { defineMessages } from '../../../shared/i18n';
+
+// Settings page frame and the cards defined in src/components/SettingsPage.tsx. Cards in their
+// own files (RemoteAccessCard, SpendLimits, CommandsCard, McpCard, DiagnosticsCard, ProjectTools,
+// HooksCard) get their own areas.
+export default defineMessages(
+  {
+    'settings.eyebrow': 'PREFERÊNCIAS DO WORKSPACE',
+    'settings.title': 'Configurações',
+    'settings.subtitle': 'Defina como os agentes executam tarefas neste computador.',
+    // General
+    'settings.general.title': 'Geral',
+    'settings.general.detail': 'Preferências desta interface.',
+    'settings.language.label': 'Idioma / Language',
+    'settings.language.detail': 'Idioma da interface. Automático segue o navegador.',
+    'settings.language.auto': 'Automático (navegador)',
+    'settings.language.ptBR': 'Português (Brasil)',
+    'settings.language.en': 'English',
+    // Project memory scope
+    'settings.memoryScope.title': 'Escopo de memória do projeto',
+    'settings.memoryScope.detail':
+      'Define a biblioteca consultada por conversas vinculadas; não altera o escopo da tela Memória.',
+    'settings.memoryScope.workspace': 'Workspace',
+    'settings.memoryScope.project': 'Projeto na memória',
+    'settings.memoryScope.save': 'Salvar escopo',
+    // Agents and responses
+    'settings.agents.title': 'Agentes e respostas',
+    'settings.agents.detail': 'Escolha os padrões para novas conversas.',
+    'settings.agents.default': 'Agente padrão',
+    'settings.agents.defaultDetail': 'Usado ao criar uma conversa',
+    'settings.agents.unavailableSuffix': ' · indisponível',
+    'settings.agents.mode': 'Modo padrão',
+    'settings.agents.modeDetail': 'Auto adapta o esforço ao pedido',
+    'settings.agents.style': 'Estilo de resposta',
+    'settings.agents.styleDetail': 'Como o agente organiza as respostas',
+    'settings.agents.style.concise': 'Conciso',
+    'settings.agents.style.balanced': 'Equilibrado',
+    'settings.agents.retry': 'Repetir falhas temporárias',
+    'settings.agents.retryDetail':
+      'Tempo esgotado ou conexão interrompida antes de qualquer resposta: até 2 novas tentativas.',
+    'settings.automations.label': 'Automações ativadas',
+    'settings.automations.detail':
+      'Permite que as automações agendadas rodem, só enquanto o Adelic está aberto. Desligado, nada roda.',
+    // Model fallback
+    'settings.fallback.label': 'Trocar de modelo se o atual estiver sobrecarregado',
+    'settings.fallback.detail':
+      'Depois das novas tentativas, usa os modelos abaixo, em ordem, só naquela resposta. A conversa mantém o modelo escolhido.',
+    'settings.fallback.empty': 'Escolha pelo menos um modelo; sem modelos, nada é trocado.',
+    'settings.fallback.list': 'Modelos alternativos, em ordem',
+    'settings.fallback.up': 'Subir {model}',
+    'settings.fallback.remove': 'Remover {model}',
+    'settings.fallback.add': 'Adicionar modelo alternativo',
+    'settings.fallback.addPlaceholder': 'Adicionar modelo…',
+    'settings.fallback.unavailableSuffix': ' (indisponível)',
+    // Auto compact
+    'settings.compact.label': 'Compactar automaticamente conversas longas',
+    'settings.compact.detail':
+      'Antes da próxima mensagem, resume a conversa quando ela passar do limite. Faz uma chamada extra ao agente só nesse caso.',
+    'settings.compact.threshold': 'Limite para compactar',
+    'settings.compact.thresholdDetail':
+      'Tokens de entrada da última execução, ou {factor}× esse valor em caracteres de histórico quando o agente não informa tokens.',
+    // Notifications
+    'settings.notifications.label': 'Notificar quando terminar',
+    'settings.notifications.detail':
+      'Com a janela em segundo plano: resposta pronta, falha ou aprovação pendente. Mostra só o título da conversa.',
+    'settings.notifications.unsupported': 'Este navegador não oferece notificações do sistema.',
+    'settings.notifications.denied':
+      'As notificações estão bloqueadas para este endereço. Libere-as nas permissões do navegador e tente de novo.',
+    'settings.notifications.askAgain': 'Ative de novo para permitir as notificações neste navegador.',
+    // Voice
+    'settings.voice.label': 'Ditado por voz',
+    'settings.voice.detail':
+      'Botão de microfone no campo de mensagem. O áudio é transcrito pelo voxtype neste computador e nunca sai dele pelo Adelic.',
+    'settings.voice.checking': 'Verificando o voxtype…',
+    'settings.voice.available': 'Disponível: {engine}, neste computador.',
+    'settings.voice.error': 'Ditado indisponível: {error}',
+    // Memory
+    'settings.memory.title': 'Memória compartilhada',
+    'settings.memory.detail': 'Busca notas do escopo do projeto quando o pedido precisa de contexto anterior.',
+    'settings.memory.allow': 'Permitir busca de memória',
+    'settings.memory.allowDetail': 'Uma busca só ocorre quando a solicitação indicar contexto relevante.',
+    // Permissions
+    'settings.permissions.title': 'Permissões de execução',
+    'settings.permissions.detail': 'Escolha o que o agente pode alterar e quando pedir confirmação.',
+    'settings.permissions.readOnly': 'Somente leitura',
+    'settings.permissions.readOnlyDetail': 'O agente pode inspecionar arquivos.',
+    'settings.permissions.write': 'Escrita no projeto',
+    'settings.permissions.writeDetail': 'Permite alterações dentro da pasta de trabalho.',
+    'settings.permissions.manual': 'Confirmar solicitações',
+    'settings.permissions.manualDetail': 'Pede confirmação quando o agente oferece essa opção.',
+    'settings.permissions.auto': 'Aprovação automática segura',
+    'settings.permissions.autoDetail': 'Algumas leituras e alterações podem ser aprovadas automaticamente.',
+    'settings.permissions.useAuto': 'Usar aprovação segura',
+    'settings.permissions.terminal': 'Permitir terminal pelo acesso remoto',
+    'settings.permissions.terminalDetail':
+      'Deixa o Terminal do projeto funcionar também em dispositivos da tailnet, com as mesmas permissões dos agentes. Pela internet (Funnel) ele continua bloqueado. Só pode ser alterado neste computador.',
+    'settings.permissions.limit':
+      'O Codex aprova leituras reconhecidas. No Kiro, os pedidos ainda exigem confirmação; Claude não oferece confirmação pelo Adelic. Leituras e alterações feitas sem solicitação e scripts podem alterar ou excluir arquivos.',
+    // Skills
+    'settings.skills.title': 'Skills',
+    'settings.skills.detail': 'Procedimentos disponíveis aos agentes, conforme o runtime.',
+    'settings.skills.empty': 'Nenhuma skill cadastrada.',
+    'settings.skills.noDescription': 'Sem descrição.',
+    'settings.skills.toggle': 'Ativar skill {name}',
+    // Aside
+    'settings.aside.providers': 'AGENTES INSTALADOS',
+    'settings.aside.localTitle': 'Seus dados ficam locais.',
+    'settings.aside.localBody': 'Projetos, conversas e preferências são mantidos neste computador.',
+    'settings.aside.interface': 'Interface local',
+  },
+  {
+    'settings.eyebrow': 'WORKSPACE PREFERENCES',
+    'settings.title': 'Settings',
+    'settings.subtitle': 'Choose how agents run tasks on this computer.',
+    'settings.general.title': 'General',
+    'settings.general.detail': 'Preferences for this interface.',
+    'settings.language.label': 'Idioma / Language',
+    'settings.language.detail': 'Interface language. Automatic follows the browser.',
+    'settings.language.auto': 'Automatic (browser)',
+    'settings.language.ptBR': 'Português (Brasil)',
+    'settings.language.en': 'English',
+    'settings.memoryScope.title': 'Project memory scope',
+    'settings.memoryScope.detail':
+      'Sets the library searched by linked conversations; does not change the scope of the Memory page.',
+    'settings.memoryScope.workspace': 'Workspace',
+    'settings.memoryScope.project': 'Memory project',
+    'settings.memoryScope.save': 'Save scope',
+    'settings.agents.title': 'Agents and responses',
+    'settings.agents.detail': 'Choose the defaults for new conversations.',
+    'settings.agents.default': 'Default agent',
+    'settings.agents.defaultDetail': 'Used when creating a conversation',
+    'settings.agents.unavailableSuffix': ' · unavailable',
+    'settings.agents.mode': 'Default mode',
+    'settings.agents.modeDetail': 'Auto adapts the effort to the request',
+    'settings.agents.style': 'Response style',
+    'settings.agents.styleDetail': 'How the agent organizes its answers',
+    'settings.agents.style.concise': 'Concise',
+    'settings.agents.style.balanced': 'Balanced',
+    'settings.agents.retry': 'Retry temporary failures',
+    'settings.agents.retryDetail': 'Timeout or dropped connection before any response: up to 2 retries.',
+    'settings.automations.label': 'Automations enabled',
+    'settings.automations.detail': 'Lets scheduled automations run, only while Adelic is open. When off, nothing runs.',
+    'settings.fallback.label': 'Switch models if the current one is overloaded',
+    'settings.fallback.detail':
+      'After the retries, uses the models below, in order, for that response only. The conversation keeps the chosen model.',
+    'settings.fallback.empty': 'Choose at least one model; without models, nothing is switched.',
+    'settings.fallback.list': 'Alternative models, in order',
+    'settings.fallback.up': 'Move {model} up',
+    'settings.fallback.remove': 'Remove {model}',
+    'settings.fallback.add': 'Add alternative model',
+    'settings.fallback.addPlaceholder': 'Add model…',
+    'settings.fallback.unavailableSuffix': ' (unavailable)',
+    'settings.compact.label': 'Automatically compact long conversations',
+    'settings.compact.detail':
+      'Before the next message, summarizes the conversation once it passes the limit. Makes an extra call to the agent only then.',
+    'settings.compact.threshold': 'Compaction limit',
+    'settings.compact.thresholdDetail':
+      'Input tokens of the last run, or {factor}× that value in history characters when the agent reports no tokens.',
+    'settings.notifications.label': 'Notify when done',
+    'settings.notifications.detail':
+      'With the window in the background: response ready, failure or pending approval. Shows only the conversation title.',
+    'settings.notifications.unsupported': 'This browser does not offer system notifications.',
+    'settings.notifications.denied':
+      'Notifications are blocked for this address. Allow them in the browser permissions and try again.',
+    'settings.notifications.askAgain': 'Turn it on again to allow notifications in this browser.',
+    'settings.voice.label': 'Voice dictation',
+    'settings.voice.detail':
+      'Microphone button in the message field. Audio is transcribed by voxtype on this computer and never leaves it through Adelic.',
+    'settings.voice.checking': 'Checking voxtype…',
+    'settings.voice.available': 'Available: {engine}, on this computer.',
+    'settings.voice.error': 'Dictation unavailable: {error}',
+    'settings.memory.title': 'Shared memory',
+    'settings.memory.detail': 'Searches notes in the project scope when the request needs earlier context.',
+    'settings.memory.allow': 'Allow memory search',
+    'settings.memory.allowDetail': 'A search only happens when the request points to relevant context.',
+    'settings.permissions.title': 'Execution permissions',
+    'settings.permissions.detail': 'Choose what the agent may change and when to ask for confirmation.',
+    'settings.permissions.readOnly': 'Read only',
+    'settings.permissions.readOnlyDetail': 'The agent can inspect files.',
+    'settings.permissions.write': 'Write in the project',
+    'settings.permissions.writeDetail': 'Allows changes inside the working folder.',
+    'settings.permissions.manual': 'Confirm requests',
+    'settings.permissions.manualDetail': 'Asks for confirmation when the agent offers that option.',
+    'settings.permissions.auto': 'Safe automatic approval',
+    'settings.permissions.autoDetail': 'Some reads and changes may be approved automatically.',
+    'settings.permissions.useAuto': 'Use safe approval',
+    'settings.permissions.terminal': 'Allow the terminal over remote access',
+    'settings.permissions.terminalDetail':
+      'Lets the project Terminal also work on tailnet devices, with the same permissions as the agents. Over the internet (Funnel) it stays blocked. Can only be changed on this computer.',
+    'settings.permissions.limit':
+      'Codex approves recognized reads. In Kiro, requests still need confirmation; Claude offers no confirmation through Adelic. Unrequested reads and changes, and scripts, can modify or delete files.',
+    'settings.skills.title': 'Skills',
+    'settings.skills.detail': 'Procedures available to the agents, depending on the runtime.',
+    'settings.skills.empty': 'No skills registered.',
+    'settings.skills.noDescription': 'No description.',
+    'settings.skills.toggle': 'Enable skill {name}',
+    'settings.aside.providers': 'INSTALLED AGENTS',
+    'settings.aside.localTitle': 'Your data stays local.',
+    'settings.aside.localBody': 'Projects, conversations and preferences are kept on this computer.',
+    'settings.aside.interface': 'Local interface',
+  },
+);

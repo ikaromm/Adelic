@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Activity, ArrowUpCircle, Brain, CalendarClock, MessageSquare, Settings as SettingsIcon } from 'lucide-react';
 import { api, type UpdateInfo } from '../api';
 import type { Session } from '../../shared/contracts';
-import { relativeTime } from '../format';
+import { useI18n } from '../i18n';
 
 export const SIDEBAR_LIMIT = 6;
 
@@ -17,7 +17,8 @@ export function SessionItem({
   now: number;
   onSelect: () => void;
 }) {
-  const title = session.title || 'Nova conversa';
+  const { t, fmt } = useI18n();
+  const title = session.title || t('sidebar.untitled');
   return (
     <button
       className={`session-item ${selected ? 'selected' : ''}`}
@@ -31,9 +32,9 @@ export function SessionItem({
         <MessageSquare size={14} className="session-icon" aria-hidden="true" />
       )}
       <span className="session-title">{title}</span>
-      {session.activeRunId && <span className="visually-hidden">, em execução</span>}
+      {session.activeRunId && <span className="visually-hidden">{t('sidebar.running')}</span>}
       <time className="session-time" dateTime={session.updatedAt}>
-        {relativeTime(session.updatedAt, now)}
+        {fmt.relative(session.updatedAt, now)}
       </time>
     </button>
   );
@@ -53,45 +54,46 @@ export function SidebarNav({
   memoryStatus: string;
   memoryReady: boolean;
 }) {
+  const { t } = useI18n();
   return (
-    <nav className="sidebar-footer" aria-label="Navegação principal">
+    <nav className="sidebar-footer" aria-label={t('sidebar.nav')}>
       <button
         className={`nav-item ${page === 'activity' ? 'active' : ''}`}
         aria-current={page === 'activity' ? 'page' : undefined}
-        title="Atividade"
+        title={t('sidebar.activity')}
         onClick={() => goTo('activity')}
       >
         <Activity size={16} aria-hidden="true" />
-        <span className="sidebar-label">Atividade</span>
+        <span className="sidebar-label">{t('sidebar.activity')}</span>
       </button>
       <button
         className={`nav-item ${page === 'automations' ? 'active' : ''}`}
         aria-current={page === 'automations' ? 'page' : undefined}
-        title="Automações"
+        title={t('sidebar.automations')}
         onClick={() => goTo('automations')}
       >
         <CalendarClock size={16} aria-hidden="true" />
-        <span className="sidebar-label">Automações</span>
+        <span className="sidebar-label">{t('sidebar.automations')}</span>
       </button>
       <button
         className={`nav-item ${page === 'memory' ? 'active' : ''}`}
         aria-current={page === 'memory' ? 'page' : undefined}
-        title={`Memória · ${memoryStatus}`}
+        title={t('sidebar.memoryTitle', { status: memoryStatus })}
         onClick={() => goTo('memory')}
       >
         <Brain size={16} aria-hidden="true" />
-        <span className="sidebar-label">Memória</span>
+        <span className="sidebar-label">{t('sidebar.memory')}</span>
         <span className={`nav-status ${memoryReady ? 'ready' : 'muted'}`} aria-hidden="true" />
         <span className="visually-hidden">, {memoryStatus}</span>
       </button>
       <button
         className={`nav-item ${page === 'settings' ? 'active' : ''}`}
         aria-current={page === 'settings' ? 'page' : undefined}
-        title="Configurações"
+        title={t('sidebar.settings')}
         onClick={() => goTo('settings')}
       >
         <SettingsIcon size={16} aria-hidden="true" />
-        <span className="sidebar-label">Configurações</span>
+        <span className="sidebar-label">{t('sidebar.settings')}</span>
       </button>
     </nav>
   );
@@ -100,6 +102,7 @@ export function SidebarNav({
 /** Discreet link to a newer release; checks once per app start, only when enabled. */
 export function UpdateNotice({ enabled }: { enabled: boolean }) {
   const [update, setUpdate] = useState<UpdateInfo | null>(null);
+  const { t } = useI18n();
   useEffect(() => {
     if (!enabled) return setUpdate(null);
     let active = true;
@@ -118,10 +121,10 @@ export function UpdateNotice({ enabled }: { enabled: boolean }) {
       href={update.url}
       target="_blank"
       rel="noreferrer"
-      title={`Abrir a release ${update.latest}`}
+      title={t('sidebar.updateTitle', { version: update.latest ?? '' })}
     >
       <ArrowUpCircle size={15} aria-hidden="true" />
-      <span className="sidebar-label">Versão {update.latest} disponível</span>
+      <span className="sidebar-label">{t('sidebar.update', { version: update.latest ?? '' })}</span>
     </a>
   );
 }

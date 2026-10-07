@@ -6,6 +6,7 @@ import { Orchestrator } from './orchestrator.js';
 import { Store } from './store.js';
 import { GraphifyService, graphify, mountGraphifyRoutes } from './graphify.js';
 import { error, message, originGuard } from './http/common.js';
+import { localeMiddleware } from './i18n.js';
 import type { BackendContext } from './http/context.js';
 import type { RetryPolicy } from './retry.js';
 import type { runCheck } from './hooks.js';
@@ -63,6 +64,8 @@ export function createBackend(
     limiter: remoteOptions.limiter,
   });
   app.use(access.classify);
+  // Locale of the client (Accept-Language, or ?lang= on event streams) for translated errors.
+  app.use(localeMiddleware);
   // CSP: the local preview may frame loopback dev servers (docs/specs/terminal-preview.md), and
   // nothing may frame the app. Routes with a stricter policy (attachments) replace it.
   app.use(securityHeaders(APP_CSP));
@@ -178,7 +181,7 @@ export function createBackend(
   });
   app.get('/api/export', (_req, res) => res.json(store.exportData()));
   mountGraphifyRoutes(app, store, graphifyService);
-  app.use('/api', (req, res) => error(res, 404, 'Endpoint não encontrado'));
+  app.use('/api', (req, res) => error(res, 404, 'common.notFound'));
   app.use((e: unknown, _req: Request, res: Response, _next: NextFunction) => error(res, 400, message(e)));
   automations.start();
   return { app, orchestrator, graphify: graphifyService, terminal, automations, access, funnel };

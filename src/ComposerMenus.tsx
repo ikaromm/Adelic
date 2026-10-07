@@ -2,6 +2,7 @@ import { useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties
 import { createPortal } from 'react-dom';
 import { Check, ChevronDown, Folder, Layers3, Search, Settings as SettingsIcon, Sparkles, Zap } from 'lucide-react';
 import type { Mode, Project, ProviderInfo } from '../shared/contracts';
+import { t as translate, useI18n } from './i18n';
 
 type Placement = { top: number; left: number; width: number; maxHeight: number; side: 'top' | 'bottom' };
 type PopoverProps = {
@@ -215,6 +216,7 @@ export function ModelMenu({
   disabled?: boolean;
   onChange: (providerId: ProviderInfo['id'], modelId?: string) => void;
 }) {
+  const { t } = useI18n();
   const [filter, setFilter] = useState('');
   const [activeProvider, setActiveProvider] = useState(providerId);
   const currentProvider = providers.find((item) => item.id === providerId);
@@ -223,8 +225,8 @@ export function ModelMenu({
     setActiveProvider(providerId);
     setFilter('');
   }, [sessionId, providerId]);
-  const suffix = currentProvider && !currentProvider.available ? ' · Indisponível' : '';
-  const summary = `${currentModel?.name || 'Modelo padrão'} · ${currentProvider?.name || providerId}${suffix}`;
+  const suffix = currentProvider && !currentProvider.available ? t('composer.model.unavailableSuffix') : '';
+  const summary = `${currentModel?.name || t('composer.model.default')} · ${currentProvider?.name || providerId}${suffix}`;
   const provider = providers.find((item) => item.id === activeProvider);
   const results = (provider?.models || []).filter((item) =>
     `${item.name} ${item.id} ${provider?.name}`.toLowerCase().includes(filter.toLowerCase()),
@@ -233,7 +235,7 @@ export function ModelMenu({
     <Popover
       key={`${sessionId || ''}:${providerId}`}
       className="model-pill"
-      label="Escolher modelo e provedor"
+      label={t('composer.model.label')}
       icon={
         <span className="provider-glyph" aria-hidden="true">
           ✦
@@ -246,12 +248,14 @@ export function ModelMenu({
     >
       {(close) => (
         <div className="model-menu">
-          <div className="provider-rail" role="list" aria-label="Provedores">
+          <div className="provider-rail" role="list" aria-label={t('composer.model.providers')}>
             {providers.map((item) => (
               <button
                 key={item.id}
                 type="button"
-                aria-label={`${item.name}${item.available ? '' : ', indisponível'}`}
+                aria-label={
+                  item.available ? item.name : t('composer.model.providerUnavailableAria', { name: item.name })
+                }
                 aria-pressed={activeProvider === item.id}
                 className={activeProvider === item.id ? 'active' : ''}
                 onClick={() => {
@@ -260,7 +264,7 @@ export function ModelMenu({
                 }}
               >
                 <span>{item.name}</span>
-                {!item.available && <small>Indisponível</small>}
+                {!item.available && <small>{t('composer.model.unavailable')}</small>}
               </button>
             ))}
           </div>
@@ -269,13 +273,19 @@ export function ModelMenu({
               <Search size={14} />
               <input
                 autoFocus
-                aria-label="Buscar modelos"
-                placeholder="Buscar modelos…"
+                aria-label={t('composer.model.search')}
+                placeholder={t('composer.model.searchPlaceholder')}
                 value={filter}
                 onChange={(event) => setFilter(event.target.value)}
               />
             </label>
-            <div className="model-results" role="listbox" aria-label={`Modelos de ${provider?.name || 'provedor'}`}>
+            <div
+              className="model-results"
+              role="listbox"
+              aria-label={t('composer.model.listOf', {
+                provider: provider?.name || t('composer.model.providerFallback'),
+              })}
+            >
               {provider && (
                 <button
                   type="button"
@@ -289,10 +299,10 @@ export function ModelMenu({
                   }}
                 >
                   <span>
-                    <strong>Modelo padrão</strong>
+                    <strong>{t('composer.model.default')}</strong>
                     <small>
-                      {provider.defaultModel || 'Usa o padrão do provedor'}
-                      {!provider.available ? ' · Provedor indisponível' : ''}
+                      {provider.defaultModel || t('composer.model.providerDefault')}
+                      {!provider.available ? t('composer.model.providerUnavailableSuffix') : ''}
                     </small>
                   </span>
                   {providerId === provider.id && !modelId && <Check size={15} />}
@@ -315,7 +325,7 @@ export function ModelMenu({
                     <strong>{model.name}</strong>
                     <small>
                       {provider?.name} · {model.id}
-                      {!provider?.available ? ' · Provedor indisponível' : ''}
+                      {!provider?.available ? t('composer.model.providerUnavailableSuffix') : ''}
                     </small>
                   </span>
                   {providerId === provider?.id && modelId === model.id && <Check size={15} />}
@@ -323,9 +333,7 @@ export function ModelMenu({
               ))}
               {results.length === 0 && (
                 <p className="model-empty">
-                  {provider?.available
-                    ? 'Nenhum modelo corresponde à busca.'
-                    : 'Este provedor está indisponível neste computador.'}
+                  {provider?.available ? t('composer.model.noMatch') : t('composer.model.providerMissing')}
                 </p>
               )}
             </div>
@@ -343,21 +351,33 @@ export function ChoiceMenu({
   options,
   disabled,
   hint,
+  title,
   width = 300,
   onChange,
 }: {
   label: string;
   icon: ReactNode;
   value: string;
-  options: { value: string; label: string; detail?: string }[];
+  /** A disabled option stays visible with its detail explaining why it cannot be picked. */
+  options: { value: string; label: string; detail?: string; disabled?: boolean }[];
   disabled?: boolean;
   hint?: ReactNode;
+  /** Tooltip of the pill (defaults to the label). */
+  title?: string;
   width?: number;
   onChange: (value: string) => void;
 }) {
   const selected = options.find((item) => item.value === value);
   return (
-    <Popover label={label} icon={icon} summary={selected?.label || value} disabled={disabled} focusFirst width={width}>
+    <Popover
+      label={label}
+      icon={icon}
+      summary={selected?.label || value}
+      title={title}
+      disabled={disabled}
+      focusFirst
+      width={width}
+    >
       {(close) => (
         <div className="choice-menu">
           <strong className="choice-menu-title">{label}</strong>
@@ -367,6 +387,7 @@ export function ChoiceMenu({
               type="button"
               className="choice-option"
               aria-pressed={value === item.value}
+              disabled={item.disabled}
               onClick={() => {
                 onChange(item.value);
                 close();
@@ -386,15 +407,12 @@ export function ChoiceMenu({
   );
 }
 
-export const MODE_LABELS: Record<Mode, string> = { auto: 'Auto', fast: 'Rápido', deep: 'Completo' };
-const MODE_OPTIONS: { value: Mode; detail: string; icon: ReactNode }[] = [
-  { value: 'auto', detail: 'Escolhe a rota por regras locais, sem chamada extra de IA.', icon: <Sparkles size={14} /> },
-  {
-    value: 'fast',
-    detail: 'Caminho curto com um executor; ferramentas locais quando necessárias.',
-    icon: <Zap size={14} />,
-  },
-  { value: 'deep', detail: 'Mais contexto e esforço; ferramentas quando o pedido exige.', icon: <Layers3 size={14} /> },
+/** "Auto", "Rápido", "Completo" in the current locale. */
+export const modeLabel = (mode: Mode) => translate(`mode.${mode}`);
+const MODE_OPTIONS: { value: Mode; icon: ReactNode }[] = [
+  { value: 'auto', icon: <Sparkles size={14} /> },
+  { value: 'fast', icon: <Zap size={14} /> },
+  { value: 'deep', icon: <Layers3 size={14} /> },
 ];
 
 /** Project link and execution mode of the conversation, grouped in one composer menu. */
@@ -417,16 +435,18 @@ export function ConversationMenu({
   onMode: (mode: Mode) => void;
   onConfigure?: () => void;
 }) {
+  const { t } = useI18n();
   const project = projects.find((item) => item.id === projectId);
-  const summary = `${project?.name || 'Sem projeto'} · ${MODE_LABELS[mode]}`;
-  const modeDetail = MODE_OPTIONS.find((item) => item.value === mode)?.detail;
+  const projectName = project?.name || t('composer.conversation.noProject');
+  const summary = `${projectName} · ${t(`mode.${mode}`)}`;
+  const modeDetail = t(`mode.${mode}.detail`);
   return (
     <Popover
       className="context-pill"
-      label="Projeto e modo da conversa"
+      label={t('composer.conversation.label')}
       icon={<Folder size={14} />}
       summary={summary}
-      title={`Projeto: ${project?.name || 'Sem projeto'} · Modo: ${MODE_LABELS[mode]}`}
+      title={t('composer.conversation.title', { project: projectName, mode: t(`mode.${mode}`) })}
       disabled={disabled}
       focusFirst
       width={340}
@@ -434,7 +454,7 @@ export function ConversationMenu({
       {(close) => (
         <div className="choice-menu conversation-menu">
           <strong className="choice-menu-title" id="conversation-menu-project">
-            Projeto da conversa
+            {t('composer.conversation.project')}
           </strong>
           <div className="choice-group" role="group" aria-labelledby="conversation-menu-project">
             <button
@@ -447,8 +467,8 @@ export function ConversationMenu({
               }}
             >
               <span>
-                <b>Sem projeto</b>
-                <small>Conversa avulsa, sem memória ou mapa de outro projeto.</small>
+                <b>{t('composer.conversation.noProject')}</b>
+                <small>{t('composer.conversation.noProjectDetail')}</small>
               </span>
               {!projectId && <Check size={15} />}
             </button>
@@ -473,7 +493,7 @@ export function ConversationMenu({
             ))}
           </div>
           <strong className="choice-menu-title" id="conversation-menu-mode">
-            Modo
+            {t('composer.conversation.mode')}
           </strong>
           <div className="mode-switch" role="group" aria-labelledby="conversation-menu-mode">
             {MODE_OPTIONS.map((item) => (
@@ -488,7 +508,7 @@ export function ConversationMenu({
                 }}
               >
                 {item.icon}
-                {MODE_LABELS[item.value]}
+                {t(`mode.${item.value}`)}
               </button>
             ))}
           </div>
@@ -509,7 +529,7 @@ export function ConversationMenu({
                 }}
               >
                 <SettingsIcon size={13} />
-                Configurar projeto
+                {t('composer.conversation.configure')}
               </button>
             )}
           </div>

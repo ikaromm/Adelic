@@ -500,6 +500,8 @@ export interface Settings {
   automations?: boolean;
   /** Opt-in usage limits checked before each model call (docs/specs/spend-limits.md). */
   spendLimits?: SpendLimits;
+  /** Interface language (docs/i18n.md). Absent or 'auto': the browser's language (pt → pt-BR, else en). */
+  language?: 'pt-BR' | 'en' | 'auto';
 }
 /** Global usage limits; an absent value means no limit. Periods use the local timezone. */
 export interface SpendLimits {

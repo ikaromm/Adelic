@@ -1,20 +1,13 @@
 import type { ProviderInfo, Thinking } from '../shared/contracts';
 import { capabilitiesReasoning, modelFor } from '../shared/reasoning';
+import { t, type MessageKey } from './i18n/catalog';
 
-const labels: Record<string, string> = {
-  auto: 'Automático',
-  none: 'Sem raciocínio',
-  minimal: 'Mínimo',
-  low: 'Baixo',
-  medium: 'Médio',
-  high: 'Alto',
-  xhigh: 'Muito alto',
-  max: 'Máximo',
-  ultra: 'Ultra',
-};
+const LEVELS = new Set(['auto', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
 
+/** Name of a reasoning effort in the current locale; unknown tiers show their id. */
 export function thinkingLabel(effort?: string): string {
-  return effort ? labels[effort] || effort : labels.auto;
+  const value = effort || 'auto';
+  return LEVELS.has(value) ? t(`thinking.${value}` as MessageKey) : value;
 }
 
 export function supportedThinking(provider: ProviderInfo | undefined, modelId?: string): Thinking[] {

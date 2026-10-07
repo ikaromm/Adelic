@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { appendOutput, type TerminalCommand, type TerminalEvent, type TerminalState } from '../../shared/terminal';
-import { api } from '../api';
+import { api, eventsUrl } from '../api';
 
 /** Applies one server event to the command list (output bounded like the server's). */
 export function applyTerminalEvent(commands: TerminalCommand[], event: TerminalEvent): TerminalCommand[] {
@@ -45,7 +45,7 @@ export function useTerminal(projectId: string, active: boolean) {
         setState(rest);
         setCommands(initial);
         if (!result.enabled) return;
-        events = new EventSource(`/api/projects/${encodeURIComponent(projectId)}/terminal/events`);
+        events = new EventSource(eventsUrl(`/api/projects/${encodeURIComponent(projectId)}/terminal/events`));
         events.onmessage = (message) => {
           let event: TerminalEvent;
           try {

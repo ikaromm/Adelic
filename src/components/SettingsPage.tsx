@@ -1,4 +1,4 @@
-import { ArrowUp, Bot, Brain, Code2, Command, Layers3, Shield, X } from 'lucide-react';
+import { ArrowUp, Bot, Brain, Code2, Command, Languages, Layers3, Shield, X } from 'lucide-react';
 import { type FormEvent, useEffect, useId, useState } from 'react';
 import {
   AUTO_COMPACT_DEFAULT_TOKENS,
@@ -31,6 +31,8 @@ import { McpCard } from './McpCard';
 import { HooksCard } from './HooksCard';
 import { ProjectTools } from './ProjectTools';
 import { RemoteAccessCard } from './RemoteAccessCard';
+import { LANGUAGE_PREFERENCES, t as translate, useI18n, type LanguagePreference } from '../i18n';
+import { modeLabel } from '../ComposerMenus';
 
 export function SettingsPage({
   data,
@@ -90,7 +92,8 @@ export function SettingsPage({
       | 'voiceDictation'
       | 'terminalRemote'
       | 'internetManualApproval'
-      | 'automations',
+      | 'automations'
+      | 'language',
     value: string | boolean | number,
   ) => void;
   onSkill: (id: string, enabled: boolean) => void;
@@ -103,20 +106,59 @@ export function SettingsPage({
   onProjectSpendLimits: (patch: { monthlyTokens?: number | null; monthlyCostUsd?: number | null }) => void;
   notice: string;
 }) {
+  const { t, preference, setLocale } = useI18n();
   const [memoryWorkspace, setMemoryWorkspace] = useState(project?.memoryWorkspace || '');
   const [memoryProject, setMemoryProject] = useState(project?.memoryProject || '');
   return (
     <section className="page-content">
       <div className="page-heading">
         <div>
-          <div className="eyebrow">PREFERÊNCIAS DO WORKSPACE</div>
-          <h1>Configurações</h1>
-          <p>Defina como os agentes executam tarefas neste computador.</p>
+          <div className="eyebrow">{t('settings.eyebrow')}</div>
+          <h1>{t('settings.title')}</h1>
+          <p>{t('settings.subtitle')}</p>
         </div>
       </div>
       {notice && <div className="inline-notice error-notice">{notice}</div>}
       <div className="settings-layout">
         <div className="settings-main">
+          <section className="settings-card" aria-labelledby="settings-general-title">
+            <div className="settings-card-heading">
+              <div className="settings-card-icon">
+                <Languages size={17} />
+              </div>
+              <div>
+                <h2 id="settings-general-title">{t('settings.general.title')}</h2>
+                <p>{t('settings.general.detail')}</p>
+              </div>
+            </div>
+            <div className="setting-row">
+              <div>
+                <strong id="settings-language-label">{t('settings.language.label')}</strong>
+                <span>{t('settings.language.detail')}</span>
+              </div>
+              <select
+                aria-labelledby="settings-language-label"
+                value={preference}
+                onChange={(event) => {
+                  const next = event.target.value as LanguagePreference;
+                  setLocale(next);
+                  onSetting('language', next);
+                }}
+              >
+                {LANGUAGE_PREFERENCES.map((value) => (
+                  <option key={value} value={value}>
+                    {t(
+                      value === 'auto'
+                        ? 'settings.language.auto'
+                        : value === 'en'
+                          ? 'settings.language.en'
+                          : 'settings.language.ptBR',
+                    )}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </section>
           {project && (
             <ProjectTools
               project={project}
@@ -155,16 +197,16 @@ export function SettingsPage({
                   <Brain size={17} />
                 </div>
                 <div>
-                  <h2>Escopo de memória do projeto</h2>
-                  <p>Define a biblioteca consultada por conversas vinculadas; não altera o escopo da tela Memória.</p>
+                  <h2>{t('settings.memoryScope.title')}</h2>
+                  <p>{t('settings.memoryScope.detail')}</p>
                 </div>
               </div>
               <label className="setting-row">
-                <strong>Workspace</strong>
+                <strong>{t('settings.memoryScope.workspace')}</strong>
                 <input value={memoryWorkspace} onChange={(e) => setMemoryWorkspace(e.target.value)} />
               </label>
               <label className="setting-row">
-                <strong>Projeto na memória</strong>
+                <strong>{t('settings.memoryScope.project')}</strong>
                 <input value={memoryProject} onChange={(e) => setMemoryProject(e.target.value)} />
               </label>
               <button
@@ -172,7 +214,7 @@ export function SettingsPage({
                 disabled={!memoryWorkspace.trim() || !memoryProject.trim()}
                 onClick={() => onProjectMemoryScope(memoryWorkspace.trim(), memoryProject.trim())}
               >
-                Salvar escopo
+                {t('settings.memoryScope.save')}
               </button>
             </section>
           )}
@@ -182,14 +224,14 @@ export function SettingsPage({
                 <Bot size={17} />
               </div>
               <div>
-                <h2>Agentes e respostas</h2>
-                <p>Escolha os padrões para novas conversas.</p>
+                <h2>{t('settings.agents.title')}</h2>
+                <p>{t('settings.agents.detail')}</p>
               </div>
             </div>
             <div className="setting-row">
               <div>
-                <strong>Agente padrão</strong>
-                <span>Usado ao criar uma conversa</span>
+                <strong>{t('settings.agents.default')}</strong>
+                <span>{t('settings.agents.defaultDetail')}</span>
               </div>
               <select
                 value={data.settings.defaultProviderId}
@@ -198,48 +240,48 @@ export function SettingsPage({
                 {data.providers.map((provider) => (
                   <option key={provider.id} value={provider.id}>
                     {provider.name}
-                    {provider.available ? '' : ' · indisponível'}
+                    {provider.available ? '' : t('settings.agents.unavailableSuffix')}
                   </option>
                 ))}
               </select>
             </div>
             <div className="setting-row">
               <div>
-                <strong>Modo padrão</strong>
-                <span>Auto adapta o esforço ao pedido</span>
+                <strong>{t('settings.agents.mode')}</strong>
+                <span>{t('settings.agents.modeDetail')}</span>
               </div>
               <select
                 value={data.settings.defaultMode}
                 onChange={(event) => onSetting('defaultMode', event.target.value)}
               >
-                <option value="auto">Auto</option>
-                <option value="fast">Rápido</option>
-                <option value="deep">Completo</option>
+                <option value="auto">{modeLabel('auto')}</option>
+                <option value="fast">{modeLabel('fast')}</option>
+                <option value="deep">{modeLabel('deep')}</option>
               </select>
             </div>
             <div className="setting-row">
               <div>
-                <strong>Estilo de resposta</strong>
-                <span>Como o agente organiza as respostas</span>
+                <strong>{t('settings.agents.style')}</strong>
+                <span>{t('settings.agents.styleDetail')}</span>
               </div>
               <select
                 value={data.settings.responseStyle}
                 onChange={(event) => onSetting('responseStyle', event.target.value)}
               >
-                <option value="concise">Conciso</option>
-                <option value="balanced">Equilibrado</option>
+                <option value="concise">{t('settings.agents.style.concise')}</option>
+                <option value="balanced">{t('settings.agents.style.balanced')}</option>
               </select>
             </div>
             <div className="setting-row">
               <div>
-                <strong>Repetir falhas temporárias</strong>
-                <span>Tempo esgotado ou conexão interrompida antes de qualquer resposta: até 2 novas tentativas.</span>
+                <strong>{t('settings.agents.retry')}</strong>
+                <span>{t('settings.agents.retryDetail')}</span>
               </div>
               <button
                 className={`toggle ${data.settings.autoRetry !== false ? 'on' : ''}`}
                 role="switch"
                 aria-checked={data.settings.autoRetry !== false}
-                aria-label="Repetir falhas temporárias"
+                aria-label={t('settings.agents.retry')}
                 onClick={() => onSetting('autoRetry', data.settings.autoRetry === false)}
               >
                 <span />
@@ -266,16 +308,14 @@ export function SettingsPage({
             />
             <div className="setting-row">
               <div>
-                <strong>Automações ativadas</strong>
-                <span>
-                  Permite que as automações agendadas rodem, só enquanto o Adelic está aberto. Desligado, nada roda.
-                </span>
+                <strong>{t('settings.automations.label')}</strong>
+                <span>{t('settings.automations.detail')}</span>
               </div>
               <button
                 className={`toggle ${data.settings.automations ? 'on' : ''}`}
                 role="switch"
                 aria-checked={data.settings.automations === true}
-                aria-label="Automações ativadas"
+                aria-label={t('settings.automations.label')}
                 onClick={() => onSetting('automations', !data.settings.automations)}
               >
                 <span />
@@ -294,20 +334,20 @@ export function SettingsPage({
                 <Brain size={17} />
               </div>
               <div>
-                <h2>Memória compartilhada</h2>
-                <p>Busca notas do escopo do projeto quando o pedido precisa de contexto anterior.</p>
+                <h2>{t('settings.memory.title')}</h2>
+                <p>{t('settings.memory.detail')}</p>
               </div>
             </div>
             <div className="setting-row">
               <div>
-                <strong>Permitir busca de memória</strong>
-                <span>Uma busca só ocorre quando a solicitação indicar contexto relevante.</span>
+                <strong>{t('settings.memory.allow')}</strong>
+                <span>{t('settings.memory.allowDetail')}</span>
               </div>
               <button
                 className={`toggle ${data.settings.memoryEnabled ? 'on' : ''}`}
                 role="switch"
                 aria-checked={data.settings.memoryEnabled}
-                aria-label="Permitir busca de memória"
+                aria-label={t('settings.memory.allow')}
                 onClick={() => onSetting('memoryEnabled', !data.settings.memoryEnabled)}
               >
                 <span />
@@ -336,8 +376,8 @@ export function SettingsPage({
                 <Shield size={17} />
               </div>
               <div>
-                <h2>Permissões de execução</h2>
-                <p>Escolha o que o agente pode alterar e quando pedir confirmação.</p>
+                <h2>{t('settings.permissions.title')}</h2>
+                <p>{t('settings.permissions.detail')}</p>
               </div>
             </div>
             <div className="sandbox-options">
@@ -349,8 +389,8 @@ export function SettingsPage({
                   onChange={() => onSetting('sandbox', 'read-only')}
                 />
                 <div>
-                  <strong>Somente leitura</strong>
-                  <span>O agente pode inspecionar arquivos.</span>
+                  <strong>{t('settings.permissions.readOnly')}</strong>
+                  <span>{t('settings.permissions.readOnlyDetail')}</span>
                 </div>
                 <Shield size={16} />
               </label>
@@ -364,8 +404,8 @@ export function SettingsPage({
                   onChange={() => onSetting('sandbox', 'workspace-write')}
                 />
                 <div>
-                  <strong>Escrita no projeto</strong>
-                  <span>Permite alterações dentro da pasta de trabalho.</span>
+                  <strong>{t('settings.permissions.write')}</strong>
+                  <span>{t('settings.permissions.writeDetail')}</span>
                 </div>
                 <Code2 size={16} />
               </label>
@@ -373,12 +413,14 @@ export function SettingsPage({
             <div className="setting-row">
               <div>
                 <strong>
-                  {data.settings.approvalMode === 'manual' ? 'Confirmar solicitações' : 'Aprovação automática segura'}
+                  {data.settings.approvalMode === 'manual'
+                    ? t('settings.permissions.manual')
+                    : t('settings.permissions.auto')}
                 </strong>
                 <span>
                   {data.settings.approvalMode === 'manual'
-                    ? 'Pede confirmação quando o agente oferece essa opção.'
-                    : 'Algumas leituras e alterações podem ser aprovadas automaticamente.'}
+                    ? t('settings.permissions.manualDetail')
+                    : t('settings.permissions.autoDetail')}
                 </span>
               </div>
               <button
@@ -388,33 +430,28 @@ export function SettingsPage({
                   onSetting('approvalMode', data.settings.approvalMode === 'manual' ? 'auto-safe' : 'manual')
                 }
               >
-                {data.settings.approvalMode === 'manual' ? 'Usar aprovação segura' : 'Confirmar solicitações'}
+                {data.settings.approvalMode === 'manual'
+                  ? t('settings.permissions.useAuto')
+                  : t('settings.permissions.manual')}
               </button>
             </div>
             <div className="setting-row">
               <div>
-                <strong>Permitir terminal pelo acesso remoto</strong>
-                <span>
-                  Deixa o Terminal do projeto funcionar também em dispositivos da tailnet, com as mesmas permissões dos
-                  agentes. Pela internet (Funnel) ele continua bloqueado. Só pode ser alterado neste computador.
-                </span>
+                <strong>{t('settings.permissions.terminal')}</strong>
+                <span>{t('settings.permissions.terminalDetail')}</span>
               </div>
               <button
                 className={`toggle ${data.settings.terminalRemote === true ? 'on' : ''}`}
                 role="switch"
                 aria-checked={data.settings.terminalRemote === true}
-                aria-label="Permitir terminal pelo acesso remoto"
+                aria-label={t('settings.permissions.terminal')}
                 disabled={!isLoopbackPage()}
                 onClick={() => onSetting('terminalRemote', data.settings.terminalRemote !== true)}
               >
                 <span />
               </button>
             </div>
-            <p className="permission-limit">
-              O Codex aprova leituras reconhecidas. No Kiro, os pedidos ainda exigem confirmação; Claude não oferece
-              confirmação pelo Adelic. Leituras e alterações feitas sem solicitação e scripts podem alterar ou excluir
-              arquivos.
-            </p>
+            <p className="permission-limit">{t('settings.permissions.limit')}</p>
           </section>
           <RemoteAccessCard
             internetManualApproval={data.settings.internetManualApproval !== false}
@@ -426,12 +463,12 @@ export function SettingsPage({
                 <Layers3 size={17} />
               </div>
               <div>
-                <h2>Skills</h2>
-                <p>Procedimentos disponíveis aos agentes, conforme o runtime.</p>
+                <h2>{t('settings.skills.title')}</h2>
+                <p>{t('settings.skills.detail')}</p>
               </div>
             </div>
             {data.skills.length === 0 ? (
-              <div className="muted-empty">Nenhuma skill cadastrada.</div>
+              <div className="muted-empty">{t('settings.skills.empty')}</div>
             ) : (
               <div className="skills-list">
                 {data.skills.map((skill) => (
@@ -441,13 +478,13 @@ export function SettingsPage({
                     </div>
                     <div className="skill-text">
                       <strong>{skill.name}</strong>
-                      <span>{skill.description || 'Sem descrição.'}</span>
+                      <span>{skill.description || t('settings.skills.noDescription')}</span>
                     </div>
                     <button
                       className={`toggle small ${skill.enabled ? 'on' : ''}`}
                       role="switch"
                       aria-checked={skill.enabled}
-                      aria-label={`Ativar skill ${skill.name}`}
+                      aria-label={t('settings.skills.toggle', { name: skill.name })}
                       onClick={() => onSkill(skill.id, !skill.enabled)}
                     >
                       <span />
@@ -469,7 +506,7 @@ export function SettingsPage({
         <aside className="settings-aside">
           <div className="provider-panel">
             <div className="provider-panel-title">
-              <span>AGENTES INSTALADOS</span>
+              <span>{t('settings.aside.providers')}</span>
               <span className="count-chip">
                 {data.providers.filter((p) => p.available).length}/{data.providers.length}
               </span>
@@ -484,7 +521,7 @@ export function SettingsPage({
                   <span>{provider.detail}</span>
                 </div>
                 <span className={`provider-state ${provider.available ? 'ready' : 'missing'}`}>
-                  {provider.available ? 'Disponível' : 'Indisponível'}
+                  {provider.available ? t('common.available') : t('common.unavailable')}
                 </span>
               </div>
             ))}
@@ -494,13 +531,12 @@ export function SettingsPage({
               <Shield size={15} />
             </div>
             <p>
-              <strong>Seus dados ficam locais.</strong> Projetos, conversas e preferências são mantidos neste
-              computador.
+              <strong>{t('settings.aside.localTitle')}</strong> {t('settings.aside.localBody')}
             </p>
           </div>
           <div className="system-info">
             <span>Adelic</span>
-            <span>Interface local</span>
+            <span>{t('settings.aside.interface')}</span>
           </div>
         </aside>
       </div>
@@ -513,6 +549,7 @@ export function SettingsPage({
  * permission is denied (or was revoked later) the setting explains why nothing appears.
  */
 function NotificationSetting({ enabled, onChange }: { enabled: boolean; onChange: (enabled: boolean) => void }) {
+  const { t } = useI18n();
   const [permission, setPermission] = useState(notificationPermission);
   const [asking, setAsking] = useState(false);
   async function toggle() {
@@ -533,26 +570,24 @@ function NotificationSetting({ enabled, onChange }: { enabled: boolean; onChange
   }
   const problem =
     permission === 'unsupported'
-      ? 'Este navegador não oferece notificações do sistema.'
+      ? t('settings.notifications.unsupported')
       : permission === 'denied'
-        ? 'As notificações estão bloqueadas para este endereço. Libere-as nas permissões do navegador e tente de novo.'
+        ? t('settings.notifications.denied')
         : enabled && permission === 'default'
-          ? 'Ative de novo para permitir as notificações neste navegador.'
+          ? t('settings.notifications.askAgain')
           : '';
   return (
     <>
       <div className="setting-row">
         <div>
-          <strong>Notificar quando terminar</strong>
-          <span>
-            Com a janela em segundo plano: resposta pronta, falha ou aprovação pendente. Mostra só o título da conversa.
-          </span>
+          <strong>{t('settings.notifications.label')}</strong>
+          <span>{t('settings.notifications.detail')}</span>
         </div>
         <button
           className={`toggle ${enabled ? 'on' : ''}`}
           role="switch"
           aria-checked={enabled}
-          aria-label="Notificar quando terminar"
+          aria-label={t('settings.notifications.label')}
           disabled={asking}
           onClick={() => void toggle()}
         >
@@ -570,37 +605,38 @@ function NotificationSetting({ enabled, onChange }: { enabled: boolean; onChange
 
 /** Local voice dictation (docs/specs/voice.md): on by default, with the server's availability. */
 function VoiceSetting({ enabled, onChange }: { enabled: boolean; onChange: (enabled: boolean) => void }) {
+  const { t } = useI18n();
   const [status, setStatus] = useState<VoiceStatus>();
   useEffect(() => {
     let live = true;
     api
       .voiceStatus()
       .then((value) => live && setStatus(value))
-      .catch((e: Error) => live && setStatus({ available: false, reason: `Ditado indisponível: ${e.message}` }));
+      .catch(
+        (e: Error) =>
+          live && setStatus({ available: false, reason: translate('settings.voice.error', { error: e.message }) }),
+      );
     return () => {
       live = false;
     };
   }, []);
   const detail = !status
-    ? 'Verificando o voxtype…'
+    ? t('settings.voice.checking')
     : status.available
-      ? `Disponível: ${[status.engine, status.model].filter(Boolean).join(' · ')}, neste computador.`
+      ? t('settings.voice.available', { engine: [status.engine, status.model].filter(Boolean).join(' · ') })
       : status.reason;
   return (
     <>
       <div className="setting-row">
         <div>
-          <strong>Ditado por voz</strong>
-          <span>
-            Botão de microfone no campo de mensagem. O áudio é transcrito pelo voxtype neste computador e nunca sai dele
-            pelo Adelic.
-          </span>
+          <strong>{t('settings.voice.label')}</strong>
+          <span>{t('settings.voice.detail')}</span>
         </div>
         <button
           className={`toggle ${enabled ? 'on' : ''}`}
           role="switch"
           aria-checked={enabled}
-          aria-label="Ditado por voz"
+          aria-label={t('settings.voice.label')}
           onClick={() => onChange(!enabled)}
         >
           <span />
@@ -630,6 +666,7 @@ function AutoCompactSetting({
   onEnabled: (enabled: boolean) => void;
   onTokens: (tokens: number) => void;
 }) {
+  const { t } = useI18n();
   const [draft, setDraft] = useState(String(tokens));
   const [editing, setEditing] = useState(false);
   const value = editing ? draft : String(tokens);
@@ -645,17 +682,14 @@ function AutoCompactSetting({
     <>
       <div className="setting-row">
         <div>
-          <strong>Compactar automaticamente conversas longas</strong>
-          <span>
-            Antes da próxima mensagem, resume a conversa quando ela passar do limite. Faz uma chamada extra ao agente só
-            nesse caso.
-          </span>
+          <strong>{t('settings.compact.label')}</strong>
+          <span>{t('settings.compact.detail')}</span>
         </div>
         <button
           className={`toggle ${enabled ? 'on' : ''}`}
           role="switch"
           aria-checked={enabled}
-          aria-label="Compactar automaticamente conversas longas"
+          aria-label={t('settings.compact.label')}
           onClick={() => onEnabled(!enabled)}
         >
           <span />
@@ -664,11 +698,8 @@ function AutoCompactSetting({
       {enabled && (
         <div className="setting-row auto-compact-threshold">
           <div>
-            <strong id={labelId}>Limite para compactar</strong>
-            <span id={hintId}>
-              Tokens de entrada da última execução, ou {CHARS_PER_TOKEN}× esse valor em caracteres de histórico quando o
-              agente não informa tokens.
-            </span>
+            <strong id={labelId}>{t('settings.compact.threshold')}</strong>
+            <span id={hintId}>{t('settings.compact.thresholdDetail', { factor: CHARS_PER_TOKEN })}</span>
           </div>
           <input
             type="number"
@@ -708,11 +739,12 @@ function ModelFallbackSetting({
   value: NonNullable<Settings['modelFallback']>;
   onChange: (value: NonNullable<Settings['modelFallback']>) => void;
 }) {
+  const { t } = useI18n();
   const chosen = new Set(value.models.map(fallbackKey));
   const options = providers.flatMap((provider) =>
     provider.models.map((model) => ({
       item: { providerId: provider.id, model: model.id },
-      label: `${provider.name} · ${model.name}${provider.available ? '' : ' (indisponível)'}`,
+      label: `${provider.name} · ${model.name}${provider.available ? '' : t('settings.fallback.unavailableSuffix')}`,
     })),
   );
   const setModels = (models: FallbackModel[]) => onChange({ ...value, models });
@@ -720,17 +752,14 @@ function ModelFallbackSetting({
     <>
       <div className="setting-row">
         <div>
-          <strong>Trocar de modelo se o atual estiver sobrecarregado</strong>
-          <span>
-            Depois das novas tentativas, usa os modelos abaixo, em ordem, só naquela resposta. A conversa mantém o
-            modelo escolhido.
-          </span>
+          <strong>{t('settings.fallback.label')}</strong>
+          <span>{t('settings.fallback.detail')}</span>
         </div>
         <button
           className={`toggle ${value.enabled ? 'on' : ''}`}
           role="switch"
           aria-checked={value.enabled}
-          aria-label="Trocar de modelo se o atual estiver sobrecarregado"
+          aria-label={t('settings.fallback.label')}
           onClick={() => onChange({ ...value, enabled: !value.enabled })}
         >
           <span />
@@ -738,10 +767,8 @@ function ModelFallbackSetting({
       </div>
       {value.enabled && (
         <div className="fallback-models">
-          {value.models.length === 0 && (
-            <p className="muted-empty">Escolha pelo menos um modelo; sem modelos, nada é trocado.</p>
-          )}
-          <ol aria-label="Modelos alternativos, em ordem">
+          {value.models.length === 0 && <p className="muted-empty">{t('settings.fallback.empty')}</p>}
+          <ol aria-label={t('settings.fallback.list')}>
             {value.models.map((item, index) => (
               <li key={fallbackKey(item)}>
                 <span className="fallback-order">{index + 1}</span>
@@ -749,7 +776,7 @@ function ModelFallbackSetting({
                 <button
                   type="button"
                   className="icon-button"
-                  aria-label={`Subir ${modelLabel(providers, item)}`}
+                  aria-label={t('settings.fallback.up', { model: modelLabel(providers, item) })}
                   disabled={index === 0}
                   onClick={() => {
                     const next = [...value.models];
@@ -762,7 +789,7 @@ function ModelFallbackSetting({
                 <button
                   type="button"
                   className="icon-button"
-                  aria-label={`Remover ${modelLabel(providers, item)}`}
+                  aria-label={t('settings.fallback.remove', { model: modelLabel(providers, item) })}
                   onClick={() => setModels(value.models.filter((_, i) => i !== index))}
                 >
                   <X size={14} />
@@ -772,14 +799,14 @@ function ModelFallbackSetting({
           </ol>
           {value.models.length < MODEL_FALLBACK_MAX && (
             <select
-              aria-label="Adicionar modelo alternativo"
+              aria-label={t('settings.fallback.add')}
               value=""
               onChange={(event) => {
                 const option = options.find((o) => fallbackKey(o.item) === event.target.value);
                 if (option) setModels([...value.models, option.item]);
               }}
             >
-              <option value="">Adicionar modelo…</option>
+              <option value="">{t('settings.fallback.addPlaceholder')}</option>
               {options
                 .filter((option) => !chosen.has(fallbackKey(option.item)))
                 .map((option) => (

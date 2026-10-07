@@ -1,16 +1,11 @@
 import type { Run } from '../shared/contracts';
+import { formatShortDate, formatTime } from './format';
 
-export function timeLabel(value?: string) {
-  if (!value) return '—';
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? '—' : date.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
-}
+/** "14:05" in the current locale; "—" when unknown. */
+export const timeLabel = (value?: string) => formatTime(value);
 
-export function shortDate(value?: string) {
-  if (!value) return '';
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? '' : date.toLocaleDateString('pt-BR', { day: '2-digit', month: 'short' });
-}
+/** "12 de set." in the current locale; empty when unknown. */
+export const shortDate = (value?: string) => formatShortDate(value);
 
 export function statusName(status: Run['status']) {
   return {

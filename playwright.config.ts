@@ -23,6 +23,9 @@ export default defineConfig({
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
     viewport: { width: 1280, height: 800 },
+    // Specs assert pt-BR text; the UI's `auto` language follows navigator.language, so pin it.
+    // tests/e2e/i18n.spec.ts switches to English explicitly.
+    locale: 'pt-BR',
     // The production build registers a service worker (docs/specs/pwa.md). Specs run without
     // it so cached shells never leak between them; tests/e2e/pwa.spec.ts opts back in.
     serviceWorkers: 'block',

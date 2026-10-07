@@ -24,6 +24,7 @@ import {
   ArrowRightLeft,
   SquareTerminal,
   GitBranch,
+  Lock,
 } from 'lucide-react';
 import type {
   AttachmentMeta,
@@ -38,7 +39,7 @@ import type {
   SessionDetail,
   StreamEvent,
 } from '../shared/contracts';
-import { api } from './api';
+import { api, eventsUrl } from './api';
 import SharedMemoryPage from './MemoryPage';
 import { BrandMark } from './BrandMark';
 import { ErrorBoundary } from './ErrorBoundary';
@@ -90,10 +91,14 @@ import { SIDEBAR_LIMIT, SessionItem, SidebarNav, UpdateNotice, type Page } from 
 import { ToolsPanel, type ToolsTab } from './components/ToolsPanel';
 import { WorktreePanel } from './components/WorktreePanel';
 import { uuid } from './uuid';
+import { setLanguagePreference, useI18n, type LanguagePreference } from './i18n';
+import { useAccessKind } from './RemoteGate';
 
 type LocalStream = { runId: string; messageId: string; content: string };
 
 export default function App() {
+  const { t } = useI18n();
+  const accessKind = useAccessKind();
   const [data, setData] = useState<Bootstrap | null>(null);
   const [detail, setDetail] = useState<SessionDetail | null>(null);
   const [coordination, setCoordination] = useState<ProjectCoordination | null>(null);
@@ -315,7 +320,7 @@ export default function App() {
   }, [selectedProject, refreshProjectViews]);
 
   useEffect(() => {
-    const events = new EventSource('/api/events');
+    const events = new EventSource(eventsUrl('/api/events'));
     const reconcile = () => {
       void refreshBootstrap().catch((error: Error) => setNotice(error.message));
       if (selectedSession) void refreshDetail(selectedSession).catch(() => undefined);
@@ -1219,7 +1224,8 @@ export default function App() {
       | 'voiceDictation'
       | 'terminalRemote'
       | 'internetManualApproval'
-      | 'automations',
+      | 'automations'
+      | 'language',
     value: string | boolean | number,
   ) {
     if (!data) return;
@@ -1287,14 +1293,24 @@ export default function App() {
     }
   }
 
+  // From the internet the server runs everything with manual approval unless the computer turned
+  // that off (server/http/auth.ts forceManualApproval); the composer shows the effective mode.
+  const internetForcesManual = accessKind === 'internet' && data?.settings.internetManualApproval !== false;
+  const effectiveApprovalMode = internetForcesManual ? 'manual' : data?.settings.approvalMode || 'auto-safe';
+  // Settings.language is the source of truth; localStorage mirrors it for the login screen.
+  const serverLanguage = data?.settings.language;
+  const hasData = Boolean(data);
+  useEffect(() => {
+    if (hasData) setLanguagePreference((serverLanguage ?? 'auto') as LanguagePreference);
+  }, [hasData, serverLanguage]);
   const shortcut = newConversationShortcut();
   const memoryIntegration = data?.integrations.find((item) => item.kind === 'memory');
   const memoryStatus =
     memoryIntegration?.status === 'ready'
-      ? 'conectada'
+      ? t('sidebar.memory.ready')
       : memoryIntegration?.status === 'planned'
-        ? 'verificando'
-        : 'indisponível';
+        ? t('sidebar.memory.checking')
+        : t('sidebar.memory.unavailable');
   const detachedList = sidebarSessions(
     detachedSessions,
     SIDEBAR_LIMIT,
@@ -1328,26 +1344,26 @@ export default function App() {
     setExpandedLists((current) => ({ ...current, [key]: expanded }));
   const conversationContext = conversationProject
     ? conversationProject.orchestration?.enabled === false
-      ? 'Execução direta, sem delegação.'
-      : `Orquestração ativa: ${provider?.name || 'agente da conversa'} coordena tarefas com contexto enxuto.`
-    : 'Conversa avulsa: sem contexto ou configuração de projeto.';
+      ? t('composer.context.direct')
+      : t('composer.context.orchestrated', { agent: provider?.name || t('composer.context.agentFallback') })
+    : t('composer.context.detached');
   // The conversation's project, or the selected project on the start screen; detached
   // conversations have no project folder for the terminal.
   const toolsProject = page === 'chat' ? (session ? conversationProject : project) : undefined;
   const pageTitle =
     page === 'chat'
       ? session
-        ? conversationProject?.name || 'Conversa avulsa'
-        : project?.name || 'Conversas'
+        ? conversationProject?.name || t('shell.crumb.detached')
+        : project?.name || t('shell.crumb.conversations')
       : page === 'activity'
-        ? 'Atividade'
+        ? t('sidebar.activity')
         : page === 'automations'
-          ? 'Automações'
+          ? t('sidebar.automations')
           : page === 'memory'
-            ? 'Memória'
+            ? t('sidebar.memory')
             : page === 'git'
               ? `Git · ${project?.name ?? ''}`
-              : 'Configurações';
+              : t('sidebar.settings');
 
   /** One message of the conversation, with its retry notice and activity panel. */
   function renderTimelineMessage(message: Message) {
@@ -1427,7 +1443,7 @@ export default function App() {
 
   return (
     <div className={`app-shell ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
-      <aside className={`sidebar ${sidebarOpen ? 'sidebar-mobile-open' : ''}`} aria-label="Barra lateral">
+      <aside className={`sidebar ${sidebarOpen ? 'sidebar-mobile-open' : ''}`} aria-label={t('sidebar.label')}>
         <div className="sidebar-header">
           <div className="brand">
             <BrandMark />
@@ -1435,8 +1451,8 @@ export default function App() {
           </div>
           <button
             className="icon-button sidebar-collapse"
-            aria-label={sidebarCollapsed ? 'Expandir navegação' : 'Recolher navegação'}
-            title={sidebarCollapsed ? 'Expandir navegação' : 'Recolher navegação'}
+            aria-label={sidebarCollapsed ? t('sidebar.expand') : t('sidebar.collapse')}
+            title={sidebarCollapsed ? t('sidebar.expand') : t('sidebar.collapse')}
             aria-expanded={!sidebarCollapsed}
             onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
           >
@@ -1444,8 +1460,8 @@ export default function App() {
           </button>
           <button
             className="icon-button sidebar-close"
-            aria-label="Fechar navegação"
-            title="Fechar navegação"
+            aria-label={t('sidebar.close')}
+            title={t('sidebar.close')}
             onClick={() => setSidebarOpen(false)}
           >
             <X size={16} />
@@ -1453,27 +1469,27 @@ export default function App() {
         </div>
         <button
           className="new-chat-button"
-          title={`Nova conversa (${shortcut})`}
+          title={t('sidebar.newTitle', { shortcut })}
           onClick={() => void newConversation()}
           disabled={busy}
         >
           <Plus size={16} />
-          <span className="sidebar-label">Nova conversa</span>
+          <span className="sidebar-label">{t('sidebar.new')}</span>
           <kbd>{shortcut}</kbd>
         </button>
         <button
           className="nav-item sidebar-search"
-          title="Buscar nas conversas (Ctrl+Shift+F)"
+          title={t('sidebar.searchTitle')}
           onClick={() => setSearchOpen(true)}
         >
           <Search size={16} aria-hidden="true" />
-          <span className="sidebar-label">Buscar conversas</span>
+          <span className="sidebar-label">{t('sidebar.search')}</span>
         </button>
         <div className="sidebar-scroll">
           <section className="sidebar-section sidebar-detached" aria-labelledby="sidebar-detached-title">
             <div className="sidebar-section-heading">
               <h2 id="sidebar-detached-title" className="sidebar-label">
-                Conversas avulsas
+                {t('sidebar.detached')}
               </h2>
             </div>
             <div className="session-list detached-conversations">
@@ -1488,26 +1504,26 @@ export default function App() {
               ))}
               {detachedList.hidden > 0 && (
                 <button type="button" className="sidebar-more" onClick={() => toggleList('detached', true)}>
-                  Mostrar mais ({detachedList.hidden})
+                  {t('sidebar.showMore', { count: detachedList.hidden })}
                 </button>
               )}
               {expandedLists.detached && detachedSessions.length > SIDEBAR_LIMIT && (
                 <button type="button" className="sidebar-more" onClick={() => toggleList('detached', false)}>
-                  Mostrar menos
+                  {t('sidebar.showLess')}
                 </button>
               )}
-              {detachedSessions.length === 0 && <p className="sidebar-empty">Nenhuma conversa avulsa.</p>}
+              {detachedSessions.length === 0 && <p className="sidebar-empty">{t('sidebar.detachedEmpty')}</p>}
             </div>
           </section>
           <section className="sidebar-section sidebar-projects" aria-labelledby="sidebar-projects-title">
             <div className="sidebar-section-heading">
               <h2 id="sidebar-projects-title" className="sidebar-label">
-                Projetos
+                {t('sidebar.projects')}
               </h2>
               <button
                 className="icon-button sidebar-add"
-                aria-label="Adicionar projeto"
-                title="Adicionar projeto"
+                aria-label={t('sidebar.addProject')}
+                title={t('sidebar.addProject')}
                 onClick={() => setProjectForm(true)}
               >
                 <Plus size={15} />
@@ -1536,8 +1552,8 @@ export default function App() {
                       </button>
                       <button
                         className="project-new-chat"
-                        aria-label={`Nova conversa em ${item.name}`}
-                        title={`Nova conversa em ${item.name}`}
+                        aria-label={t('sidebar.newIn', { project: item.name })}
+                        title={t('sidebar.newIn', { project: item.name })}
                         disabled={busy}
                         onClick={() => void newConversation(item.id)}
                       >
@@ -1557,12 +1573,12 @@ export default function App() {
                         ))}
                         {projectList.hidden > 0 && (
                           <button type="button" className="sidebar-more" onClick={() => toggleList(item.id, true)}>
-                            Mostrar mais ({projectList.hidden})
+                            {t('sidebar.showMore', { count: projectList.hidden })}
                           </button>
                         )}
                         {expandedLists[item.id] && projectSessions.length > SIDEBAR_LIMIT && (
                           <button type="button" className="sidebar-more" onClick={() => toggleList(item.id, false)}>
-                            Mostrar menos
+                            {t('sidebar.showLess')}
                           </button>
                         )}
                       </div>
@@ -1570,7 +1586,7 @@ export default function App() {
                   </div>
                 );
               })}
-              {data?.projects.length === 0 && <p className="sidebar-empty">Nenhum projeto cadastrado.</p>}
+              {data?.projects.length === 0 && <p className="sidebar-empty">{t('sidebar.projectsEmpty')}</p>}
             </div>
           </section>
         </div>
@@ -1583,7 +1599,7 @@ export default function App() {
         />
       </aside>
       {sidebarOpen && (
-        <button className="mobile-scrim" aria-label="Fechar navegação" onClick={() => setSidebarOpen(false)} />
+        <button className="mobile-scrim" aria-label={t('sidebar.close')} onClick={() => setSidebarOpen(false)} />
       )}
 
       <main className="main-area">
@@ -1591,7 +1607,7 @@ export default function App() {
           <div className="topbar-left">
             <button
               className="icon-button mobile-menu"
-              aria-label="Abrir navegação"
+              aria-label={t('sidebar.open')}
               onClick={() => setSidebarOpen(true)}
             >
               <Menu size={18} />
@@ -1662,9 +1678,13 @@ export default function App() {
                 <Download size={16} />
               </a>
             )}
-            <span className="local-badge" title="Executa neste computador; o servidor escuta somente em 127.0.0.1">
-              <span className="status-dot ready" aria-hidden="true" />
-              Local
+            <span
+              className={`local-badge connection-${accessKind}`}
+              title={t(`shell.connection.${accessKind}.title`)}
+              data-kind={accessKind}
+            >
+              <span className={`status-dot connection-dot ${accessKind}`} aria-hidden="true" />
+              {t(`shell.connection.${accessKind}`)}
             </span>
             <button
               className="icon-button help-button"
@@ -1968,12 +1988,12 @@ export default function App() {
                       }}
                       placeholder={
                         session.activeRunId
-                          ? 'O agente está trabalhando… Enter coloca na fila, Ctrl+Enter envia agora.'
+                          ? t('composer.placeholder.running')
                           : session.planFirst
-                            ? 'Descreva o que quer fazer; o agente planeja antes de executar…'
-                            : 'Escreva uma mensagem…'
+                            ? t('composer.placeholder.planFirst')
+                            : t('composer.placeholder')
                       }
-                      aria-label="Mensagem para o agente"
+                      aria-label={t('composer.input')}
                       rows={1}
                     />
                     <div className="composer-toolbar">
@@ -2011,7 +2031,7 @@ export default function App() {
                           }}
                         />
                         <ChoiceMenu
-                          label="Thinking para próximas mensagens"
+                          label={t('composer.thinking.label')}
                           icon={<Brain size={14} />}
                           value={session.thinking || 'auto'}
                           options={thinkingOptions.map((value) => ({
@@ -2021,54 +2041,51 @@ export default function App() {
                               value === 'auto'
                                 ? thinkingOptions.length === 1
                                   ? reasoningUnavailable
-                                    ? 'Este agente não oferece ajuste. O esforço Automático fica a cargo do runtime.'
-                                    : 'O catálogo deste modelo não anuncia níveis adicionais; Automático usa o padrão do runtime.'
-                                  : 'Escolhido pela rota de cada pedido.'
+                                    ? t('composer.thinking.autoUnavailable')
+                                    : t('composer.thinking.autoNoLevels')
+                                  : t('composer.thinking.autoRoute')
                                 : undefined,
                           }))}
-                          hint={
-                            thinkingOptions.length > 1
-                              ? 'Define o esforço de raciocínio das próximas mensagens. Os níveis seguem o catálogo do modelo escolhido.'
-                              : undefined
-                          }
+                          hint={thinkingOptions.length > 1 ? t('composer.thinking.hint') : undefined}
                           disabled={busy || Boolean(session.activeRunId)}
                           onChange={(value) => void changeSession({ thinking: value })}
                         />
                         <ChoiceMenu
-                          label="Permissões"
-                          icon={<Shield size={14} />}
+                          label={t('composer.permissions')}
+                          icon={internetForcesManual ? <Lock size={14} /> : <Shield size={14} />}
                           width={340}
-                          value={`${data.settings.sandbox}|${data.settings.approvalMode || 'auto-safe'}`}
+                          value={`${data.settings.sandbox}|${effectiveApprovalMode}`}
                           disabled={settingsPending}
+                          title={internetForcesManual ? t('composer.permissions.internetForced') : undefined}
                           options={[
                             {
                               value: 'read-only|auto-safe',
-                              label: 'Leitura · Auto',
-                              detail: 'Confirmação automática quando disponível.',
+                              label: t('composer.permissions.readAuto'),
+                              detail: internetForcesManual
+                                ? t('composer.permissions.internetForced')
+                                : t('composer.permissions.autoDetail'),
+                              disabled: internetForcesManual,
                             },
                             {
                               value: 'read-only|manual',
-                              label: 'Leitura · Manual',
-                              detail: 'Pede confirmação quando o agente oferece essa opção.',
+                              label: t('composer.permissions.readManual'),
+                              detail: t('composer.permissions.manualDetail'),
                             },
                             {
                               value: 'workspace-write|auto-safe',
-                              label: 'Escrita · Auto',
-                              detail: 'Alterações permitidas no projeto.',
+                              label: t('composer.permissions.writeAuto'),
+                              detail: internetForcesManual
+                                ? t('composer.permissions.internetForced')
+                                : t('composer.permissions.writeAutoDetail'),
+                              disabled: internetForcesManual,
                             },
                             {
                               value: 'workspace-write|manual',
-                              label: 'Escrita · Manual',
-                              detail: 'Pede confirmação quando o agente oferece essa opção.',
+                              label: t('composer.permissions.writeManual'),
+                              detail: t('composer.permissions.manualDetail'),
                             },
                           ]}
-                          hint={
-                            <>
-                              O Codex aprova leituras reconhecidas. No Kiro, os pedidos ainda exigem confirmação; Claude
-                              não oferece confirmação pelo Adelic. Leituras e alterações feitas sem solicitação e
-                              scripts podem alterar ou excluir arquivos.
-                            </>
-                          }
+                          hint={t('composer.permissions.hint')}
                           onChange={(value) => {
                             const [sandbox, approvalMode] = value.split('|') as [
                               'read-only' | 'workspace-write',
@@ -2099,20 +2116,20 @@ export default function App() {
                           type="button"
                           className={`composer-pill plan-first-toggle ${session.planFirst ? 'active' : ''}`}
                           aria-pressed={Boolean(session.planFirst)}
-                          title="Planejar antes: cada mensagem gera primeiro um plano somente leitura para você aprovar. Para uma mensagem só, comece com /plano."
+                          title={t('composer.planFirstTitle')}
                           disabled={busy || Boolean(session.activeRunId)}
                           onClick={() => void changeSession({ planFirst: !session.planFirst })}
                         >
                           <ClipboardList size={14} />
-                          <span className="composer-pill-label">Planejar antes</span>
+                          <span className="composer-pill-label">{t('composer.planFirst')}</span>
                         </button>
                       </div>
                       {session.activeRunId && composer.trim() && (
                         <button
                           type="button"
                           className="queue-button"
-                          aria-label="Adicionar à fila"
-                          title="Adicionar à fila (Enter)"
+                          aria-label={t('composer.queue')}
+                          title={t('composer.queueTitle')}
                           onClick={() => void queueMessage()}
                         >
                           <ListPlus size={16} />
@@ -2120,8 +2137,8 @@ export default function App() {
                       )}
                       <button
                         className={`send-button ${canCancelCurrentSend ? 'stop' : ''}`}
-                        aria-label={canCancelCurrentSend ? 'Cancelar execução' : 'Enviar mensagem'}
-                        title={canCancelCurrentSend ? 'Cancelar execução' : 'Enviar (Enter)'}
+                        aria-label={canCancelCurrentSend ? t('composer.cancel') : t('composer.send')}
+                        title={canCancelCurrentSend ? t('composer.cancel') : t('composer.sendTitle')}
                         onClick={() =>
                           session.activeRunId
                             ? void api
@@ -2147,11 +2164,7 @@ export default function App() {
                         )}
                       </button>
                     </div>
-                    {reasoningUnavailable && (
-                      <span className="visually-hidden">
-                        Este agente não oferece ajustes de Thinking; somente Automático está disponível.
-                      </span>
-                    )}
+                    {reasoningUnavailable && <span className="visually-hidden">{t('composer.noThinking')}</span>}
                   </div>
                 </div>
               </div>

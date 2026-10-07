@@ -1,7 +1,7 @@
 import type { NextFunction, Request, Response } from 'express';
 import type { Server as HttpServer } from 'node:http';
 import type { Socket } from 'node:net';
-import { LOGIN_FAILED, PASSWORD_MAX, type AccessKind, type AuthStatus } from '../../shared/remote-access.js';
+import { PASSWORD_MAX, type AccessKind, type AuthStatus } from '../../shared/remote-access.js';
 import type { Store } from '../store.js';
 import {
   LoginLimiter,
@@ -12,6 +12,7 @@ import {
   cleanIp,
   sameSecret,
 } from '../remote-auth.js';
+import { LocalizedError, type ServerKey } from '../i18n.js';
 import { error } from './common.js';
 
 /**
@@ -166,8 +167,9 @@ export function accessOf(req: Request) {
   return info;
 }
 export const requestKind = (req: Request) => accessOf(req).kind;
-export const LOCAL_ONLY = 'Esta opção só pode ser alterada neste computador, não pelo acesso remoto';
-export const INTERNET_BLOCKED = 'Indisponível no acesso pela internet; use este computador ou a tailnet.';
+/** Catalog keys (server/i18n/messages/auth.ts); `error()` translates them per request. */
+export const LOCAL_ONLY: ServerKey = 'auth.localOnly';
+export const INTERNET_BLOCKED: ServerKey = 'auth.internetBlocked';
 
 /** Runs started from an internet session use manual approval (setting on by default). */
 export const forceManualApproval = (req: Request, store: Store) =>
@@ -307,7 +309,7 @@ export class AccessControl {
       if (!auth) {
         // UI shell and assets; anything that could reach the API stays behind login.
         if (path !== '/api' && !path.startsWith('/api/')) return next();
-        return error(res, 401, 'Autenticação necessária');
+        return error(res, 401, 'auth.required');
       }
       if (LOCAL_ONLY_PATHS.some(([pattern, method]) => pattern.test(path) && method(req.method)))
         return error(res, 403, LOCAL_ONLY);
@@ -325,8 +327,8 @@ export class AccessControl {
           sameOrigin = Boolean(origin && host && new URL(origin).host === host);
         } catch {}
         const site = req.get('sec-fetch-site');
-        if (!sameOrigin || (site && site !== 'same-origin')) return error(res, 403, 'Origem externa bloqueada');
-        if (!req.is('application/json')) return error(res, 415, 'Mutação exige application/json');
+        if (!sameOrigin || (site && site !== 'same-origin')) return error(res, 403, 'auth.externalOrigin');
+        if (!req.is('application/json')) return error(res, 415, 'auth.jsonRequired');
       }
       if (auth.key) {
         accessByRequest.set(req, { ...info, sessionKey: auth.key });
@@ -367,8 +369,7 @@ export class AccessControl {
   private async withVerifySlot<T>(work: () => Promise<T>) {
     const max = this.options.maxVerifying ?? 2;
     if (this.verifying >= max) {
-      if (this.waiting.length >= 50)
-        throw Object.assign(new Error('Muitas tentativas; aguarde um minuto'), { status: 429 });
+      if (this.waiting.length >= 50) throw new LocalizedError('auth.tooManyAttempts', undefined, 429);
       await new Promise<void>((resolve) => this.waiting.push(resolve));
     }
     this.verifying++;
@@ -398,7 +399,7 @@ export class AccessControl {
         return res.json(status);
       }
       if (req.path === '/api/auth/login' && req.method === 'POST') {
-        if (info.kind === 'local') return error(res, 400, 'Login só é necessário no acesso remoto');
+        if (info.kind === 'local') return error(res, 400, 'auth.loginNotNeeded');
         return this.login(req, res);
       }
       if (req.path === '/api/auth/logout' && req.method === 'POST') {
@@ -434,14 +435,14 @@ export class AccessControl {
       });
     if (this.limiter.blocked(info.ip)) {
       record(false, 'rate-limit');
-      return error(res, 429, 'Muitas tentativas; aguarde um minuto');
+      return error(res, 429, 'auth.tooManyAttempts');
     }
     await this.limiter.throttle();
     // Checked again after the wait, and each attempt counts as a failure before the (slow)
     // check, so parallel requests from one address cannot exceed the limit.
     if (this.limiter.blocked(info.ip)) {
       record(false, 'rate-limit');
-      return error(res, 429, 'Muitas tentativas; aguarde um minuto');
+      return error(res, 429, 'auth.tooManyAttempts');
     }
     const pending = this.limiter.reserve(info.ip);
     let ok: boolean;
@@ -461,12 +462,13 @@ export class AccessControl {
       }
     } catch (e) {
       pending.settle(false);
-      return error(res, (e as { status?: number }).status ?? 500, (e as Error).message);
+      const status = (e as { status?: number }).status ?? 500;
+      return error(res, status, e instanceof LocalizedError ? e : (e as Error).message);
     }
     pending.settle(ok);
     if (!ok) {
       record(false, token === undefined && !this.accounts.hasAccount() ? 'no-account' : 'credentials');
-      return error(res, 401, LOGIN_FAILED);
+      return error(res, 401, 'auth.loginFailed');
     }
     record(true);
     const session = this.accounts.createSession(userId, method, context);

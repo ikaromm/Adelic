@@ -287,6 +287,7 @@ export const SettingsPatchSchema = z.object({
   internetManualApproval: optional(z.boolean(), 'internetManualApproval deve ser booleano'),
   automations: optional(z.boolean(), 'automations deve ser booleano'),
   spendLimits: optional(SpendLimitsPatchSchema, SPEND_LIMITS_MESSAGE),
+  language: optional(z.enum(['auto', 'pt-BR', 'en']), 'language deve ser auto, pt-BR ou en'),
 });
 /** POST /api/projects/:id/terminal (docs/specs/terminal-preview.md). */
 export const TerminalRunSchema = z

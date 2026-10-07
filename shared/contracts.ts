@@ -314,6 +314,8 @@ export interface Run {
   compaction?: { auto: boolean };
   /** The summary call of "Continuar com outro agente": no messages, recorded for its usage. */
   handoff?: { toProviderId: ProviderId };
+  /** Started from an internet session: approvals were forced to manual for this run. */
+  manualApproval?: boolean;
   /** "Corrigir automaticamente": the run started because checks of `sourceRunId` failed. */
   hookFix?: { sourceRunId: string };
 }
@@ -369,6 +371,8 @@ export interface Plan {
   executionMode?: 'all' | 'next';
   /** "Parar após a tarefa atual": no new task starts after the running one. */
   stopRequested?: boolean;
+  /** Approved from an internet session: its task runs use manual approval. */
+  manualApproval?: boolean;
   /** Last execution problem, shown on the card. */
   error?: string;
   /** Project-relative path of the last "Salvar no projeto". */
@@ -421,6 +425,8 @@ export interface QueuedMessage {
   clientId?: string;
   /** Attachments sent with the message; resolved again from the store when it starts. */
   attachments?: AttachmentMeta[];
+  /** Queued from an internet session: its run uses manual approval (docs/specs/remote-access.md). */
+  manualApproval?: boolean;
   createdAt: string;
   updatedAt?: string;
 }
@@ -479,8 +485,15 @@ export interface Settings {
   autoCompactTokens?: number;
   /** Microphone button in the composer, transcribed locally by voxtype (docs/specs/voice.md). Absent: on when available. */
   voiceDictation?: boolean;
-  /** "Permitir terminal pelo acesso remoto": off unless set (docs/specs/terminal-preview.md). */
+  /** "Permitir terminal pelo acesso remoto": off unless set (docs/specs/terminal-preview.md). Never from the internet. */
   terminalRemote?: boolean;
+  /**
+   * "Pela internet, exigir aprovação manual para comandos": runs started from an internet
+   * session use approvalMode 'manual' (docs/specs/remote-access.md). Absent means on.
+   */
+  internetManualApproval?: boolean;
+  /** Tailscale Funnel requested from this computer: re-applied at startup when an account exists. */
+  funnel?: { wanted: boolean; port: number };
   /** Global switch of scheduled automations (off by default): nothing runs while it is off. */
   automations?: boolean;
   /** Opt-in usage limits checked before each model call (docs/specs/spend-limits.md). */

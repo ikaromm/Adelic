@@ -98,6 +98,11 @@ export interface StartOptions {
   overrideLimit?: boolean;
   /** "Corrigir automaticamente": `content` is the visible label, `prompt` goes to the agent. */
   hookFix?: { sourceRunId: string; prompt: string };
+  /**
+   * Started from an internet session with "exigir aprovação manual" on: this run (and its
+   * delegated tasks) use approvalMode 'manual' whatever the settings say.
+   */
+  manualApproval?: boolean;
 }
 /** A plan-mode run: its kind and the prompt that replaces the usual one. */
 type SpecialRun = { ref: RunPlanRef; prompt: string };
@@ -164,6 +169,8 @@ export class Orchestrator {
       startFix: async (sessionId, sourceRunId, failures) => {
         await this.start(this.requireSession(sessionId), fixLabel(failures), undefined, [], {
           hookFix: { sourceRunId, prompt: fixPrompt(failures) },
+          // The fix of a run started from the internet stays under manual approval.
+          ...(this.store.getRun(sourceRunId)?.manualApproval ? { manualApproval: true } : {}),
         });
       },
     });
@@ -256,6 +263,7 @@ export class Orchestrator {
     this.starting.set(session.id, reservation);
     try {
       const startingSettings = structuredClone(this.store.getSettings()!);
+      if (options.manualApproval) startingSettings.approvalMode = 'manual';
       if (controller.signal.aborted) throw cancelledError('Execução cancelada antes de iniciar');
       const initialThinking = session.thinking;
       const hasImages = attachments.some((a) => a.kind === 'image');
@@ -399,6 +407,7 @@ export class Orchestrator {
         startedAt: now,
         ...(special ? { plan: special.ref } : {}),
         ...(options.hookFix ? { hookFix: { sourceRunId: options.hookFix.sourceRunId } } : {}),
+        ...(options.manualApproval ? { manualApproval: true } : {}),
       };
       session = {
         ...session,
@@ -480,6 +489,7 @@ export class Orchestrator {
     attachments: StoredAttachment[] | undefined,
     clientMessageId?: string,
     overrideLimit = false,
+    manualApproval = false,
   ): Promise<Started> {
     const session = this.requireSession(sessionId);
     if (clientMessageId) {
@@ -506,7 +516,11 @@ export class Orchestrator {
         return stored && stored.sessionId === sessionId ? [stored] : [];
       });
     // No await before start(): its reservation is taken synchronously, so the checks above hold.
-    return this.start(session, content, clientMessageId, kept, { replaceFrom: messageId, overrideLimit });
+    return this.start(session, content, clientMessageId, kept, {
+      replaceFrom: messageId,
+      overrideLimit,
+      ...(manualApproval ? { manualApproval } : {}),
+    });
   }
   // ---- Conversation compaction (docs/specs/compaction.md) ----
   compactions(sessionId: string) {
@@ -2205,6 +2219,8 @@ export class Orchestrator {
     attachments: AttachmentMeta[] = [],
     /** Applies only when the message starts right away. */
     overrideLimit = false,
+    /** Sent from an internet session: the run starts under manual approval, now or later. */
+    manualApproval = false,
   ) {
     this.requireSession(sessionId);
     // A retried request whose item already left the queue and started.
@@ -2216,6 +2232,7 @@ export class Orchestrator {
       content,
       ...(clientId ? { clientId } : {}),
       ...(attachments.length ? { attachments } : {}),
+      ...(manualApproval ? { manualApproval: true } : {}),
       createdAt: new Date().toISOString(),
     });
     this.emitQueue(sessionId);
@@ -2257,6 +2274,7 @@ export class Orchestrator {
     sessionId: string,
     input: { content: string; clientId?: string; attachments?: AttachmentMeta[] } | { itemId: string },
     overrideLimit = false,
+    manualApproval = false,
   ) {
     this.requireSession(sessionId);
     let itemId: string;
@@ -2272,6 +2290,7 @@ export class Orchestrator {
           content: input.content,
           ...(input.clientId ? { clientId: input.clientId } : {}),
           ...(input.attachments?.length ? { attachments: input.attachments } : {}),
+          ...(manualApproval ? { manualApproval: true } : {}),
           createdAt: new Date().toISOString(),
         },
         { front: true, ignoreLimit: true },
@@ -2387,6 +2406,7 @@ export class Orchestrator {
         const overrideLimit = this.limitOverrides.delete(item.id);
         const result = await this.start(session, item.content, item.clientId ?? item.id, attachments, {
           overrideLimit,
+          ...(item.manualApproval ? { manualApproval: true } : {}),
         });
         return { itemId: item.id, result };
       } catch (e) {
@@ -2524,7 +2544,7 @@ export class Orchestrator {
   async retryRun(
     runId: string,
     target: { providerId?: ProviderId; model?: string } = {},
-    options: { overrideLimit?: boolean } = {},
+    options: { overrideLimit?: boolean; manualApproval?: boolean } = {},
   ) {
     const run = this.store.getRun(runId);
     if (!run) throw Object.assign(new Error('Execução não encontrada'), { status: 404 });
@@ -2566,6 +2586,8 @@ export class Orchestrator {
     try {
       const started = await this.start(next, request.content, undefined, attachments, {
         overrideLimit: options.overrideLimit,
+        // A retry keeps the manual approval of the original run, or adds it from the internet.
+        ...(options.manualApproval || run.manualApproval ? { manualApproval: true } : {}),
       });
       return { ...started, session: this.store.getSession(session.id) ?? next };
     } catch (error) {

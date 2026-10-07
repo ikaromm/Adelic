@@ -21,6 +21,7 @@ import {
   parseBody,
   text,
 } from '../../shared/schemas.js';
+import { forceManualApproval } from './auth.js';
 import { error, errorStatus, failure, message } from './common.js';
 
 const titleSchema = text(160);
@@ -271,7 +272,10 @@ export function sessionsRoutes({ store, orchestrator, providerList }: BackendCon
     const attachments = ownedAttachments(s.id, attachmentIds);
     if (!attachments) return error(res, 400, MISSING_ATTACHMENT);
     try {
-      const result = await orchestrator.start(s, content, clientMessageId, attachments, { overrideLimit });
+      const result = await orchestrator.start(s, content, clientMessageId, attachments, {
+        overrideLimit,
+        ...(forceManualApproval(req, store) ? { manualApproval: true } : {}),
+      });
       res.status(202).json(result);
     } catch (e) {
       failure(res, e);
@@ -296,6 +300,7 @@ export function sessionsRoutes({ store, orchestrator, providerList }: BackendCon
         attachments,
         clientMessageId,
         overrideLimit,
+        forceManualApproval(req, store),
       );
       res.status(202).json(result);
     } catch (e) {
@@ -368,6 +373,7 @@ export function sessionsRoutes({ store, orchestrator, providerList }: BackendCon
         parsed.data.clientId,
         attachments.map(attachmentMeta),
         parsed.data.overrideLimit === true,
+        forceManualApproval(req, store),
       );
       res.status(result.started ? 202 : 201).json({ ...result, queue: orchestrator.queue(id(req)) });
     }),
@@ -416,6 +422,7 @@ export function sessionsRoutes({ store, orchestrator, providerList }: BackendCon
         id(req),
         itemId ? { itemId } : { content: content!, clientId, attachments: attachments.map(attachmentMeta) },
         overrideLimit === true,
+        forceManualApproval(req, store),
       );
       res.status(202).json({ ...result, queue: orchestrator.queue(id(req)) });
     }),

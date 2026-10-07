@@ -235,7 +235,8 @@ describe('terminal API', () => {
   it('runs, reports, streams and stops commands, with the narrow frame-src CSP on every response', async () => {
     const { url, id, post, project } = await setup();
     const state = await fetch(`${url}/api/projects/${id}/terminal`);
-    expect(state.headers.get('content-security-policy')).toBe(APP_CSP);
+    // The app's CSP plus frame-ancestors (docs/specs/remote-access.md): nothing may frame the app.
+    expect(state.headers.get('content-security-policy')).toBe(`${APP_CSP}; frame-ancestors 'none'`);
     expect(APP_CSP).toBe('frame-src http://127.0.0.1:* http://localhost:* https://127.0.0.1:* https://localhost:*');
     expect(await state.json()).toMatchObject({
       enabled: true,

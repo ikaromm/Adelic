@@ -75,7 +75,7 @@ export class Plans {
   }
 
   /** `overrideLimit` ("Continuar mesmo assim") lets only the first task pass the usage limits. */
-  async approve(planId: string, mode: 'all' | 'next', overrideLimit = false) {
+  async approve(planId: string, mode: 'all' | 'next', overrideLimit = false, manualApproval = false) {
     const plan = this.require(planId);
     this.requireIdle(plan);
     if (plan.status === 'rejected') throw httpError('Este plano foi descartado', 409);
@@ -86,6 +86,9 @@ export class Plans {
     const previous = plan.status;
     plan.status = 'executing';
     plan.executionMode = mode;
+    // Approved from the internet: every task of this execution waits for manual approval.
+    if (manualApproval) plan.manualApproval = true;
+    else delete plan.manualApproval;
     delete plan.stopRequested;
     delete plan.error;
     this.save(plan);
@@ -108,6 +111,7 @@ export class Plans {
     return this.deps.start(this.session(plan), taskLabel(plan, task), {
       planTask: { planId: plan.id, taskId: task.id, prompt: buildTaskPrompt(plan, task) },
       ...(overrideLimit ? { overrideLimit } : {}),
+      ...(plan.manualApproval ? { manualApproval: true } : {}),
     });
   }
 

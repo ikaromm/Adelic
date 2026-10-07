@@ -187,6 +187,19 @@ export const migrations: Migration[] = [
       );
     },
   },
+  {
+    version: 12,
+    description: 'Acesso remoto com usuário e senha: conta, sessões de login e últimos acessos',
+    up(db) {
+      // Separate tables, outside settings and exports: they hold the password hash and the
+      // SHA-256 of session cookies (docs/specs/remote-access.md). remote_logins is a bounded log.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS remote_users(id TEXT PRIMARY KEY, data TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS remote_sessions(id TEXT PRIMARY KEY, user_id TEXT NOT NULL, data TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS remote_sessions_user ON remote_sessions(user_id);
+        CREATE TABLE IF NOT EXISTS remote_logins(id INTEGER PRIMARY KEY AUTOINCREMENT, data TEXT NOT NULL);`);
+    },
+  },
 ];
 
 export const schemaVersion = migrations.at(-1)!.version;

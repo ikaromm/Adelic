@@ -22,7 +22,7 @@ describe('ErrorBoundary', () => {
     boundary.state = state;
     const html = renderToString(<>{boundary.render()}</>);
     expect(html).toContain('role="alert"');
-    expect(html).toContain('Não foi possível exibir <!-- -->a conversa');
+    expect(html).toContain('Não foi possível exibir a conversa');
     expect(html).toContain('falha sintética de renderização');
     expect(html).toContain('Tentar de novo');
     expect(html).toContain('Recarregar');

@@ -10,15 +10,49 @@
     <title>Sem conexão com o Adelic</title>
   </head>
   <body>
-    <!-- Served by the service worker when a page load fails (docs/specs/pwa.md). No script. -->
+    <!--
+      Served by the service worker when a page load fails (docs/specs/pwa.md). pt-BR by default;
+      the inline script below shows the English text when the app's language (localStorage
+      "adelic-language", or the browser's with "auto") is not Portuguese. No external script.
+    -->
     <main class="offline" aria-labelledby="offline-title">
       <img src="/favicon.svg" width="56" height="56" alt="" />
-      <h1 id="offline-title">Sem conexão com o Adelic</h1>
-      <p>
+      <h1 id="offline-title" lang="pt-BR">Sem conexão com o Adelic</h1>
+      <h1 lang="en" hidden>Cannot reach Adelic</h1>
+      <p lang="pt-BR">
         Não foi possível falar com o computador onde o Adelic está rodando. Confira se ele está ligado, com o Adelic
         aberto, e se este aparelho está na mesma rede (por exemplo, conectado à Tailscale).
       </p>
-      <a class="offline-retry" href="/">Tentar de novo</a>
+      <p lang="en" hidden>
+        Could not talk to the computer where Adelic is running. Check that it is on, with Adelic open, and that this
+        device is on the same network (for example, connected to Tailscale).
+      </p>
+      <a class="offline-retry" href="/" lang="pt-BR">Tentar de novo</a>
+      <a class="offline-retry" href="/" lang="en" hidden>Try again</a>
     </main>
+    <script>
+      (function () {
+        var preference = 'auto';
+        try {
+          preference = localStorage.getItem('adelic-language') || 'auto';
+        } catch (e) {}
+        var browser = String(navigator.language || '').toLowerCase();
+        var locale =
+          preference === 'pt-BR' || preference === 'en'
+            ? preference
+            : browser === 'pt' || browser.indexOf('pt-') === 0
+              ? 'pt-BR'
+              : 'en';
+        if (locale === 'pt-BR') return;
+        document.documentElement.lang = 'en';
+        document.title = 'Cannot reach Adelic';
+        var nodes = document.querySelectorAll('main [lang]');
+        for (var i = 0; i < nodes.length; i++) {
+          var english = nodes[i].getAttribute('lang') === 'en';
+          nodes[i].hidden = !english;
+          if (nodes[i].tagName === 'H1') nodes[i].id = english ? 'offline-title' : '';
+        }
+      })();
+    </script>
   </body>
 </html>

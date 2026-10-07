@@ -72,7 +72,8 @@ export function SettingsPage({
       | 'autoRetry'
       | 'notifications'
       | 'autoCompact'
-      | 'autoCompactTokens',
+      | 'autoCompactTokens'
+      | 'terminalRemote',
     value: string | boolean | number,
   ) => void;
   onSkill: (id: string, enabled: boolean) => void;
@@ -326,6 +327,25 @@ export function SettingsPage({
                 }
               >
                 {data.settings.approvalMode === 'manual' ? 'Usar aprovação segura' : 'Confirmar solicitações'}
+              </button>
+            </div>
+            <div className="setting-row">
+              <div>
+                <strong>Permitir terminal pelo acesso remoto</strong>
+                <span>
+                  Com ADELIC_REMOTE_BIND, deixa o Terminal do projeto funcionar também em outros dispositivos, com as
+                  mesmas permissões dos agentes. Só pode ser alterado neste computador.
+                </span>
+              </div>
+              <button
+                className={`toggle ${data.settings.terminalRemote === true ? 'on' : ''}`}
+                role="switch"
+                aria-checked={data.settings.terminalRemote === true}
+                aria-label="Permitir terminal pelo acesso remoto"
+                disabled={!isLoopbackPage()}
+                onClick={() => onSetting('terminalRemote', data.settings.terminalRemote !== true)}
+              >
+                <span />
               </button>
             </div>
             <p className="permission-limit">
@@ -658,3 +678,6 @@ function ModelFallbackSetting({
     </>
   );
 }
+
+/** The page was opened on this computer (not through the optional remote address). */
+const isLoopbackPage = () => ['127.0.0.1', 'localhost', '[::1]'].includes(window.location.hostname);

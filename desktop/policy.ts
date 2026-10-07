@@ -1,5 +1,6 @@
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { validatePreviewUrl } from '../shared/terminal.js';
 
 export type NavigationPolicy = 'internal' | 'external' | 'blocked';
 
@@ -30,6 +31,16 @@ export function navigationPolicy(target: string, appUrl: string): NavigationPoli
   if (targetUrl.origin === appOrigin) return 'internal';
   if (targetUrl.protocol === 'http:' || targetUrl.protocol === 'https:') return 'external';
   return 'blocked';
+}
+
+/**
+ * Sub-frame navigations: the app's own pages, or the local preview (docs/specs/terminal-preview.md),
+ * which accepts only loopback http(s) dev servers other than the Adelic itself. Anything else
+ * inside a frame is blocked; top-level windows keep `navigationPolicy`.
+ */
+export function subframeNavigationAllowed(target: string, appUrl: string): boolean {
+  if (navigationPolicy(target, appUrl) === 'internal') return true;
+  return Boolean(appUrl) && validatePreviewUrl(target, appUrl).ok;
 }
 
 /**

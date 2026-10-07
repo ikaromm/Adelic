@@ -381,6 +381,8 @@ export interface Settings {
   autoCompact?: boolean;
   /** Input-token threshold of the last run for `autoCompact` (history chars: 4× this). */
   autoCompactTokens?: number;
+  /** "Permitir terminal pelo acesso remoto": off unless set (docs/specs/terminal-preview.md). */
+  terminalRemote?: boolean;
 }
 export interface Integration {
   id: string;

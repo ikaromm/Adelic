@@ -1,0 +1,330 @@
+/* Terminal and local preview panel (docs/specs/terminal-preview.md): docked under the conversation. */
+.icon-button.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.tools-panel {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  height: min(48vh, 480px);
+  min-height: 240px;
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.tools-panel-header {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px 6px 12px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.tools-tabs {
+  display: flex;
+  gap: 4px;
+  min-width: 0;
+}
+
+.tools-tabs button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: var(--control-h-sm);
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+
+.tools-tabs button:hover {
+  background: var(--row-hover);
+  color: var(--text);
+}
+
+.tools-tabs button.active {
+  border-color: var(--accent-border);
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
+.tools-tabpanel {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.terminal-tab,
+.preview-tab {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+  padding: 8px 12px 10px;
+}
+
+.tools-note {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  line-height: var(--leading);
+}
+
+.tools-note.warning {
+  padding: 6px 10px;
+  border: 1px solid var(--warning-border);
+  border-radius: var(--radius-sm);
+  background: var(--warning-soft);
+  color: var(--text);
+}
+
+.tools-note code {
+  color: var(--code-inline);
+}
+
+.terminal-output {
+  flex: 1;
+  min-height: 0;
+  padding: 8px 10px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--code-bg);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  overscroll-behavior: contain;
+}
+
+.terminal-output:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.terminal-empty {
+  margin: 0;
+  color: var(--text-muted);
+  font-family: var(--font-sans);
+}
+
+.terminal-entry + .terminal-entry {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-soft);
+}
+
+.terminal-entry-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+}
+
+.terminal-command {
+  flex: 1 1 160px;
+  min-width: 0;
+  color: var(--text);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.terminal-status,
+.terminal-duration {
+  flex: none;
+  font-family: var(--font-sans);
+  font-size: var(--text-2xs);
+  font-weight: 600;
+}
+
+.terminal-status {
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  color: var(--text-secondary);
+}
+
+.terminal-status.running {
+  border-color: var(--accent-border);
+  color: var(--accent);
+}
+
+.terminal-status.ok {
+  border-color: var(--success-border);
+  color: var(--success);
+}
+
+.terminal-status.warning {
+  border-color: var(--warning-border);
+  color: var(--warning);
+}
+
+.terminal-status.error {
+  border-color: var(--danger-border);
+  color: var(--danger);
+}
+
+.terminal-duration {
+  color: var(--text-muted);
+}
+
+.terminal-stop.danger-button {
+  min-height: var(--control-h-sm);
+  padding: 0 9px;
+  font-size: var(--text-xs);
+}
+
+.terminal-text {
+  margin: 6px 0 0;
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  line-height: var(--leading);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.terminal-text .stderr {
+  color: var(--orange);
+}
+
+.terminal-truncated,
+.terminal-error {
+  margin: 6px 0 0;
+  font-family: var(--font-sans);
+  font-size: var(--text-xs);
+}
+
+.terminal-truncated {
+  color: var(--text-muted);
+}
+
+.terminal-error {
+  color: var(--danger);
+}
+
+.terminal-urls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.terminal-urls .secondary-button {
+  max-width: 100%;
+  min-height: var(--control-h-sm);
+  font-family: var(--font-sans);
+  font-size: var(--text-xs);
+}
+
+.terminal-url {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-weight: 500;
+  text-overflow: ellipsis;
+}
+
+.terminal-form,
+.preview-form {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.terminal-prompt {
+  flex: none;
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: var(--text-md);
+  font-weight: 700;
+}
+
+.terminal-input,
+.preview-form input {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+}
+
+.terminal-timeout select {
+  width: 92px;
+  font-size: var(--text-sm);
+}
+
+.terminal-meta {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--text-2xs);
+}
+
+.preview-error {
+  margin: 0;
+  color: var(--danger);
+  font-size: var(--text-xs);
+}
+
+.preview-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.preview-current {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.preview-frame {
+  flex: 1;
+  width: 100%;
+  min-height: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  /* Inherits the app's dark color-scheme on purpose: a light dev page then gets the browser's
+     opaque light canvas instead of a transparent one over our dark surface. */
+}
+
+@container main-area (max-width: 520px) {
+  .tools-panel {
+    height: min(58vh, 480px);
+  }
+
+  .terminal-form {
+    flex-wrap: wrap;
+  }
+
+  .terminal-prompt {
+    display: none;
+  }
+
+  .terminal-input {
+    flex-basis: 100%;
+  }
+
+  .terminal-timeout {
+    flex: 1;
+  }
+
+  .terminal-timeout select {
+    width: 100%;
+  }
+}

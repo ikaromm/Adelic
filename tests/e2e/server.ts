@@ -23,7 +23,8 @@
 // Compaction: a compaction prompt answers a fixed summary (the prompt with [falhar-resumo]
 // in the transcript fails, so the automatic fallback can be seen).
 import { createServer } from 'node:http';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { existsSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import express from 'express';
@@ -34,6 +35,7 @@ import { emitApproval } from '../../server/providers/common.js';
 import { PLAN_PROMPT_MARKER, TASK_PROMPT_MARKER } from '../../server/plan-markdown.js';
 import { HANDOFF_PROMPT_MARKER } from '../../server/provider-handoff.js';
 import { COMPACTION_PROMPT_MARKER } from '../../server/compaction.js';
+import { TerminalService } from '../../server/terminal.js';
 import { startFakeMemory } from './fake-memory.js';
 
 const port = Number(process.env.E2E_PORT || 4399);
@@ -253,8 +255,22 @@ const providers: ProviderRegistry = {
   async shutdown() {},
 };
 
+// Terminal (docs/specs/terminal-preview.md): the real bubblewrap sandbox when it can create
+// namespaces here; otherwise (some CI containers) commands run unsandboxed in the project folder,
+// so the UI flows are still covered. Isolation itself is tested in tests/terminal.test.ts.
+const bwrapWorks =
+  existsSync('/usr/bin/bwrap') &&
+  spawnSync(
+    '/usr/bin/bwrap',
+    ['--ro-bind', '/', '/', '--proc', '/proc', '--dev', '/dev', '--unshare-pid', '--', '/bin/true'],
+    {
+      timeout: 10_000,
+      stdio: 'ignore',
+    },
+  ).status === 0;
+const terminal = new TerminalService(bwrapWorks ? {} : { wrap: async (command, args) => ({ command, args }) });
 // Short retry delays so the retry flows finish quickly.
-const { app } = createBackend(store, providers, undefined, undefined, { baseDelayMs: 150, maxDelayMs: 400 });
+const { app } = createBackend(store, providers, undefined, undefined, { baseDelayMs: 150, maxDelayMs: 400 }, terminal);
 const web = resolve(import.meta.dirname, '../../dist');
 // Fake GitHub "latest release" for the opt-in update check (ADELIC_RELEASES_URL points here).
 app.get('/e2e/releases/latest', (_req, res) =>

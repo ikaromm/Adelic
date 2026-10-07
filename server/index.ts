@@ -17,6 +17,9 @@ import { plansRoutes } from './http/plans.js';
 import { runsRoutes } from './http/runs.js';
 import { isAttachmentUpload, sessionsRoutes } from './http/sessions.js';
 import { settingsRoutes } from './http/settings.js';
+import { terminalRoutes } from './http/terminal.js';
+import { TerminalService } from './terminal.js';
+import { APP_CSP } from '../shared/terminal.js';
 
 export function createBackend(
   store: Store,
@@ -26,9 +29,17 @@ export function createBackend(
   remote?: RemoteAccess,
   // Test hook for the retry delays (production uses DEFAULT_RETRY).
   retryOverrides?: Partial<RetryPolicy>,
+  // Integrated command runner; tests may inject one with another sandbox wrapper.
+  terminal: TerminalService = new TerminalService(),
 ) {
   const app = express();
   app.disable('x-powered-by');
+  // The only CSP directive the app needs: the local preview may frame loopback dev servers
+  // (docs/specs/terminal-preview.md). Routes with a stricter policy (attachments) replace it.
+  app.use((_req, res, next) => {
+    res.setHeader('Content-Security-Policy', APP_CSP);
+    next();
+  });
   // Attachment uploads carry base64 files: that one route parses its own larger body, after
   // the access guard, so unauthenticated requests never get the 15 MB parser.
   const json = express.json({ limit: '128kb', strict: true });
@@ -105,6 +116,7 @@ export function createBackend(
   app.use(commandsRoutes(context));
   app.use(memoryRoutes(context));
   app.use(diagnosticsRoutes(context));
+  app.use(terminalRoutes(context, terminal));
   app.get('/api/health', async (_req, res) => {
     res.json({
       status: 'ok',
@@ -117,5 +129,5 @@ export function createBackend(
   mountGraphifyRoutes(app, store, graphifyService);
   app.use('/api', (req, res) => error(res, 404, 'Endpoint não encontrado'));
   app.use((e: unknown, _req: Request, res: Response, _next: NextFunction) => error(res, 400, message(e)));
-  return { app, orchestrator, graphify: graphifyService };
+  return { app, orchestrator, graphify: graphifyService, terminal };
 }

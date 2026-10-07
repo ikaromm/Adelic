@@ -40,6 +40,8 @@ import type { Automation, AutomationSchedule } from '../shared/automations';
 import type { CheckResult, ProjectHooks } from '../shared/hooks';
 import type { McpEnvSource, McpServerView, ProjectMcpReport } from '../shared/mcp';
 import type { RemoteAccessState, TailscaleState } from '../shared/remote-access';
+import { t } from './i18n/catalog';
+import { getLocale } from './i18n/store';
 /** Report from /api/diagnostics: versions, paths and status only, without secrets or content. */
 export interface Diagnostics {
   generatedAt: string;
@@ -124,10 +126,17 @@ export type ApiError = Error & {
   url?: string;
 };
 
+/** Accept-Language of the chosen UI locale: the server translates its `{ error }` texts (docs/i18n.md). */
+export const localeHeaders = (): Record<string, string> => ({ 'Accept-Language': getLocale() });
+/** EventSource cannot set headers: event-stream URLs carry the locale as `?lang=`. */
+export function eventsUrl(path: string) {
+  return `${path}${path.includes('?') ? '&' : '?'}lang=${encodeURIComponent(getLocale())}`;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
     ...init,
-    headers: { 'Content-Type': 'application/json', ...init?.headers },
+    headers: { 'Content-Type': 'application/json', ...localeHeaders(), ...init?.headers },
   });
   if (!response.ok) {
     const body = (await response.json().catch(() => ({}))) as {
@@ -138,7 +147,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       limit?: SpendLimitStatus;
       url?: string;
     };
-    const error = new Error(body.error || `Falha na solicitação (${response.status})`) as ApiError;
+    const error = new Error(body.error || t('common.requestFailed', { status: response.status })) as ApiError;
     error.status = response.status;
     if (Array.isArray(body.conflicts)) error.conflicts = body.conflicts;
     if (body.exists === true) error.exists = true;

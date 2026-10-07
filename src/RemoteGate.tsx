@@ -1,9 +1,15 @@
-import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
+import { createContext, useContext, useEffect, useState, type FormEvent, type ReactNode } from 'react';
 import { KeyRound, LoaderCircle } from 'lucide-react';
 import { BrandMark } from './BrandMark';
-import type { AuthStatus } from '../shared/remote-access';
+import type { AccessKind, AuthStatus } from '../shared/remote-access';
+import { useI18n } from './i18n';
+import { localeHeaders } from './api';
 
 const LOCAL: AuthStatus = { remote: false, authenticated: true, kind: 'local', login: 'none', token: false };
+
+const AccessKindContext = createContext<AccessKind>('local');
+/** Where this page is connected from, as classified by the server (/api/auth/status). */
+export const useAccessKind = () => useContext(AccessKindContext);
 
 /**
  * On this computer the app renders directly. Through the tailnet or the internet (Tailscale
@@ -18,15 +24,17 @@ export function RemoteGate({ children }: { children: ReactNode }) {
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const { t } = useI18n();
   useEffect(() => {
-    fetch('/api/auth/status')
+    fetch('/api/auth/status', { headers: localeHeaders() })
       .then((r) => (r.ok ? (r.json() as Promise<AuthStatus>) : LOCAL))
       // An older server without /api/auth: behave as before (loopback only).
       .then((s) => setStatus({ ...LOCAL, ...s }))
       .catch(() => setStatus(LOCAL));
   }, []);
   if (!status) return null;
-  if (status.authenticated) return <>{children}</>;
+  if (status.authenticated)
+    return <AccessKindContext.Provider value={status.kind}>{children}</AccessKindContext.Provider>;
   const tokenMode = status.login === 'token' || (useToken && status.token);
   const internet = status.kind === 'internet';
   const login = async (event: FormEvent) => {
@@ -36,7 +44,7 @@ export function RemoteGate({ children }: { children: ReactNode }) {
     try {
       const response = await fetch('/api/auth/login', {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: { 'content-type': 'application/json', ...localeHeaders() },
         body: JSON.stringify(tokenMode ? { token: password.trim() } : { username: username.trim(), password }),
       });
       const body = (await response.json().catch(() => ({}))) as { error?: string };
@@ -44,11 +52,11 @@ export function RemoteGate({ children }: { children: ReactNode }) {
         throw new Error(
           response.status === 401
             ? tokenMode
-              ? 'Token inválido.'
-              : 'Usuário ou senha incorretos.'
+              ? t('auth.invalidToken')
+              : t('auth.badCredentials')
             : response.status === 429
-              ? 'Muitas tentativas. Aguarde um minuto e tente de novo.'
-              : body.error || `Falha no login (${response.status}).`,
+              ? t('auth.tooManyAttempts')
+              : body.error || t('auth.failed', { status: response.status }),
         );
       setPassword('');
       setStatus({ ...status, authenticated: true });
@@ -65,11 +73,8 @@ export function RemoteGate({ children }: { children: ReactNode }) {
           <div className="remote-gate-brand">
             <BrandMark /> adelic
           </div>
-          <h1 id="remote-gate-title">Acesso remoto indisponível</h1>
-          <p>
-            Nenhuma conta foi criada. No computador onde o Adelic roda, abra Configurações › Acesso remoto e defina um
-            usuário e uma senha.
-          </p>
+          <h1 id="remote-gate-title">{t('auth.unavailable.title')}</h1>
+          <p>{t('auth.unavailable.body')}</p>
         </section>
       </main>
     );
@@ -79,17 +84,11 @@ export function RemoteGate({ children }: { children: ReactNode }) {
         <div className="remote-gate-brand">
           <BrandMark /> adelic
         </div>
-        <h1 id="remote-gate-title">Entrar no Adelic</h1>
-        <p>
-          {tokenMode
-            ? 'Informe o token configurado em ADELIC_REMOTE_TOKEN.'
-            : internet
-              ? 'Acesso pela internet. Entre com o usuário e a senha definidos neste Adelic.'
-              : 'Acesso remoto. Entre com o usuário e a senha definidos neste Adelic.'}
-        </p>
+        <h1 id="remote-gate-title">{t('auth.title')}</h1>
+        <p>{tokenMode ? t('auth.hint.token') : internet ? t('auth.hint.internet') : t('auth.hint.remote')}</p>
         {!tokenMode && (
           <label>
-            Usuário
+            {t('auth.username')}
             <input
               name="username"
               autoComplete="username"
@@ -103,7 +102,7 @@ export function RemoteGate({ children }: { children: ReactNode }) {
           </label>
         )}
         <label>
-          {tokenMode ? 'Token de acesso' : 'Senha'}
+          {tokenMode ? t('auth.token') : t('auth.password')}
           <input
             name="password"
             type="password"
@@ -120,7 +119,7 @@ export function RemoteGate({ children }: { children: ReactNode }) {
           </div>
         )}
         <button className="primary-button" disabled={busy || !password || (!tokenMode && !username.trim())}>
-          {busy ? <LoaderCircle size={15} className="spin" /> : <KeyRound size={15} />} Entrar
+          {busy ? <LoaderCircle size={15} className="spin" /> : <KeyRound size={15} />} {t('auth.submit')}
         </button>
         {status.login === 'password' && status.token && (
           <button
@@ -132,7 +131,7 @@ export function RemoteGate({ children }: { children: ReactNode }) {
               setPassword('');
             }}
           >
-            {useToken ? 'Entrar com usuário e senha' : 'Entrar com o token (ADELIC_REMOTE_TOKEN)'}
+            {useToken ? t('auth.usePassword') : t('auth.useToken')}
           </button>
         )}
       </form>

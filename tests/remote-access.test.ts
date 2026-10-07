@@ -538,6 +538,32 @@ describe('remote access server (tailnet listener)', () => {
 });
 
 describe('internet access (Funnel listener)', () => {
+  it('answers errors in the language the client asks for (Accept-Language or ?lang=), pt-BR otherwise', async () => {
+    const server = await start(null);
+    const refused = await call(`${server.url}/api/remote-access/funnel`, {
+      method: 'PUT',
+      body: { enabled: true },
+      headers: { 'accept-language': 'en-US,en;q=0.9' },
+    });
+    expect([refused.status, json(refused).error]).toEqual([
+      409,
+      'Create the username and password before publishing to the internet.',
+    ]);
+    expect((await createAccount(server)).status).toBe(200);
+    const funnel = await funnelUrl(server);
+    const english = await login(funnel, 'dono', 'senha errada mesmo', { 'accept-language': 'en' });
+    expect([english.status, json(english).error]).toEqual([401, 'Incorrect username or password']);
+    const portuguese = await login(funnel, 'dono', 'senha errada mesmo', { 'accept-language': 'fr, pt;q=0.5' });
+    expect(json(portuguese).error).toBe(LOGIN_FAILED);
+    const unsupported = await login(funnel, 'dono', 'senha errada mesmo', { 'accept-language': 'fr' });
+    expect(json(unsupported).error).toBe(LOGIN_FAILED);
+    const guarded = await call(`${funnel}/api/bootstrap?lang=en`);
+    expect([guarded.status, json(guarded).error]).toEqual([401, 'Authentication required']);
+    // The generic 404 of server/index.ts is a catalog key too.
+    const notFound = await call(`${server.url}/api/nothing-here`, { headers: { 'accept-language': 'en' } });
+    expect(json(notFound).error).toBe('Endpoint not found');
+  });
+
   it('requires the account: no login without it, and Funnel cannot be enabled before it exists', async () => {
     const server = await start(null);
     const refused = await call(`${server.url}/api/remote-access/funnel`, { method: 'PUT', body: { enabled: true } });

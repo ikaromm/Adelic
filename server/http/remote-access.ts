@@ -4,6 +4,7 @@ import { RemoteAccountSchema, RemoteFunnelSchema, parseBody } from '../../shared
 import type { FunnelService } from '../funnel.js';
 import type { Store } from '../store.js';
 import { LOCAL_ONLY, type AccessControl, accessOf, requestKind } from './auth.js';
+import { LocalizedError } from '../i18n.js';
 import { error, errorStatus, message } from './common.js';
 
 /** The loopback listener that receives Funnel traffic; started by the runtime on demand. */
@@ -53,10 +54,8 @@ export class FunnelControl {
     return this.serial(() => this.disableNow());
   }
   private async enableNow() {
-    if (!this.listener)
-      throw Object.assign(new Error('Este Adelic não tem a porta do Funnel configurada.'), { status: 409 });
-    if (!this.access.accounts.hasAccount())
-      throw Object.assign(new Error('Crie o usuário e a senha antes de publicar na internet.'), { status: 409 });
+    if (!this.listener) throw new LocalizedError('remote.noFunnelPort', undefined, 409);
+    if (!this.access.accounts.hasAccount()) throw new LocalizedError('remote.accountFirst', undefined, 409);
     const port = await this.listener.ensure();
     try {
       const state = await this.service.enable(port, this.previousPort());
@@ -100,7 +99,7 @@ export function remoteAccessRoutes(store: Store, access: AccessControl, funnel: 
   const app = Router();
   const fail = (res: Response, e: unknown) => {
     const url = (e as { url?: string }).url;
-    res.status(errorStatus(e) || 500).json({ error: message(e), ...(url ? { url } : {}) });
+    res.status(errorStatus(e) || 500).json({ error: message(e, res.req.locale), ...(url ? { url } : {}) });
   };
   const state = (req: Request): RemoteAccessState => {
     const kind = accessOf(req).kind;
@@ -141,7 +140,7 @@ export function remoteAccessRoutes(store: Store, access: AccessControl, funnel: 
   };
   app.put('/api/remote-access/account', async (req, res) => {
     if (!local(req, res)) return;
-    const parsed = parseBody(RemoteAccountSchema, req.body, 'Usuário ou senha inválidos');
+    const parsed = parseBody(RemoteAccountSchema, req.body, 'remote.invalidAccount');
     if (!parsed.ok) return error(res, 400, parsed.message);
     try {
       await access.accounts.setAccount(parsed.data.username, parsed.data.password);
@@ -161,7 +160,7 @@ export function remoteAccessRoutes(store: Store, access: AccessControl, funnel: 
   });
   app.delete('/api/remote-access/sessions/:id', (req, res) => {
     const key = access.accounts.revokeSession(String(req.params.id));
-    if (!key) return error(res, 404, 'Sessão não encontrada');
+    if (!key) return error(res, 404, 'remote.sessionNotFound');
     access.closeStreams(key);
     res.json(state(req));
   });
@@ -180,7 +179,7 @@ export function remoteAccessRoutes(store: Store, access: AccessControl, funnel: 
   });
   app.put('/api/remote-access/funnel', async (req, res) => {
     if (!local(req, res)) return;
-    const parsed = parseBody(RemoteFunnelSchema, req.body, 'enabled deve ser booleano');
+    const parsed = parseBody(RemoteFunnelSchema, req.body, 'remote.enabledBoolean');
     if (!parsed.ok) return error(res, 400, parsed.message);
     try {
       const tailscale = parsed.data.enabled ? await funnel.enable() : await funnel.disable();

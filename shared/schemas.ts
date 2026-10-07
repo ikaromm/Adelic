@@ -9,6 +9,7 @@ import {
   commandModes,
 } from './commands.js';
 import { MENTION_PATH_MAX } from './mentions.js';
+import { AUTO_COMPACT_MAX_TOKENS, AUTO_COMPACT_MIN_TOKENS } from './compaction.js';
 
 // Request schemas shared by the server routes (and usable by the UI). Each field keeps
 // the exact error message the API returned before zod, so clients see no change.
@@ -188,7 +189,14 @@ export const SettingsPatchSchema = z.object({
     ModelFallbackSchema,
     `modelFallback inválido (até ${MODEL_FALLBACK_MAX} modelos diferentes, cada um com providerId e model)`,
   ),
+  autoCompact: optional(z.boolean(), 'autoCompact deve ser booleano'),
+  autoCompactTokens: optional(
+    z.number().int().min(AUTO_COMPACT_MIN_TOKENS).max(AUTO_COMPACT_MAX_TOKENS),
+    `autoCompactTokens deve ser um inteiro entre ${AUTO_COMPACT_MIN_TOKENS} e ${AUTO_COMPACT_MAX_TOKENS}`,
+  ),
 });
+/** "Compactar conversa" takes no options (docs/specs/compaction.md). */
+export const CompactSchema = z.object({}).strict();
 export const RestoreRunSchema = z.object({
   confirm: required(z.literal(true), 'confirm: true é obrigatório para desfazer alterações'),
 });

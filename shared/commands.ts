@@ -21,9 +21,14 @@ export const COMMAND_MESSAGES = {
   mode: 'mode deve ser fast, balanced ou deep',
 };
 
+/** Built-in actions that are not templates: no saved command or repository file can take these names. */
+export const RESERVED_COMMAND_NAMES: readonly string[] = ['compactar'];
+export const COMMAND_RESERVED = 'Nome reservado para uma ação embutida do Adelic';
+
 /** First problem with a command's editable fields, or '' when valid (the API checks again). */
 export function commandFieldsError(fields: { name: string; description: string; template: string }) {
   if (!COMMAND_NAME.test(fields.name)) return COMMAND_MESSAGES.name;
+  if (RESERVED_COMMAND_NAMES.includes(fields.name)) return COMMAND_RESERVED;
   if (fields.description.length > COMMAND_DESCRIPTION_MAX) return COMMAND_MESSAGES.description;
   if (!fields.template.trim() || fields.template.length > COMMAND_TEMPLATE_MAX) return COMMAND_MESSAGES.template;
   return '';

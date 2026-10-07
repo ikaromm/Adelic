@@ -14,7 +14,7 @@ Para o mesmo nome, vence a primeira origem desta ordem:
 1. **Projeto**: comando do usuário salvo no projeto da conversa.
 2. **Repositório**: arquivos `<projeto>/.adelic/commands/*.md`.
 3. **Global**: comando do usuário salvo sem projeto.
-4. **Embutido**: `/revisar`, `/testes` e `/explicar`, somente leitura. Um comando com o mesmo nome os substitui.
+4. **Embutido**: `/revisar`, `/testes` e `/explicar`, somente leitura. Um comando com o mesmo nome os substitui. `/compactar` é uma ação reservada ([compactação](compaction.md)) e nenhum comando pode usar esse nome.
 
 A ordem coloca o repositório acima do global para que um projeto possa definir seu próprio `/testes`, e o comando de projeto do usuário acima de tudo, para que o usuário sempre tenha a última palavra. Conversas avulsas veem só globais e embutidos.
 

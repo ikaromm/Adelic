@@ -22,6 +22,7 @@ import {
   type QueuePause,
   type QueuedMessage,
   type Plan,
+  type Compaction,
   QUEUE_LIMIT,
 } from '../shared/contracts.js';
 import type { SavedCommand } from '../shared/commands.js';
@@ -514,6 +515,7 @@ export class Store {
       approvals: this.listApprovals(session.id),
       runs: this.listRuns(session.id),
       tasks: this.listSessionTaskMetadata(session.id),
+      compactions: this.listCompactions(session.id),
     };
   }
   /**
@@ -668,6 +670,16 @@ export class Store {
   }
   listPlans(sessionId: string) {
     return this.rows<Plan>('plans', 'WHERE session_id=? ORDER BY rowid', [sessionId]);
+  }
+  addCompaction(compaction: Compaction) {
+    this.db
+      .prepare('INSERT INTO compactions(id,session_id,data) VALUES(?,?,?)')
+      .run(compaction.id, compaction.sessionId, JSON.stringify(compaction));
+    return compaction;
+  }
+  /** Oldest first; the last one is the context of the next runs. */
+  listCompactions(sessionId: string) {
+    return this.rows<Compaction>('compactions', 'WHERE session_id=? ORDER BY rowid', [sessionId]);
   }
   /** Saved commands of one scope: `null` = global, otherwise that project's. */
   listCommands(projectId: string | null) {

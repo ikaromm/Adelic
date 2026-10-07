@@ -37,8 +37,9 @@ test('offers another model after an overloaded failure and switches the conversa
   await expect(notice).toContainText('2 novas tentativas automáticas');
   await notice.getByText('Tentar com outro modelo').click();
   const options = notice.getByRole('list', { name: 'Outros modelos' });
-  // The failed default model is not offered; the other model of the same provider is.
-  await expect(options.getByRole('button')).toHaveText(['Codex (E2E) · E2E Reserva']);
+  // The failed default model is not offered: the other model of the same provider comes
+  // first, then the default model of each other available provider.
+  await expect(options.getByRole('button')).toHaveText(['Codex (E2E) · E2E Reserva', 'Kiro (E2E) · Kiro E2E Model']);
   await options.getByRole('button', { name: 'Codex (E2E) · E2E Reserva' }).click();
   await expect(page.locator('.markdown-content', { hasText: 'Respondido por e2e-reserva.' })).toBeVisible();
   await expect(page.locator('.retry-notice')).toHaveCount(0);
@@ -89,8 +90,8 @@ test('Settings picks the fallback models from the catalog and fits a 360px scree
   await expect(list.locator('.fallback-name')).toHaveText(['Codex (E2E) · E2E Reserva', 'Codex (E2E) · E2E Model']);
   await list.getByRole('button', { name: 'Subir Codex (E2E) · E2E Model' }).click();
   await expect(list.locator('.fallback-name')).toHaveText(['Codex (E2E) · E2E Model', 'Codex (E2E) · E2E Reserva']);
-  // Every catalog model is chosen: nothing left to add.
-  await expect(add.locator('option')).toHaveCount(1);
+  // Only the other provider's model is left to add (plus the placeholder).
+  await expect(add.locator('option')).toHaveText(['Adicionar modelo…', 'Kiro (E2E) · Kiro E2E Model']);
   const box = await page.locator('.fallback-models').boundingBox();
   expect(box!.x + box!.width).toBeLessThanOrEqual(360);
   // Saved on the server.

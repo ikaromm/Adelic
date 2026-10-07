@@ -3,6 +3,7 @@ import { mkdirSync, realpathSync } from 'node:fs';
 import { join, sep } from 'node:path';
 import type {
   Approval,
+  Compaction,
   DelegatedTask,
   Message,
   MessageQueue,
@@ -59,8 +60,18 @@ import { CheckpointError, checkpointAfter, checkpointBefore, restoreCheckpoint }
 import { buildPlanningPrompt, planCommand } from './plan-markdown.js';
 import { Plans } from './plans.js';
 import { boundedHistory, handoffHistory, performHandoff, type HandoffRequest } from './provider-handoff.js';
+import { COMPACTING_TEXT, COMPACT_INVALID, compactCommand } from '../shared/compaction.js';
+import {
+  autoCompactReason,
+  buildCompactionPrompt,
+  cleanSummary,
+  messagesAfter,
+  runContext,
+  summarisable,
+} from './compaction.js';
 
 type Started = { runId: string; messageId: string };
+type RoutePlanLevel = Run['route']['level'];
 /** Internal start options: plan mode task runs (server/plans.ts). */
 export interface StartOptions {
   planTask?: { planId: string; taskId: string; prompt: string };
@@ -157,6 +168,14 @@ export class Orchestrator {
     options: StartOptions = {},
   ): Promise<{ runId: string; messageId: string }> {
     if (this.shuttingDown) throw Object.assign(new Error('Orquestrador está encerrando'), { status: 503 });
+    // `/compactar` alone is a built-in action, checked before saved commands: no user message,
+    // just the summary card (docs/specs/compaction.md).
+    const compact = options.planTask ? undefined : compactCommand(content);
+    if (compact === 'invalid') throw Object.assign(new Error(COMPACT_INVALID), { status: 400 });
+    if (compact === 'compact') {
+      if (attachments.length) throw Object.assign(new Error('/compactar não aceita anexos'), { status: 400 });
+      return this.compact(session.id);
+    }
     if (!options.planTask && planCommand(content) === '')
       throw Object.assign(new Error('Escreva o pedido depois de /plano'), { status: 400 });
     if (clientMessageId) {
@@ -219,10 +238,17 @@ export class Orchestrator {
       // Edit and resend: the run sees only the messages before the edited one.
       const cut = options.replaceFrom ? stored.findIndex((m) => m.id === options.replaceFrom) : stored.length;
       if (cut < 0) throw Object.assign(new Error('Mensagem não encontrada nesta conversa'), { status: 404 });
+      const kept = stored.slice(0, cut);
+      // After a compaction, runs get its summary plus only the messages after it. A summary
+      // counts only while the message it ends at is still kept (an edit can discard it).
+      const context = runContext(
+        kept,
+        this.store.listCompactions(session.id).filter((c) => kept.some((m) => m.id === c.upToMessageId)),
+      );
       const projectSnapshot = structuredClone(project),
-        // Edit and resend cuts at the edited message; after a provider handoff, only the
-        // summary and the messages after it are sent (server/provider-handoff.ts).
-        history = handoffHistory(stored.slice(0, cut)),
+        // After a provider handoff, only its summary and the messages after it are sent
+        // (server/provider-handoff.ts).
+        history = handoffHistory(context.history),
         settings = startingSettings;
       // `/plano` and "Planejar antes" plan first; task runs carry their prompt. Otherwise
       // `/name args` runs the saved command's template (the user message keeps the typed text)
@@ -359,6 +385,7 @@ export class Orchestrator {
         // `@path` mentions come from what the user typed (or the task text), never from a
         // command template, and are read when the run starts (docs/specs/mentions.md).
         parseMentions(content),
+        context.summary,
       );
       reservation.result = { runId, messageId: userId };
       return reservation.result;
@@ -409,6 +436,238 @@ export class Orchestrator {
       });
     // No await before start(): its reservation is taken synchronously, so the checks above hold.
     return this.start(session, content, clientMessageId, kept, { replaceFrom: messageId });
+  }
+  // ---- Conversation compaction (docs/specs/compaction.md) ----
+  compactions(sessionId: string) {
+    this.requireSession(sessionId);
+    return this.store.listCompactions(sessionId);
+  }
+  /**
+   * "Compactar conversa": one read-only summary call to the conversation's agent, as its own
+   * run (no messages). On success the summary becomes the context of the next runs and the
+   * native session is dropped, so the next turn starts fresh from the summary.
+   */
+  async compact(sessionId: string): Promise<Started> {
+    if (this.shuttingDown) throw Object.assign(new Error('Orquestrador está encerrando'), { status: 503 });
+    const session = this.requireSession(sessionId);
+    if (this.isActive(sessionId) || session.activeRunId)
+      throw Object.assign(new Error('Há uma execução em andamento nesta conversa; aguarde ou cancele antes'), {
+        status: 409,
+      });
+    if (this.store.listPlans(sessionId).some((p) => p.status === 'executing'))
+      throw Object.assign(new Error('Um plano está em execução nesta conversa'), { status: 409 });
+    const messages = this.store.listMessages(sessionId);
+    const compactions = this.store.listCompactions(sessionId);
+    const pending = messagesAfter(messages, compactions.at(-1));
+    if (!summarisable(pending).length)
+      throw Object.assign(new Error('Não há mensagens novas para compactar'), { status: 409 });
+    const project =
+      session.projectId === null ? this.detachedProject(session.id) : this.store.getProject(session.projectId);
+    if (!project) throw Object.assign(new Error('Projeto não encontrado'), { status: 404 });
+    const settings = structuredClone(this.store.getSettings()!);
+    const now = new Date().toISOString();
+    const run: Run = {
+      id: randomUUID(),
+      sessionId,
+      providerId: session.providerId,
+      status: 'running',
+      route: { level: 'fast', reason: 'Compactação da conversa', tools: false, memory: false, contextBudget: 0 },
+      startedAt: now,
+      compaction: { auto: false },
+    };
+    const controller = new AbortController();
+    const active: { runId: string; controller: AbortController; done?: Promise<void> } = {
+      runId: run.id,
+      controller,
+    };
+    this.active.set(sessionId, active);
+    const running: Session = { ...session, activeRunId: run.id, updatedAt: now };
+    this.store.putRun(run);
+    this.store.putSession(running);
+    this.emit({ type: 'run', run });
+    this.emit({ type: 'session', session: running });
+    active.done = (async () => {
+      try {
+        this.publishEvent(sessionId, run.id, 'status', COMPACTING_TEXT);
+        const usage: Pick<Run, 'inputTokens' | 'outputTokens' | 'costUsd'> = {};
+        await this.summarise(running, project, run.id, run, compactions, pending, settings, controller.signal, {
+          auto: false,
+          usage,
+        });
+        Object.assign(run, usage);
+        run.status = 'completed';
+        this.publishEvent(sessionId, run.id, 'status', 'Conversa compactada');
+      } catch (e) {
+        if (controller.signal.aborted) run.status = 'cancelled';
+        else {
+          run.status = 'failed';
+          run.error = errorText(e);
+          run.failure = failureOf(e);
+          this.publishEvent(sessionId, run.id, 'error', `Não foi possível compactar a conversa: ${run.error}`);
+        }
+      } finally {
+        run.completedAt = new Date().toISOString();
+        run.durationMs = Date.now() - Date.parse(run.startedAt);
+        this.store.putRun(run);
+        const latest = this.store.getSession(sessionId);
+        if (latest && latest.activeRunId === run.id) {
+          delete latest.activeRunId;
+          latest.updatedAt = run.completedAt;
+          this.store.putSession(latest);
+          this.emit({ type: 'session', session: latest });
+        }
+        this.active.delete(sessionId);
+        this.emit({ type: 'run', run });
+        // A failed summary must not hold queued messages: they run without it, as in the
+        // automatic fallback. A cancel still pauses the queue like any other run.
+        this.afterRun(sessionId, run.status === 'failed' ? { ...run, status: 'completed' } : run);
+      }
+    })();
+    return { runId: run.id, messageId: '' };
+  }
+  /**
+   * Automatic compaction before a message, when the setting is on and the conversation is
+   * past the threshold. A failure never stops the message: it is noted and the run goes on
+   * with the full history. Returns the new compaction, if one was made.
+   */
+  private async autoCompact(
+    session: Session,
+    project: Project,
+    run: Run,
+    history: Message[],
+    settings: Settings,
+    signal: AbortSignal,
+  ): Promise<Compaction | undefined> {
+    if (!settings.autoCompact) return undefined;
+    const compactions = this.store.listCompactions(session.id);
+    // `history` already holds only the messages after the latest compaction.
+    const reason = autoCompactReason(settings, history, compactions, this.store.listRuns(session.id));
+    if (!reason) return undefined;
+    this.publishEvent(session.id, run.id, 'status', COMPACTING_TEXT);
+    try {
+      const compaction = await this.summarise(
+        session,
+        project,
+        `${run.id}:compact`,
+        run,
+        compactions,
+        history,
+        settings,
+        signal,
+        { auto: true },
+      );
+      this.publishEvent(session.id, run.id, 'status', `Conversa compactada antes desta mensagem: ${reason}`);
+      return compaction;
+    } catch (e) {
+      if (signal.aborted) throw e;
+      this.publishEvent(
+        session.id,
+        run.id,
+        'error',
+        `Não foi possível compactar a conversa (${errorText(e)}); a mensagem seguiu sem compactar.`,
+      );
+      return undefined;
+    }
+  }
+  /** The summary call itself, then storing the compaction and dropping the native session. */
+  private async summarise(
+    session: Session,
+    project: Project,
+    callId: string,
+    run: Run,
+    compactions: Compaction[],
+    messages: Message[],
+    settings: Settings,
+    signal: AbortSignal,
+    options: { auto: boolean; usage?: Pick<Run, 'inputTokens' | 'outputTokens' | 'costUsd'> },
+  ): Promise<Compaction> {
+    const covered = messages.at(-1);
+    if (!covered) throw new Error('Não há mensagens novas para compactar');
+    const catalog = await this.providerList();
+    const provider = catalog.find((p) => p.id === session.providerId);
+    if (signal.aborted) throw new Error('Execução cancelada');
+    if (!provider || !provider.available) throw new Error(provider?.detail || 'Provedor indisponível');
+    const level: RoutePlanLevel = provider.capabilities.fast ? 'fast' : 'deep';
+    const input = this.applyThinking(
+      {
+        runId: callId,
+        sessionId: session.id,
+        providerId: session.providerId,
+        model: session.model,
+        cwd: project.path,
+        prompt: buildCompactionPrompt(compactions.at(-1)?.summary, messages),
+        history: [],
+        plan: {
+          level,
+          reason: 'Compactação da conversa',
+          tools: false,
+          memory: false,
+          effort: adaptEffort(provider, session.model, 'low'),
+          contextBudget: 0,
+        },
+        // A summary only reads the text it receives: never writes, never asks for approval.
+        sandbox: 'read-only' as const,
+        approvalMode: 'manual' as const,
+      },
+      session.thinking,
+      catalog,
+    );
+    let text = '';
+    const result = await withRetry(
+      (effects) => {
+        text = '';
+        return this.providers.run(
+          input,
+          (event) => {
+            // The summary is shown only once complete, so partial text does not block a retry.
+            if (event.type === 'delta') {
+              text += event.text;
+            } else if (event.type === 'approval') {
+              // Tools are off; anything that still asks is refused without the user.
+              effects.note('approval');
+              void this.providers.approve(event.approval.id, 'deny').catch(() => undefined);
+            } else if (event.type === 'usage' && options.usage) {
+              options.usage.inputTokens = event.inputTokens ?? options.usage.inputTokens;
+              options.usage.outputTokens = event.outputTokens ?? options.usage.outputTokens;
+              options.usage.costUsd = event.costUsd ?? options.usage.costUsd;
+            }
+          },
+          signal,
+        );
+      },
+      {
+        policy: this.retryPolicy(settings),
+        signal,
+        onRetry: (progress) => this.noteRetry(session.id, run, progress, 'Compactação'),
+      },
+    );
+    if (signal.aborted || result.stopReason === 'cancelled') throw new Error('Execução cancelada');
+    if (options.usage) {
+      options.usage.inputTokens ??= result.inputTokens;
+      options.usage.outputTokens ??= result.outputTokens;
+      if (result.costUsd !== undefined) options.usage.costUsd = result.costUsd;
+    }
+    const summary = cleanSummary(result.text || text);
+    if (!summary) throw new Error('O agente não devolveu um resumo');
+    const compaction = this.store.addCompaction({
+      id: randomUUID(),
+      sessionId: session.id,
+      runId: run.id,
+      summary,
+      upToMessageId: covered.id,
+      createdAt: new Date().toISOString(),
+      ...(options.auto ? { auto: true } : {}),
+    });
+    // Codex and Kiro keep their own thread; without dropping it the summary has no effect.
+    delete session.nativeSessionId;
+    const latest = this.store.getSession(session.id);
+    if (latest?.nativeSessionId) {
+      delete latest.nativeSessionId;
+      this.store.putSession(latest);
+      this.emit({ type: 'session', session: latest });
+    }
+    this.emit({ type: 'compaction', compaction });
+    return compaction;
   }
   private startedResult(sessionId: string, runId: string): Started {
     return {
@@ -492,6 +751,7 @@ export class Orchestrator {
     mayWrite = false,
     special?: SpecialRun,
     mentions: string[] = [],
+    summary?: string,
   ) {
     let response = '',
       firstTokenAt: number | undefined;
@@ -527,6 +787,15 @@ export class Orchestrator {
         throw new Error(
           'Este provedor não disponibiliza ferramentas para esta conversa. Escolha outro provedor para executar este pedido.',
         );
+      // Opt-in: a long conversation is summarised before this message runs (never mid-run).
+      // Plan task runs continue a plan and are not new user messages.
+      if (special?.ref.kind !== 'task') {
+        const compacted = await this.autoCompact(session, project, run, history, settings, controller.signal);
+        if (compacted) {
+          history = [];
+          summary = compacted.summary;
+        }
+      }
       if (plan.memory && session.projectId !== null) {
         try {
           memoryContext = await this.loadMemoryContext(project, content);
@@ -582,6 +851,7 @@ export class Orchestrator {
           skillContext,
           memoryGuidance,
           attached,
+          summary,
         );
         response = assistant.content;
         run.status = controller.signal.aborted ? 'cancelled' : assistant.status === 'failed' ? 'failed' : 'completed';
@@ -615,6 +885,7 @@ export class Orchestrator {
           sandbox: settings.sandbox,
           approvalMode: settings.approvalMode ?? 'auto-safe',
           memoryContext: boundedMemory,
+          ...(summary ? { summary } : {}),
           ...(attached.images.length ? { attachments: attached.images } : {}),
         },
         session.thinking,
@@ -803,6 +1074,7 @@ export class Orchestrator {
     skillContext = '',
     memoryGuidance = '',
     attached: { images: NonNullable<RunInput['attachments']>; text: string } = { images: [], text: '' },
+    summary?: string,
   ) {
     const config = project.orchestration ?? { enabled: true, maxWorkers: 2, review: true };
     const catalog = await this.providerList();
@@ -899,6 +1171,9 @@ export class Orchestrator {
         sandbox,
         approvalMode: settings.approvalMode ?? 'auto-safe',
         memoryContext: taskMemory,
+        // The conversation summary goes where the conversation goes; review and synthesis
+        // work from the bounded task summaries only.
+        ...(summary && task.role !== 'reviewer' && task.role !== 'synthesis' ? { summary } : {}),
         ...(taskImages.length ? { attachments: taskImages } : {}),
       };
     };
@@ -1652,6 +1927,10 @@ export class Orchestrator {
     if (!item) throw Object.assign(new Error('Mensagem não está mais na fila'), { status: 404 });
     if (item.attachments?.length)
       throw Object.assign(new Error('Mensagens com anexos não podem orientar; use Enviar agora'), { status: 409 });
+    if (compactCommand(item.content))
+      throw Object.assign(new Error('/compactar não orienta um turno; ele roda quando a conversa fica livre'), {
+        status: 409,
+      });
     const active = this.active.get(sessionId);
     if (!active) throw Object.assign(new Error('Não há execução ativa'), { status: 409 });
     if (!this.providers.steer)

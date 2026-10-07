@@ -71,6 +71,9 @@ import { MessageCard, RetryNotice, RunActivityPanel, RunEventRow } from './compo
 import { retryAlternatives } from '../shared/model-fallback';
 import { BranchOrigin, MessageEditActions, MessageEditor } from './components/EditBranch';
 import { useEditBranch } from './hooks/useEditBranch';
+import { CompactingNotice, CompactionCard, ConversationActions } from './components/CompactionCard';
+import { timelineSegments, upsertCompaction } from './compaction-timeline';
+import { compactCommand } from '../shared/compaction';
 import { SettingsPage } from './components/SettingsPage';
 import { HandoffDialog, type HandoffTarget } from './components/HandoffDialog';
 import { SIDEBAR_LIMIT, SessionItem, SidebarNav, UpdateNotice, type Page } from './components/Sidebar';
@@ -304,6 +307,17 @@ export default function App() {
       }
       if (event.type === 'plan') {
         applyPlan(event.plan);
+        return;
+      }
+      if (event.type === 'compaction') {
+        setDetail((current) =>
+          current?.session.id === event.compaction.sessionId
+            ? {
+                ...current,
+                compactions: upsertCompaction(current.compactions, event.compaction, current.session.id),
+              }
+            : current,
+        );
         return;
       }
       if (event.type === 'refresh') {
@@ -648,6 +662,13 @@ export default function App() {
     const content = value.trim();
     if (!content || !session || busy || session.activeRunId || settingsPendingRef.current) return;
     if (!explicit && attachments.uploading) return setNotice('Aguarde o envio dos anexos terminar.');
+    // `/compactar` alone is an action, not a turn: no bubble, just the summary card.
+    if (compactCommand(content) === 'compact' && !(explicit ?? attachments.ready).length) {
+      setDrafts((current) => ({ ...current, [session.id]: '' }));
+      if (!(await compactConversation()))
+        setDrafts((current) => ({ ...current, [session.id]: current[session.id] || content }));
+      return;
+    }
     const sessionId = session.id;
     const sentAttachments = explicit ?? attachments.ready;
     const pendingSend: NonNullable<typeof pendingSendRef.current> = {
@@ -747,6 +768,30 @@ export default function App() {
         pendingSendRef.current = null;
         setPendingSendSession('');
       }
+      setBusy(false);
+    }
+  }
+
+  /** "Compactar conversa" (docs/specs/compaction.md); true when the server accepted it. */
+  async function compactConversation() {
+    if (!session || busy || session.activeRunId) return false;
+    const sessionId = session.id;
+    setBusy(true);
+    setNotice('');
+    conversationScroll.stick();
+    try {
+      const { runId } = await api.compact(sessionId);
+      setDetail((current) =>
+        current?.session.id === sessionId
+          ? { ...current, session: { ...current.session, activeRunId: runId } }
+          : current,
+      );
+      await refreshDetail(sessionId).catch(() => undefined);
+      return true;
+    } catch (error) {
+      if (selectedSessionRef.current === sessionId) setNotice((error as Error).message);
+      return false;
+    } finally {
       setBusy(false);
     }
   }
@@ -1035,8 +1080,10 @@ export default function App() {
       | 'approvalMode'
       | 'updateCheck'
       | 'autoRetry'
-      | 'notifications',
-    value: string | boolean,
+      | 'notifications'
+      | 'autoCompact'
+      | 'autoCompactTokens',
+    value: string | boolean | number,
   ) {
     if (!data) return;
     if (key === 'sandbox' || key === 'approvalMode') {
@@ -1137,6 +1184,82 @@ export default function App() {
         : page === 'memory'
           ? 'Memória'
           : 'Configurações';
+
+  /** One message of the conversation, with its retry notice and activity panel. */
+  function renderTimelineMessage(message: Message) {
+    if (!data || !session) return null;
+    return (
+      <div className="timeline-message" key={message.id}>
+        <MessageCard
+          message={message}
+          providerName={
+            data.providers.find((p) => p.id === (message.providerId || session.providerId))?.name || 'Adelic'
+          }
+          body={(() => {
+            const plan = message.role === 'assistant' && plans.plans.find((p) => p.runId === message.runId);
+            return plan ? (
+              <PlanCard
+                plan={plan}
+                api={plans}
+                busy={Boolean(session.activeRunId)}
+                canSave={session.projectId !== null}
+              />
+            ) : undefined;
+          })()}
+          actions={
+            message.id.startsWith('local-') ? undefined : (
+              <MessageEditActions
+                message={message}
+                disabledReason={editBranch.disabledReason}
+                onEdit={() => editBranch.startEditing(message.id)}
+                onBranch={() => void editBranch.branch(message)}
+              />
+            )
+          }
+          editor={
+            editBranch.editingId === message.id ? (
+              <MessageEditor
+                message={message}
+                laterCount={editBranch.laterCount(message.id)}
+                disabledReason={editBranch.disabledReason}
+                onCancel={editBranch.cancelEditing}
+                onSave={(content, kept) => editBranch.save(message, content, kept)}
+              />
+            ) : undefined
+          }
+        />
+        {message.role === 'assistant' && message.status === 'failed' && message.id === lastFailedMessageId && (
+          <RetryNotice
+            run={currentDetail?.runs.find((run) => run.id === message.runId)}
+            disabled={busy || Boolean(session.activeRunId)}
+            onRetry={() => {
+              const prompt = messages.find((m) => m.role === 'user' && m.runId === message.runId);
+              if (prompt) void sendMessage(prompt.content, prompt.attachments ?? []);
+            }}
+            alternatives={retryAlternatives(
+              data.providers,
+              currentDetail?.runs.find((run) => run.id === message.runId),
+            )}
+            onSwitch={(target) => message.runId && void retryWithModel(message.runId, target)}
+          />
+        )}
+        {message.role === 'user' && message.runId && (
+          <RunActivityPanel
+            runId={message.runId}
+            run={currentDetail?.runs.find((run) => run.id === message.runId)}
+            tasks={activityTasks}
+            events={activityEvents}
+            providers={data.providers}
+            active={session.activeRunId === message.runId}
+            taskOutputs={taskOutputs.outputs}
+            loadingTaskOutputs={taskOutputs.loading}
+            onLoadTaskOutput={taskOutputs.load}
+            busy={Boolean(session.activeRunId)}
+          />
+        )}
+      </div>
+    );
+  }
 
   return (
     <div className={`app-shell ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
@@ -1336,6 +1459,12 @@ export default function App() {
               </button>
             )}
             {page === 'chat' && session && (
+              <ConversationActions
+                disabled={busy || Boolean(session.activeRunId) || !messages.some((m) => m.content.trim())}
+                onCompact={() => void compactConversation()}
+              />
+            )}
+            {page === 'chat' && session && (
               <a
                 className="icon-button"
                 href={`/api/sessions/${encodeURIComponent(session.id)}/export`}
@@ -1438,83 +1567,27 @@ export default function App() {
                         </div>
                       </div>
                     )}
-                    {messages
-                      .filter((message) => message.id !== stream?.messageId)
-                      .map((message) => (
-                        <div className="timeline-message" key={message.id}>
-                          <MessageCard
-                            message={message}
-                            providerName={
-                              data.providers.find((p) => p.id === (message.providerId || session.providerId))?.name ||
-                              'Adelic'
-                            }
-                            body={(() => {
-                              const plan =
-                                message.role === 'assistant' && plans.plans.find((p) => p.runId === message.runId);
-                              return plan ? (
-                                <PlanCard
-                                  plan={plan}
-                                  api={plans}
-                                  busy={Boolean(session.activeRunId)}
-                                  canSave={session.projectId !== null}
-                                />
-                              ) : undefined;
-                            })()}
-                            actions={
-                              message.id.startsWith('local-') ? undefined : (
-                                <MessageEditActions
-                                  message={message}
-                                  disabledReason={editBranch.disabledReason}
-                                  onEdit={() => editBranch.startEditing(message.id)}
-                                  onBranch={() => void editBranch.branch(message)}
-                                />
-                              )
-                            }
-                            editor={
-                              editBranch.editingId === message.id ? (
-                                <MessageEditor
-                                  message={message}
-                                  laterCount={editBranch.laterCount(message.id)}
-                                  disabledReason={editBranch.disabledReason}
-                                  onCancel={editBranch.cancelEditing}
-                                  onSave={(content, kept) => editBranch.save(message, content, kept)}
-                                />
-                              ) : undefined
-                            }
-                          />
-                          {message.role === 'assistant' &&
-                            message.status === 'failed' &&
-                            message.id === lastFailedMessageId && (
-                              <RetryNotice
-                                run={currentDetail?.runs.find((run) => run.id === message.runId)}
-                                disabled={busy || Boolean(session.activeRunId)}
-                                onRetry={() => {
-                                  const prompt = messages.find((m) => m.role === 'user' && m.runId === message.runId);
-                                  if (prompt) void sendMessage(prompt.content, prompt.attachments ?? []);
-                                }}
-                                alternatives={retryAlternatives(
-                                  data.providers,
-                                  currentDetail?.runs.find((run) => run.id === message.runId),
-                                )}
-                                onSwitch={(target) => message.runId && void retryWithModel(message.runId, target)}
-                              />
-                            )}
-                          {message.role === 'user' && message.runId && (
-                            <RunActivityPanel
-                              runId={message.runId}
-                              run={currentDetail?.runs.find((run) => run.id === message.runId)}
-                              tasks={activityTasks}
-                              events={activityEvents}
-                              providers={data.providers}
-                              active={session.activeRunId === message.runId}
-                              taskOutputs={taskOutputs.outputs}
-                              loadingTaskOutputs={taskOutputs.loading}
-                              onLoadTaskOutput={taskOutputs.load}
-                              busy={Boolean(session.activeRunId)}
-                            />
+                    {timelineSegments(
+                      messages.filter((message) => message.id !== stream?.messageId),
+                      currentDetail?.compactions,
+                    ).map((segment) =>
+                      segment.kind === 'messages' ? (
+                        segment.messages.map(renderTimelineMessage)
+                      ) : (
+                        <div className="timeline-compaction" key={segment.compaction.id}>
+                          {segment.earlier.length > 0 && (
+                            <details className="compacted-messages">
+                              <summary>Mensagens anteriores ao resumo ({segment.earlier.length})</summary>
+                              {segment.earlier.map(renderTimelineMessage)}
+                            </details>
                           )}
+                          <CompactionCard compaction={segment.compaction} latest={segment.latest} />
                         </div>
-                      ))}
+                      ),
+                    )}
+                    {currentDetail?.runs.some((run) => run.compaction && run.status === 'running') && (
+                      <CompactingNotice />
+                    )}
                     {stream && (
                       <div className="message-row assistant-row streaming">
                         <div className="message-author">

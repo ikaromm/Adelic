@@ -9,6 +9,8 @@ import {
   COMMAND_NAME,
   COMMAND_PRECEDENCE,
   COMMAND_TEMPLATE_MAX,
+  COMMAND_RESERVED,
+  RESERVED_COMMAND_NAMES,
   REPO_COMMANDS_MAX_FILES,
   commandModes,
   expandTemplate,
@@ -51,6 +53,14 @@ export const builtinCommands: CommandEntry[] = [
       'Explique o código, arquivo ou área indicados abaixo: o que faz, como os dados fluem e quais são os pontos de atenção, ' +
       'com referências a arquivos e funções. Diferencie o que leu no código do que está inferindo. ' +
       'Se nada for indicado, pergunte o que devo explicar.',
+  },
+  {
+    name: 'compactar',
+    description: 'Resume a conversa; o resumo passa a ser o ponto de partida das próximas mensagens.',
+    template:
+      'Ação embutida, não é enviada ao agente como mensagem: uma chamada somente leitura resume a conversa ' +
+      '(objetivo, decisões, estado atual, arquivos e comandos, perguntas em aberto e próximos passos) e as ' +
+      'próximas execuções recebem o resumo no lugar das mensagens anteriores. Use sozinho, sem texto depois.',
   },
 ].map((command) => ({
   ...command,
@@ -119,6 +129,10 @@ export function loadRepoCommands(projectPath: string): { commands: CommandEntry[
     const commandName = name.slice(0, -3);
     if (!COMMAND_NAME.test(commandName)) {
       issue('Nome de arquivo inválido: use letras minúsculas, números e hífens (até 32)');
+      continue;
+    }
+    if (RESERVED_COMMAND_NAMES.includes(commandName)) {
+      issue(COMMAND_RESERVED);
       continue;
     }
     const path = join(dir, name);
@@ -214,7 +228,9 @@ export function listCommands(store: Store, project?: Pick<Project, 'id' | 'path'
     ...store.listCommands(null).map(entryOf),
     ...builtinCommands,
   ];
-  const rank = (c: CommandEntry) => COMMAND_PRECEDENCE.indexOf(c.source);
+  // Reserved names always resolve to the built-in action, whatever else uses the name.
+  const rank = (c: CommandEntry) =>
+    RESERVED_COMMAND_NAMES.includes(c.name) && c.source === 'builtin' ? -1 : COMMAND_PRECEDENCE.indexOf(c.source);
   all.sort((a, b) => a.name.localeCompare(b.name) || rank(a) - rank(b));
   const seen = new Set<string>();
   const commands = all.map((c) => {
@@ -243,7 +259,8 @@ export interface ExpandedMessage {
  */
 export function expandMessage(store: Store, content: string, project?: Pick<Project, 'id' | 'path'>): ExpandedMessage {
   const slash = parseSlash(content);
-  if (!slash) return { prompt: content };
+  // Reserved names are actions handled before expansion; their description is never a prompt.
+  if (!slash || RESERVED_COMMAND_NAMES.includes(slash.name)) return { prompt: content };
   const command = findCommand(store, slash.name, project);
   if (!command) return { prompt: content };
   return {

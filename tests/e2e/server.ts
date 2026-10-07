@@ -11,13 +11,17 @@
 // Plan mode: a planning prompt answers a fixed spec with two tasks (a planning prompt with
 // [falhar-tarefa] adds a third task whose run fails); task runs answer "Tarefa concluída".
 //   [eco]     → answers "Eco: <current request>" so tests can see what the agent received
-//               (saved commands: the expanded template, not the typed `/name`)
+//               (saved commands: the expanded template, not the typed `/name`); after a
+//               compaction it adds "| Resumo recebido: <summary>"
 //   [mencoes] → answers the "[Arquivo mencionado: …]" labels found in the prompt
 //   [sobrecarga] → the default model (e2e-model) fails as overloaded before any output; any
 //               other model (e2e-reserva) answers with the model it ran on (model fallback)
 //   [historico] → answers with the history it received (provider handoff flows)
 // Provider handoff: a second scripted provider, "Kiro (E2E)", and a fixed summary for the
 // handoff prompt (a conversation containing [resumo-falha] makes that call fail).
+//   [pesado]  → reports 500k input tokens, so the automatic compaction threshold trips
+// Compaction: a compaction prompt answers a fixed summary (the prompt with [falhar-resumo]
+// in the transcript fails, so the automatic fallback can be seen).
 import { createServer } from 'node:http';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -29,6 +33,7 @@ import { Store } from '../../server/store.js';
 import { emitApproval } from '../../server/providers/common.js';
 import { PLAN_PROMPT_MARKER, TASK_PROMPT_MARKER } from '../../server/plan-markdown.js';
 import { HANDOFF_PROMPT_MARKER } from '../../server/provider-handoff.js';
+import { COMPACTION_PROMPT_MARKER } from '../../server/compaction.js';
 import { startFakeMemory } from './fake-memory.js';
 
 const port = Number(process.env.E2E_PORT || 4399);
@@ -80,6 +85,16 @@ const providers: ProviderRegistry = {
       if (input.prompt.includes('[resumo-falha]')) throw new Error('Kiro stream failed: The operation timed out.');
       emit({ type: 'delta', text: E2E_HANDOFF_SUMMARY });
       return { text: E2E_HANDOFF_SUMMARY, stopReason: 'completed' };
+    }
+    if (input.prompt.startsWith(COMPACTION_PROMPT_MARKER)) {
+      await sleep(300, signal).catch(() => undefined);
+      if (signal.aborted) return { text: '', stopReason: 'cancelled' };
+      if (input.prompt.includes('[falhar-resumo]')) throw new Error('Resumo indisponível no teste');
+      const previous = input.prompt.includes('Resumo anterior') ? ' (inclui o resumo anterior)' : '';
+      const summary = `## Objetivo\nResumo-E2E da conversa${previous}.\n\n## Próximos passos\nContinuar.`;
+      emit({ type: 'delta', text: summary });
+      emit({ type: 'usage', inputTokens: 120, outputTokens: 30 });
+      return { text: summary, stopReason: 'completed' };
     }
     if (input.prompt.startsWith(PLAN_PROMPT_MARKER)) {
       // Records what the planning run received, so the E2E can check it was read-only.
@@ -162,9 +177,16 @@ const providers: ProviderRegistry = {
         emit({ type: 'delta', text });
         return { text, stopReason: 'completed' };
       }
+      // Reports a large input like a long Codex turn, so the automatic threshold trips.
+      if (current.toLowerCase().includes('[pesado]')) {
+        emit({ type: 'delta', text: 'Resposta pesada.' });
+        emit({ type: 'usage', inputTokens: 500_000, outputTokens: 5 });
+        return { text: 'Resposta pesada.', stopReason: 'completed' };
+      }
       if (marker === '[eco]') {
         // Detached conversations run the coordinated fast path: the request follows "Pedido atual:".
-        const text = `Eco: ${current.replace(/\s+/g, ' ').trim()}`;
+        const summary = input.summary ? ` | Resumo recebido: ${input.summary.replace(/\s+/g, ' ').trim()}` : '';
+        const text = `Eco: ${current.replace(/\s+/g, ' ').trim()}${summary}`;
         emit({ type: 'delta', text });
         return { text, stopReason: 'completed' };
       }

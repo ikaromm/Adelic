@@ -115,7 +115,7 @@ describe('composer suggestions', () => {
     expect(slashQuery('rev')).toBeUndefined();
   });
   it('filters by name prefix first, then by description', () => {
-    expect(filterCommands(entries, '').map((c) => c.name)).toEqual(['explicar', 'revisar', 'testes']);
+    expect(filterCommands(entries, '').map((c) => c.name)).toEqual(['compactar', 'explicar', 'revisar', 'testes']);
     // Name matches come first; /revisar follows because its description mentions "testes".
     expect(filterCommands(entries, 'te').map((c) => c.name)).toEqual(['testes', 'revisar']);
     expect(filterCommands(entries, 'exp').map((c) => c.name)).toEqual(['explicar']);
@@ -279,7 +279,7 @@ describe('migration 5', () => {
       JSON.stringify({ id: 'p', name: 'P', path: dir, createdAt: now(), memoryWorkspace: 'w', memoryProject: 'p' }),
     );
     const result = migrate(db, dir);
-    expect(result).toMatchObject({ from: 4, applied: [5, 6] });
+    expect(result).toMatchObject({ from: 4, applied: [5, 6, 8] });
     expect(result.backupPath).toBeTruthy();
     db.close();
 
@@ -425,6 +425,7 @@ describe('commands API and expansion in messages', () => {
       ]);
       const globalOnly = await (await t.call('GET', '/api/commands')).json();
       expect(globalOnly.commands.map((c: { name: string }) => c.name)).toEqual([
+        'compactar',
         'explicar',
         'resumo',
         'revisar',

@@ -4,6 +4,7 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import type { RunEvent, Sandbox } from '../shared/contracts.js';
+import { checkHeadlineKey } from '../shared/event-text.js';
 import {
   CHECK_OUTPUT_MAX,
   FIX_OUTPUT_MAX,
@@ -268,7 +269,11 @@ export class HookChecks {
       text: '',
       createdAt: new Date().toISOString(),
     };
-    const save = (check: CheckResult) => this.deps.saveEvent({ ...event, text: checkHeadline(check), check });
+    const save = (check: CheckResult) => {
+      const { key, vars } = checkHeadlineKey(check);
+      // `text` stays checkHeadline() (pt-BR); the key lets the UI show it in its locale.
+      this.deps.saveEvent({ ...event, text: checkHeadline(check), textKey: key, textVars: vars, check });
+    };
     save({ name: check.name, status: 'running' });
     const result = await (this.deps.runner ?? runCheck)(check, cwd, {
       sandbox,

@@ -5,7 +5,6 @@ import { accessSync, constants, statSync } from 'node:fs';
 import path from 'node:path';
 import type { Project } from '../shared/contracts.js';
 import {
-  MCP_MESSAGES,
   type McpProviderReport,
   type McpServerRecord,
   type McpServerView,
@@ -13,6 +12,7 @@ import {
   type RunMcpServer,
 } from '../shared/mcp.js';
 import type { Store } from './store.js';
+import { httpError } from './i18n.js';
 
 /** Client view: literal values are replaced by `set: true` and never leave the server. */
 export function mcpServerView(server: McpServerRecord): McpServerView {
@@ -45,17 +45,14 @@ export function resolveMcpCommand(input: string, which = defaultWhich): string {
   const command = input.trim();
   if (path.isAbsolute(command)) {
     const normalized = path.normalize(command);
-    if (!executable(normalized))
-      throw Object.assign(new Error(`Comando não encontrado ou sem permissão de execução: ${normalized}`), {
-        status: 400,
-      });
+    if (!executable(normalized)) throw httpError(400, 'mcp.commandNotExecutable', { command: normalized });
     return normalized;
   }
   if (command.includes('/') || command.includes('\\') || !/^[\w.+-]+$/.test(command))
-    throw Object.assign(new Error(MCP_MESSAGES.command), { status: 400 });
+    throw httpError(400, 'validation.mcp.command');
   const found = which(command);
   if (!found || !path.isAbsolute(found) || !executable(found))
-    throw Object.assign(new Error(`Comando não encontrado no PATH do Adelic: ${command}`), { status: 400 });
+    throw httpError(400, 'mcp.commandNotInPath', { command });
   return path.normalize(found);
 }
 

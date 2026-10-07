@@ -14,6 +14,7 @@ import {
 } from '../shared/terminal.js';
 import { bubblewrap, type WrappedCommand } from './providers/sandbox.js';
 import { terminateChildProcess } from './providers/process.js';
+import { httpError, localize } from './i18n.js';
 
 /**
  * Integrated command runner (docs/specs/terminal-preview.md). Each command is the user's own
@@ -164,9 +165,9 @@ export class TerminalService {
 
   /** Starts a command; resolves once it is running (or failed to start). */
   async start(request: StartTerminalCommand): Promise<TerminalCommandInfo> {
-    if (this.closed) throw Object.assign(new Error('O Adelic está encerrando'), { status: 503 });
+    if (this.closed) throw httpError(503, 'common.shuttingDown');
     if (this.running(request.projectId) >= this.maxRunning)
-      throw new TerminalBusyError(`Já há ${this.maxRunning} comandos em execução neste projeto. Pare um deles antes.`);
+      throw localize(new TerminalBusyError(''), 'terminal.busy', { count: this.maxRunning });
     let finish!: () => void;
     const done = new Promise<void>((resolve) => {
       finish = resolve;

@@ -5,9 +5,10 @@ import {
   PlanSaveSchema,
   PlanTaskStatusSchema,
   parseBody,
+  vmsg,
 } from '../../shared/schemas.js';
 import { forceManualApproval } from './auth.js';
-import { error, errorStatus, message } from './common.js';
+import { error, errorStatus, errorText } from './common.js';
 import type { BackendContext } from './context.js';
 import { SPEND_LIMIT_CODE } from '../../shared/spend-limits.js';
 
@@ -23,7 +24,7 @@ export function plansRoutes({ store, orchestrator }: BackendContext) {
         const status = errorStatus(e) || 500;
         const { exists, path, code, limit } = e as { exists?: boolean; path?: string; code?: string; limit?: unknown };
         res.status(status).json({
-          error: message(e),
+          error: errorText(res, e),
           ...(exists ? { exists, path } : {}),
           ...(code === SPEND_LIMIT_CODE ? { code, limit } : {}),
         });
@@ -33,14 +34,19 @@ export function plansRoutes({ store, orchestrator }: BackendContext) {
   app.get(
     '/api/sessions/:id/plans',
     route((req, res) => {
-      if (!store.getSession(id(req))) return error(res, 404, 'Conversa não encontrada');
+      if (!store.getSession(id(req))) return error(res, 404, 'common.sessionNotFound');
       res.json({ plans: plans.list(id(req)) });
     }),
   );
   app.patch(
     '/api/plans/:id',
     route((req, res) => {
-      const parsed = parseBody(PlanEditSchema, req.body, 'markdown obrigatório');
+      const parsed = parseBody(
+        PlanEditSchema,
+        req.body,
+        vmsg('validation.requiredField', { field: 'markdown' }),
+        req.locale,
+      );
       if (!parsed.ok) return error(res, 400, parsed.message);
       res.json(plans.edit(id(req), parsed.data.markdown));
     }),
@@ -48,7 +54,12 @@ export function plansRoutes({ store, orchestrator }: BackendContext) {
   app.post(
     '/api/plans/:id/approve',
     route(async (req, res) => {
-      const parsed = parseBody(PlanApproveSchema, req.body, 'mode deve ser all ou next');
+      const parsed = parseBody(
+        PlanApproveSchema,
+        req.body,
+        vmsg('validation.oneOf2', { field: 'mode', a: 'all', b: 'next' }),
+        req.locale,
+      );
       if (!parsed.ok) return error(res, 400, parsed.message);
       res
         .status(202)
@@ -65,7 +76,12 @@ export function plansRoutes({ store, orchestrator }: BackendContext) {
   app.post(
     '/api/plans/:id/tasks/:taskId',
     route((req, res) => {
-      const parsed = parseBody(PlanTaskStatusSchema, req.body, 'status deve ser skipped ou pending');
+      const parsed = parseBody(
+        PlanTaskStatusSchema,
+        req.body,
+        vmsg('validation.oneOf2', { field: 'status', a: 'skipped', b: 'pending' }),
+        req.locale,
+      );
       if (!parsed.ok) return error(res, 400, parsed.message);
       res.json(plans.setTaskStatus(id(req), id(req, 'taskId'), parsed.data.status));
     }),
@@ -81,7 +97,12 @@ export function plansRoutes({ store, orchestrator }: BackendContext) {
   app.post(
     '/api/plans/:id/save',
     route((req, res) => {
-      const parsed = parseBody(PlanSaveSchema, req.body, 'overwrite deve ser booleano');
+      const parsed = parseBody(
+        PlanSaveSchema,
+        req.body,
+        vmsg('validation.booleanField', { field: 'overwrite' }),
+        req.locale,
+      );
       if (!parsed.ok) return error(res, 400, parsed.message);
       res.json(plans.saveToProject(id(req), parsed.data.overwrite === true));
     }),

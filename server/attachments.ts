@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 import type { AttachmentMeta, RunInput, StoredAttachment } from '../shared/contracts.js';
 import { checkAttachment, sniffImage, type AttachmentKind } from '../shared/attachments.js';
 import type { Store } from './store.js';
+import { tr, type ServerKey } from './i18n.js';
 
 export const attachmentMeta = ({ id, name, mime, size }: StoredAttachment): AttachmentMeta => ({
   id,
@@ -11,7 +12,14 @@ export const attachmentMeta = ({ id, name, mime, size }: StoredAttachment): Atta
 });
 
 export type DecodedUpload =
-  { ok: true; kind: AttachmentKind; mime: string; bytes: Buffer } | { ok: false; message: string };
+  | { ok: true; kind: AttachmentKind; mime: string; bytes: Buffer }
+  | { ok: false; message: string; key: ServerKey; vars: { name: string } };
+const refuse = (key: ServerKey, name: string): DecodedUpload => ({
+  ok: false,
+  message: tr(undefined, key, { name }),
+  key,
+  vars: { name },
+});
 
 /**
  * Validates an upload from its decoded bytes: the size and type rules from
@@ -19,21 +27,21 @@ export type DecodedUpload =
  */
 export function decodeUpload(name: string, declaredMime: string, base64: string): DecodedUpload {
   const bytes = Buffer.from(base64, 'base64');
-  if (!bytes.byteLength) return { ok: false, message: `“${name}” está vazio.` };
+  if (!bytes.byteLength) return refuse('attachments.empty', name);
   const check = checkAttachment(name, declaredMime, bytes.byteLength);
-  if (!check.ok) return check;
+  if (!check.ok) return { ...check, key: check.key as ServerKey };
   if (check.kind === 'image') {
     const actual = sniffImage(bytes);
-    if (!actual) return { ok: false, message: `“${name}” não é uma imagem PNG, JPEG, WebP ou GIF válida.` };
+    if (!actual) return refuse('attachments.notImage', name);
     return { ok: true, kind: 'image', mime: actual, bytes };
   }
   let text: string;
   try {
     text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
   } catch {
-    return { ok: false, message: `“${name}” não é texto UTF-8.` };
+    return refuse('attachments.notUtf8', name);
   }
-  if (text.includes('\u0000')) return { ok: false, message: `“${name}” parece ser um arquivo binário.` };
+  if (text.includes('\u0000')) return refuse('attachments.binary', name);
   return { ok: true, kind: 'text', mime: 'text/plain', bytes };
 }
 

@@ -101,6 +101,8 @@ describe('attachment rules', () => {
     expect(checkAttachment('a.txt', 'text/plain', 512 * 1024 + 1)).toEqual({
       ok: false,
       message: '“a.txt” passa de 512 KB, o limite para arquivos de texto.',
+      key: 'attachments.textTooLarge',
+      vars: { name: 'a.txt' },
     });
     expect(checkAttachment('a.svg', 'image/svg+xml', 10)).toMatchObject({
       ok: false,

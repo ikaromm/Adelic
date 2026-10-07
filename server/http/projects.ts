@@ -8,28 +8,25 @@ import {
   ProjectFilesQuerySchema,
   ProjectHooksSchema,
   parseBody,
+  vmsg,
 } from '../../shared/schemas.js';
 import { searchProjectFiles } from '../mentions.js';
-import { error, errorStatus, message } from './common.js';
+import { error, errorStatus, errorText } from './common.js';
 import { graphifyConfig, mergeLimits, orchestrationConfig, projectPath } from './validation.js';
 import type { BackendContext } from './context.js';
 
 export function projectsRoutes({ store, orchestrator }: BackendContext) {
   const app = Router();
   app.post('/api/projects', (req, res) => {
-    const parsed = parseBody(
-      CreateProjectSchema,
-      req.body,
-      'name, path, memoryWorkspace e memoryProject são obrigatórios',
-    );
+    const parsed = parseBody(CreateProjectSchema, req.body, 'projects.createRequired', req.locale);
     if (!parsed.ok) return error(res, 400, parsed.message);
     const { name, path, memoryWorkspace, memoryProject } = parsed.data;
     try {
       const resolved = projectPath(path);
       const config = req.body?.orchestration === undefined ? undefined : orchestrationConfig(req.body.orchestration);
-      if (req.body?.orchestration !== undefined && !config) return error(res, 400, 'orchestration inválida');
+      if (req.body?.orchestration !== undefined && !config) return error(res, 400, 'projects.invalidOrchestration');
       const graphify = req.body?.graphify === undefined ? undefined : graphifyConfig(req.body.graphify);
-      if (req.body?.graphify !== undefined && !graphify) return error(res, 400, 'graphify inválido');
+      if (req.body?.graphify !== undefined && !graphify) return error(res, 400, 'projects.invalidGraphify');
       const p: Project = {
         id: randomUUID(),
         name,
@@ -43,66 +40,66 @@ export function projectsRoutes({ store, orchestrator }: BackendContext) {
       store.putProject(p);
       res.status(201).json(store.getProject(p.id));
     } catch (e) {
-      error(res, 400, message(e));
+      error(res, 400, e as Error);
     }
   });
   app.get('/api/projects/:id/coordination', (req, res) => {
     const result = orchestrator.coordination(req.params.id);
-    if (!result) return error(res, 404, 'Projeto não encontrado');
+    if (!result) return error(res, 404, 'common.projectNotFound');
     res.json(result);
   });
   // File autocomplete for `@` mentions (docs/specs/mentions.md): relative paths, ranked.
   app.get('/api/projects/:id/files', async (req, res) => {
     const project = store.getProject(req.params.id);
-    if (!project) return error(res, 404, 'Projeto não encontrado');
-    const query = parseBody(ProjectFilesQuerySchema, req.query, 'Parâmetros inválidos');
+    if (!project) return error(res, 404, 'common.projectNotFound');
+    const query = parseBody(ProjectFilesQuerySchema, req.query, 'common.invalidParams', req.locale);
     if (!query.ok) return error(res, 400, query.message);
     try {
       const session = query.data.sessionId ? store.getSession(query.data.sessionId) : undefined;
       const root = session?.projectId === project.id && session.worktree ? session.worktree.path : project.path;
       res.json(await searchProjectFiles(root, query.data.query, query.data.limit));
     } catch (e) {
-      error(res, 409, `Não foi possível listar os arquivos do projeto: ${message(e)}`);
+      error(res, 409, 'projects.listFilesFailed', { detail: errorText(res, e) });
     }
   });
   // Per-project hooks (docs/specs/project-hooks.md): stored only in Adelic's database.
   app.get('/api/projects/:id/hooks', (req, res) => {
-    if (!store.getProject(req.params.id)) return error(res, 404, 'Projeto não encontrado');
+    if (!store.getProject(req.params.id)) return error(res, 404, 'common.projectNotFound');
     res.json(store.getHooks(req.params.id));
   });
   app.put('/api/projects/:id/hooks', (req, res) => {
-    if (!store.getProject(req.params.id)) return error(res, 404, 'Projeto não encontrado');
-    const parsed = parseBody(ProjectHooksSchema, req.body, 'Configuração de verificações inválida');
+    if (!store.getProject(req.params.id)) return error(res, 404, 'common.projectNotFound');
+    const parsed = parseBody(ProjectHooksSchema, req.body, 'projects.invalidHooks', req.locale);
     if (!parsed.ok) return error(res, 400, parsed.message);
     res.json(store.putHooks(req.params.id, parsed.data));
   });
   app.post('/api/projects/:id/hooks/test', async (req, res) => {
-    const parsed = parseBody(HookTestSchema, req.body, 'index inválido');
+    const parsed = parseBody(HookTestSchema, req.body, vmsg('validation.invalidField', { field: 'index' }), req.locale);
     if (!parsed.ok) return error(res, 400, parsed.message);
     try {
       res.json(await orchestrator.testHook(req.params.id, parsed.data.index));
     } catch (e) {
-      error(res, errorStatus(e) ?? 500, message(e));
+      error(res, errorStatus(e) ?? 500, e as Error);
     }
   });
   app.get('/api/tasks/:id', (req, res) => {
     const task = store.getTask(req.params.id);
-    if (!task) return error(res, 404, 'Tarefa não encontrada');
+    if (!task) return error(res, 404, 'projects.taskNotFound');
     res.json(task);
   });
   app.patch('/api/projects/:id', (req, res) => {
     const p = store.getProject(req.params.id);
-    if (!p) return error(res, 404, 'Projeto não encontrado');
+    if (!p) return error(res, 404, 'common.projectNotFound');
     // Orchestration/graphify are checked before name and scope, as before.
-    const fields = parseBody(PatchProjectSchema, req.body, 'Campos de projeto inválidos');
+    const fields = parseBody(PatchProjectSchema, req.body, 'validation.projectFields', req.locale);
     if (req.body?.orchestration !== undefined) {
       const c = orchestrationConfig(req.body.orchestration, p.orchestration);
-      if (!c) return error(res, 400, 'orchestration inválida');
+      if (!c) return error(res, 400, 'projects.invalidOrchestration');
       p.orchestration = c;
     }
     if (req.body?.graphify !== undefined) {
       const g = graphifyConfig(req.body.graphify);
-      if (!g) return error(res, 400, 'graphify inválido');
+      if (!g) return error(res, 400, 'projects.invalidGraphify');
       p.graphify = g;
     }
     if (!fields.ok) return error(res, 400, fields.message);

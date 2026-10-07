@@ -1,9 +1,10 @@
 import { Router } from 'express';
 import { randomUUID } from 'node:crypto';
-import { MCP_MESSAGES, type McpServerRecord } from '../../shared/mcp.js';
+import { MCP_MESSAGE_KEYS as MCP, type McpServerRecord } from '../../shared/mcp.js';
 import { CreateMcpServerSchema, PatchMcpServerSchema, ProjectMcpSchema, parseBody } from '../../shared/schemas.js';
 import { mcpServerView, projectMcpReport, resolveMcpCommand } from '../mcp.js';
-import { error, errorStatus, message } from './common.js';
+import { error, errorStatus } from './common.js';
+import { httpError } from '../i18n.js';
 import type { BackendContext } from './context.js';
 
 type EnvInput = { name: string; from: 'adelic-env' | 'literal'; value?: string }[];
@@ -16,7 +17,7 @@ function mergeEnv(next: EnvInput, current: McpServerRecord['env'] = []): McpServ
   return next.map((item) => {
     if (item.from === 'adelic-env') return { name: item.name, from: item.from };
     const value = item.value ?? current.find((old) => old.name === item.name && old.from === 'literal')?.value;
-    if (!value) throw Object.assign(new Error(MCP_MESSAGES.literal), { status: 400 });
+    if (!value) throw httpError(400, MCP.literal.key);
     return { name: item.name, from: item.from, value };
   });
 }
@@ -30,10 +31,10 @@ export function mcpRoutes({ store }: BackendContext, which?: (name: string) => s
     res.json({ servers: store.listMcpServers().map(mcpServerView) });
   });
   app.post('/api/mcp-servers', (req, res) => {
-    const parsed = parseBody(CreateMcpServerSchema, req.body, 'Servidor MCP inválido');
+    const parsed = parseBody(CreateMcpServerSchema, req.body, 'mcp.invalid', req.locale);
     if (!parsed.ok) return error(res, 400, parsed.message);
     const data = parsed.data;
-    if (taken(data.name)) return error(res, 409, MCP_MESSAGES.duplicate);
+    if (taken(data.name)) return error(res, 409, MCP.duplicate.key);
     try {
       const now = new Date().toISOString();
       const server: McpServerRecord = {
@@ -50,16 +51,16 @@ export function mcpRoutes({ store }: BackendContext, which?: (name: string) => s
       };
       res.status(201).json(mcpServerView(store.putMcpServer(server)));
     } catch (e) {
-      error(res, errorStatus(e) ?? 400, message(e));
+      error(res, errorStatus(e) ?? 400, e as Error);
     }
   });
   app.patch('/api/mcp-servers/:id', (req, res) => {
     const current = store.getMcpServer(req.params.id);
-    if (!current) return error(res, 404, MCP_MESSAGES.notFound);
-    const parsed = parseBody(PatchMcpServerSchema, req.body, 'Servidor MCP inválido');
+    if (!current) return error(res, 404, MCP.notFound.key);
+    const parsed = parseBody(PatchMcpServerSchema, req.body, 'mcp.invalid', req.locale);
     if (!parsed.ok) return error(res, 400, parsed.message);
     const patch = parsed.data;
-    if (patch.name && taken(patch.name, current.id)) return error(res, 409, MCP_MESSAGES.duplicate);
+    if (patch.name && taken(patch.name, current.id)) return error(res, 409, MCP.duplicate.key);
     try {
       const next: McpServerRecord = {
         ...current,
@@ -74,25 +75,25 @@ export function mcpRoutes({ store }: BackendContext, which?: (name: string) => s
       else if (patch.tools) next.tools = patch.tools;
       res.json(mcpServerView(store.putMcpServer(next)));
     } catch (e) {
-      error(res, errorStatus(e) ?? 400, message(e));
+      error(res, errorStatus(e) ?? 400, e as Error);
     }
   });
   app.delete('/api/mcp-servers/:id', (req, res) => {
-    if (!store.deleteMcpServer(req.params.id)) return error(res, 404, MCP_MESSAGES.notFound);
+    if (!store.deleteMcpServer(req.params.id)) return error(res, 404, MCP.notFound.key);
     res.status(204).end();
   });
   app.get('/api/projects/:id/mcp', (req, res) => {
     const project = store.getProject(req.params.id);
-    if (!project) return error(res, 404, 'Projeto não encontrado');
+    if (!project) return error(res, 404, 'common.projectNotFound');
     res.json(projectMcpReport(store, project));
   });
   app.put('/api/projects/:id/mcp', (req, res) => {
     const project = store.getProject(req.params.id);
-    if (!project) return error(res, 404, 'Projeto não encontrado');
-    const parsed = parseBody(ProjectMcpSchema, req.body, MCP_MESSAGES.projectLimit);
+    if (!project) return error(res, 404, 'common.projectNotFound');
+    const parsed = parseBody(ProjectMcpSchema, req.body, MCP.projectLimit, req.locale);
     if (!parsed.ok) return error(res, 400, parsed.message);
     const known = new Set(store.listMcpServers().map((server) => server.id));
-    if (parsed.data.enabled.some((id) => !known.has(id))) return error(res, 400, MCP_MESSAGES.unknownIds);
+    if (parsed.data.enabled.some((id) => !known.has(id))) return error(res, 400, MCP.unknownIds.key);
     const updated = store.updateProject({ ...project, enabledMcp: parsed.data.enabled });
     res.json({ project: updated, report: projectMcpReport(store, updated) });
   });

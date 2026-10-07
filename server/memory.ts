@@ -3,6 +3,7 @@ import type { MemoryScope } from '../shared/contracts.js';
 import { createHash } from 'node:crypto';
 import { adminWritePage, memoryAuthHeaders, memoryPageExists, memoryServiceUrl } from './memory-service.js';
 import { planExistingEdit, preservedFrontmatter } from './memory-edit.js';
+import { LocalizedError, httpError, type ServerKey } from './i18n.js';
 import {
   JsonRpcResponseSchema,
   PageSchema,
@@ -34,10 +35,8 @@ async function rpc(method: string, params: unknown, timeoutMs = 2500): Promise<u
       signal: controller.signal,
     });
     if (response.status === 401 || response.status === 403)
-      throw new Error(
-        `O MCP do ai-memory recusou o acesso (HTTP ${response.status}). Se o serviço usa AI_MEMORY_AUTH_TOKEN, informe o mesmo token ao Adelic em ADELIC_MEMORY_TOKEN ou ADELIC_MEMORY_TOKEN_FILE.`,
-      );
-    if (!response.ok) throw new Error(`ai-memory respondeu HTTP ${response.status}`);
+      throw new LocalizedError('memory.mcpDenied', { status: response.status });
+    if (!response.ok) throw new LocalizedError('memory.httpStatus', { status: response.status });
     const raw = await response.text();
     const line = raw
       .split('\n')
@@ -48,7 +47,7 @@ async function rpc(method: string, params: unknown, timeoutMs = 2500): Promise<u
     try {
       parsed = JSON.parse(line || raw);
     } catch {
-      throw Object.assign(new Error('Resposta do MCP do ai-memory não é JSON'), { status: 502 });
+      throw httpError(502, 'memory.notJson');
     }
     const data = parseService(JsonRpcResponseSchema, parsed, method);
     if (data.error)
@@ -83,7 +82,7 @@ async function call(kind: 'search' | 'read' | 'write', project: Project, args: R
   const properties = tool.inputSchema?.properties ?? {};
   if (!Object.hasOwn(properties, 'workspace') || !Object.hasOwn(properties, 'project'))
     throw new Error('Ferramenta ai-memory sem escopo explícito de workspace/project');
-  if (!project.memoryWorkspace || !project.memoryProject) throw new Error('Projeto sem escopo de memória configurado');
+  if (!project.memoryWorkspace || !project.memoryProject) throw new LocalizedError('memory.noScope');
   const candidates: Record<string, unknown> = {
     workspace: project.memoryWorkspace,
     project: project.memoryProject,
@@ -159,8 +158,7 @@ export async function memoryRead(project: Project, path: string): Promise<Memory
   return toPage(unwrap(await call('read', project, { path })), path);
 }
 export async function memoryWrite(project: Project, path: string, body: string): Promise<MemoryPage> {
-  if (project.memoryProject === '_global')
-    throw Object.assign(new Error('Escrita no escopo _global não permitida'), { status: 403 });
+  if (project.memoryProject === '_global') throw httpError(403, 'memory.globalReadOnly');
   return sharedMemoryWrite(
     { workspace: project.memoryWorkspace!, project: project.memoryProject! },
     path,
@@ -200,7 +198,7 @@ function normalizeFrontmatter(value: unknown): Record<string, unknown> {
   return stable(value) as Record<string, unknown>;
 }
 const saves = new Map<string, Promise<MemoryPage>>();
-const conflict = (message: string) => Object.assign(new Error(message), { status: 409 });
+const conflict = (key: ServerKey) => httpError(409, key);
 const missingPage = (e: unknown, scope: MemoryScope, path: string) =>
   (e as { code?: unknown } | null)?.code === -32603 &&
   (e as Error).message === `page ${path} not found in resolved scope ${scope.workspace}/${scope.project}`;
@@ -228,8 +226,7 @@ export function sharedMemoryWrite(
   body: string,
   expectedVersion: string | null | undefined,
 ): Promise<MemoryPage> {
-  if (scope.project === '_global')
-    return Promise.reject(Object.assign(new Error('Escrita no escopo _global não permitida'), { status: 403 }));
+  if (scope.project === '_global') return Promise.reject(httpError(403, 'memory.globalReadOnly'));
   const key = `${scope.workspace}\0${scope.project}\0${path}`;
   const prev = saves.get(key) ?? Promise.resolve({ path, title: path, body: '', version: '' });
   const next = prev
@@ -246,47 +243,34 @@ export function sharedMemoryWrite(
       }
       const expected = expectedVersion === undefined ? (current?.version ?? null) : expectedVersion;
       if (expected === null && current === undefined && (await memoryPageExists(scope, path)))
-        throw conflict('Já existe uma nota nesse caminho; recarregue antes de editar');
+        throw conflict('memory.pathExists');
       if (expected === null ? current !== undefined : !current || current.version !== expected)
-        throw conflict('A nota foi alterada desde a leitura; recarregue antes de salvar');
+        throw conflict('memory.changedSinceRead');
       if (current) {
         // Existing notes are rewritten by the service itself (no access to its files),
         // only when a writer reproduces every metadata key; otherwise fail before writing.
         const plan = planExistingEdit(scope, path, current.frontmatter ?? {});
         const latest = await sharedMemoryRead(scope, path);
-        if (latest.version !== current.version)
-          throw conflict('A nota ou seus metadados foram alterados durante a edição; recarregue antes de salvar');
+        if (latest.version !== current.version) throw conflict('memory.changedDuringEdit');
         if (plan.writer === 'admin')
           await adminWritePage({ workspace: scope.workspace, project: scope.project, path, body, ...plan.args });
         else await mcpWrite({ workspace: scope.workspace, project: scope.project, path, body, ...plan.args });
         const confirmed = await sharedMemoryRead(scope, path);
-        if (confirmed.body !== body)
-          throw Object.assign(
-            new Error(
-              'O ai-memory não confirmou o corpo salvo (o serviço pode ter alterado o texto, por exemplo ao remover dados sensíveis); recarregue a nota',
-            ),
-            { status: 503 },
-          );
+        if (confirmed.body !== body) throw httpError(503, 'memory.bodyNotConfirmed');
         if (
           !sameJson(
             preservedFrontmatter(path, confirmed.frontmatter ?? {}),
             preservedFrontmatter(path, current.frontmatter ?? {}),
           )
         )
-          throw Object.assign(
-            new Error(
-              'O ai-memory salvou a nota, mas os metadados lidos depois diferem dos anteriores; confira a nota antes de editar de novo',
-            ),
-            { status: 503 },
-          );
+          throw httpError(503, 'memory.metadataDiffer');
         return confirmed;
       }
       // Validate the write contract before attempting any write. In particular, never
       // let argument filtering silently remove the explicit scope or note body.
       await mcpWrite({ workspace: scope.workspace, project: scope.project, path, body });
       const confirmed = await sharedMemoryRead(scope, path);
-      if (confirmed.body !== body)
-        throw Object.assign(new Error('O MCP não confirmou o corpo recém-criado'), { status: 503 });
+      if (confirmed.body !== body) throw httpError(503, 'memory.createNotConfirmed');
       return confirmed;
     });
   saves.set(key, next);

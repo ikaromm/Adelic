@@ -3,6 +3,7 @@ import { lstatSync, mkdirSync, realpathSync, renameSync, writeFileSync } from 'n
 import { join, relative, sep } from 'node:path';
 import type { Plan, Run, Session, StreamEvent } from '../shared/contracts.js';
 import type { Store } from './store.js';
+import { httpError, tr } from './i18n.js';
 import type { StartOptions } from './orchestrator.js';
 import { titleFromMessage } from './router.js';
 import { buildTaskPrompt, mergeTasks, parsePlanMarkdown, planCommand, planSlug, taskLabel } from './plan-markdown.js';
@@ -16,9 +17,7 @@ type Deps = {
   isActive: (sessionId: string) => boolean;
   emit: (event: StreamEvent) => void;
 };
-const httpError = (message: string, status: number, extra: Record<string, unknown> = {}) =>
-  Object.assign(new Error(message), { status, ...extra });
-export const NO_TASKS = 'Não encontrei tarefas; edite o plano';
+export const NO_TASKS = tr(undefined, 'plans.noTasks');
 
 export class Plans {
   constructor(
@@ -30,19 +29,18 @@ export class Plans {
   }
   private require(planId: string) {
     const plan = this.store.getPlan(planId);
-    if (!plan) throw httpError('Plano não encontrado', 404);
+    if (!plan) throw httpError(404, 'plans.notFound');
     return plan;
   }
   private session(plan: Plan) {
     const session = this.store.getSession(plan.sessionId);
-    if (!session) throw httpError('Conversa não encontrada', 404);
+    if (!session) throw httpError(404, 'common.sessionNotFound');
     return session;
   }
   /** Mutations wait for the conversation to be idle (the stop request is the exception). */
   private requireIdle(plan: Plan) {
     const session = this.session(plan);
-    if (session.activeRunId || this.deps.isActive(session.id))
-      throw httpError('Há uma execução em andamento nesta conversa; aguarde ou cancele antes', 409);
+    if (session.activeRunId || this.deps.isActive(session.id)) throw httpError(409, 'orchestrator.runInProgress');
     return session;
   }
   private save(plan: Plan) {
@@ -62,7 +60,7 @@ export class Plans {
     const plan = this.require(planId);
     this.requireIdle(plan);
     if (plan.status === 'executing' || plan.status === 'rejected')
-      throw httpError(plan.status === 'rejected' ? 'Este plano foi descartado' : 'O plano está em execução', 409);
+      throw httpError(409, plan.status === 'rejected' ? 'plans.discarded' : 'plans.executing');
     const parsed = parsePlanMarkdown(markdown);
     plan.markdown = markdown;
     plan.requirements = parsed.requirements;
@@ -78,11 +76,11 @@ export class Plans {
   async approve(planId: string, mode: 'all' | 'next', overrideLimit = false, manualApproval = false) {
     const plan = this.require(planId);
     this.requireIdle(plan);
-    if (plan.status === 'rejected') throw httpError('Este plano foi descartado', 409);
-    if (plan.status === 'executing') throw httpError('O plano já está em execução', 409);
-    if (!plan.tasks.length) throw httpError(NO_TASKS, 409);
+    if (plan.status === 'rejected') throw httpError(409, 'plans.discarded');
+    if (plan.status === 'executing') throw httpError(409, 'plans.alreadyExecuting');
+    if (!plan.tasks.length) throw httpError(409, 'plans.noTasks');
     if (!plan.tasks.some((t) => t.status === 'pending' || t.status === 'failed'))
-      throw httpError('Não há tarefas pendentes neste plano', 409);
+      throw httpError(409, 'plans.noPendingTasks');
     const previous = plan.status;
     plan.status = 'executing';
     plan.executionMode = mode;
@@ -107,7 +105,7 @@ export class Plans {
   /** Starts the first pending (or failed, i.e. retried) task. */
   private async startNext(plan: Plan, overrideLimit = false) {
     const task = plan.tasks.find((t) => t.status === 'pending' || t.status === 'failed');
-    if (!task) throw httpError('Não há tarefas pendentes neste plano', 409);
+    if (!task) throw httpError(409, 'plans.noPendingTasks');
     return this.deps.start(this.session(plan), taskLabel(plan, task), {
       planTask: { planId: plan.id, taskId: task.id, prompt: buildTaskPrompt(plan, task) },
       ...(overrideLimit ? { overrideLimit } : {}),
@@ -129,7 +127,7 @@ export class Plans {
   /** "Parar após a tarefa atual": the running task finishes, nothing else starts. */
   stop(planId: string) {
     const plan = this.require(planId);
-    if (plan.status !== 'executing') throw httpError('O plano não está em execução', 409);
+    if (plan.status !== 'executing') throw httpError(409, 'plans.notExecuting');
     plan.stopRequested = true;
     return this.save(plan);
   }
@@ -137,11 +135,11 @@ export class Plans {
   setTaskStatus(planId: string, taskId: string, status: 'skipped' | 'pending') {
     const plan = this.require(planId);
     this.requireIdle(plan);
-    if (plan.status === 'rejected') throw httpError('Este plano foi descartado', 409);
+    if (plan.status === 'rejected') throw httpError(409, 'plans.discarded');
     const task = plan.tasks.find((t) => t.id === taskId);
-    if (!task) throw httpError('Tarefa não encontrada neste plano', 404);
+    if (!task) throw httpError(404, 'plans.taskNotFound');
     if (task.status === 'done' || task.status === 'running')
-      throw httpError(task.status === 'done' ? 'A tarefa já foi concluída' : 'A tarefa está em execução', 409);
+      throw httpError(409, task.status === 'done' ? 'plans.taskDone' : 'plans.taskRunning');
     task.status = status;
     if (status === 'skipped') delete task.error;
     if (plan.status !== 'draft' && plan.status !== 'executing') this.settle(plan);
@@ -151,7 +149,7 @@ export class Plans {
   discard(planId: string) {
     const plan = this.require(planId);
     this.requireIdle(plan);
-    if (plan.status === 'rejected') throw httpError('Este plano já foi descartado', 409);
+    if (plan.status === 'rejected') throw httpError(409, 'plans.alreadyDiscarded');
     plan.status = 'rejected';
     delete plan.executionMode;
     delete plan.stopRequested;
@@ -165,22 +163,20 @@ export class Plans {
    */
   saveToProject(planId: string, overwrite = false) {
     const plan = this.require(planId);
-    if (plan.status === 'draft' || plan.status === 'rejected')
-      throw httpError('Aprove o plano antes de salvá-lo no projeto', 409);
+    if (plan.status === 'draft' || plan.status === 'rejected') throw httpError(409, 'plans.approveBeforeSave');
     const session = this.session(plan);
     const project = session.projectId === null ? undefined : this.store.getProject(session.projectId);
-    if (!project) throw httpError('Esta conversa não está vinculada a um projeto', 409);
+    if (!project) throw httpError(409, 'plans.noProject');
     let root: string;
     try {
       root = realpathSync(project.path);
     } catch {
-      throw httpError('A pasta do projeto não existe mais', 409);
+      throw httpError(409, 'plans.projectGone');
     }
     const dir = join(root, '.adelic', 'specs');
     mkdirSync(dir, { recursive: true });
     const realDir = realpathSync(dir);
-    if (realDir !== dir || !within(root, realDir))
-      throw httpError('A pasta .adelic/specs sai do projeto por um link simbólico; nada foi salvo', 409);
+    if (realDir !== dir || !within(root, realDir)) throw httpError(409, 'plans.specsSymlink');
     const target = join(realDir, `${planSlug(plan.title)}.md`);
     const path = relative(root, target).split(sep).join('/');
     let existing: ReturnType<typeof lstatSync> | undefined;
@@ -190,8 +186,8 @@ export class Plans {
       existing = undefined;
     }
     if (existing?.isSymbolicLink() || (existing && !existing.isFile()))
-      throw httpError(`${path} não é um arquivo comum; nada foi salvo`, 409);
-    if (existing && !overwrite) throw httpError(`${path} já existe`, 409, { exists: true, path });
+      throw httpError(409, 'plans.notRegularFile', { path });
+    if (existing && !overwrite) throw httpError(409, 'plans.exists', { path }, { exists: true, path });
     const body = plan.markdown.endsWith('\n') ? plan.markdown : `${plan.markdown}\n`;
     if (existing) {
       const temp = join(realDir, `.${randomUUID()}.tmp`);
@@ -203,7 +199,7 @@ export class Plans {
         writeFileSync(target, body, { flag: 'wx' });
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === 'EEXIST')
-          throw httpError(`${path} já existe`, 409, { exists: true, path });
+          throw httpError(409, 'plans.exists', { path }, { exists: true, path });
         throw error;
       }
     }

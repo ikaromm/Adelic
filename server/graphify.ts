@@ -7,6 +7,7 @@ import { dirname, join, resolve } from 'node:path';
 import type { Express } from 'express';
 import type { GraphifyQueryResult, GraphifyStatus, Project } from '../shared/contracts.js';
 import type { Store } from './store.js';
+import { error } from './http/common.js';
 
 const excluded = new Set([
   '.git',
@@ -398,7 +399,7 @@ export function mountGraphifyRoutes(app: Express, store: Store, service: Graphif
   app.get('/api/projects/:id/graphify', async (req, res) => {
     const project = store.getProject(req.params.id);
     if (!project) {
-      res.status(404).json({ error: 'Projeto não encontrado' });
+      error(res, 404, 'common.projectNotFound');
       return;
     }
     try {
@@ -410,7 +411,7 @@ export function mountGraphifyRoutes(app: Express, store: Store, service: Graphif
   app.post('/api/projects/:id/graphify/index', async (req, res) => {
     const project = store.getProject(req.params.id);
     if (!project) {
-      res.status(404).json({ error: 'Projeto não encontrado' });
+      error(res, 404, 'common.projectNotFound');
       return;
     }
     try {
@@ -423,12 +424,12 @@ export function mountGraphifyRoutes(app: Express, store: Store, service: Graphif
   app.post('/api/projects/:id/graphify/query', async (req, res) => {
     const project = store.getProject(req.params.id);
     if (!project) {
-      res.status(404).json({ error: 'Projeto não encontrado' });
+      error(res, 404, 'common.projectNotFound');
       return;
     }
     const query = req.body?.query;
     if (typeof query !== 'string' || !query.trim() || query.length > 1000) {
-      res.status(400).json({ error: 'Consulta obrigatória com até 1000 caracteres' });
+      error(res, 400, 'graphify.queryRequired', { max: 1000 });
       return;
     }
     try {

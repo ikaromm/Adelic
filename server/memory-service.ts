@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { z } from 'zod';
 import type { MemoryCatalog, MemoryListing, MemoryScope, MemoryScopeInfo } from '../shared/contracts.js';
+import { localize, type Translatable } from './i18n.js';
 
 // HTTP client for the ai-memory service. The Memory library uses the same source
 // the server uses (its HTTP API), so it works whether ai-memory runs natively or
@@ -32,7 +33,8 @@ export class MemoryServiceError extends Error {
     super(message);
   }
 }
-const fail = (message: string, status = 503): never => {
+const fail = (message: string | Translatable, status = 503): never => {
+  if (typeof message !== 'string') throw localize(new MemoryServiceError('', status), message.key, message.vars);
   throw new MemoryServiceError(message, status);
 };
 
@@ -109,20 +111,15 @@ export async function serviceRequest(
       signal: controller.signal,
     });
   } catch (e) {
-    const reason = controller.signal.aborted
-      ? `sem resposta em ${timeoutMs} ms`
-      : e instanceof Error
-        ? e.message
-        : String(e);
-    return fail(`Serviço ai-memory indisponível em ${memoryServiceUrl()}: ${reason}`);
+    const url = memoryServiceUrl();
+    if (controller.signal.aborted) return fail({ key: 'memory.timeout', vars: { url, ms: timeoutMs } });
+    return fail({ key: 'memory.unavailable', vars: { url, reason: e instanceof Error ? e.message : String(e) } });
   } finally {
     clearTimeout(timer);
   }
   const text = await response.text();
   if (response.status === 401 || response.status === 403) {
-    fail(
-      `O ai-memory recusou o acesso a ${route.split('?')[0]} (HTTP ${response.status}). Se o serviço usa AI_MEMORY_AUTH_TOKEN, informe o mesmo token ao Adelic em ADELIC_MEMORY_TOKEN ou ADELIC_MEMORY_TOKEN_FILE.`,
-    );
+    fail({ key: 'memory.serviceDenied', vars: { route: route.split('?')[0], status: response.status } });
   }
   let data: unknown = undefined;
   if (text) {

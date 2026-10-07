@@ -13,6 +13,8 @@
 import { lstat, mkdir, readFile, readdir, realpath, rm } from 'node:fs/promises';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import type { FileChange, Project, Session, SessionWorktree, WorktreeStatus } from '../shared/contracts.js';
+import type { Locale, Vars } from '../shared/i18n.js';
+import { tr, type ServerKey, type Translatable } from './i18n.js';
 import {
   CheckpointError,
   LIMITS,
@@ -110,17 +112,40 @@ async function hardened(repo: Repo, opts: { identity?: boolean } = {}) {
   return flat(pairs);
 }
 
-const fail = (message: string, status = 409, conflicts?: string[]) => new CheckpointError(message, status, conflicts);
+const fail = (reason: ServerKey | Translatable, status = 409, conflicts?: string[]) => {
+  const { key, vars } = typeof reason === 'string' ? { key: reason, vars: undefined } : reason;
+  return CheckpointError.of(key, vars, status, conflicts);
+};
+/** A reason in pt-BR (what the status fields held before) with its key, so routes can translate it. */
+const why = (key: ServerKey, vars?: Vars): Translatable => ({ key, vars });
+
+/**
+ * The status texts (`reason`, `applyBlocked`) in `locale`. worktreeStatus fills them in pt-BR and
+ * keeps the keys in `reasons`, which is dropped here.
+ */
+export function localizeStatus<T extends Partial<WorktreeStatus> & { reasons?: StatusReasons }>(
+  status: T,
+  locale?: Locale,
+): Omit<T, 'reasons'> {
+  const { reasons, ...rest } = status;
+  if (!reasons || !locale) return rest;
+  const out = { ...rest } as Partial<WorktreeStatus>;
+  if (reasons.reason) out.reason = tr(locale, reasons.reason.key, reasons.reason.vars);
+  if (reasons.applyBlocked) out.applyBlocked = tr(locale, reasons.applyBlocked.key, reasons.applyBlocked.vars);
+  return out as Omit<T, 'reasons'>;
+}
+type StatusReasons = { reason?: Translatable; applyBlocked?: Translatable };
+const pt = (reason: Translatable) => tr(undefined, reason.key, reason.vars);
 
 /** Main repository of a project, when the project folder is the root of a work tree with a commit. */
-export async function mainRepo(project: Project): Promise<{ repo?: Repo; reason?: string }> {
+export async function mainRepo(project: Project): Promise<{ repo?: Repo; reason?: Translatable }> {
   const repo = await openRepo(project.path, false);
-  if (!repo) return { reason: 'a pasta do projeto não é um repositório git' };
-  if (repo.root !== repo.top) return { reason: 'a pasta do projeto não é a raiz do repositório git' };
+  if (!repo) return { reason: why('worktrees.notRepo') };
+  if (repo.root !== repo.top) return { reason: why('worktrees.notRoot') };
   try {
     await git(repo.top, ['rev-parse', '--verify', '-q', 'HEAD^{commit}'], { repo });
   } catch {
-    return { reason: 'o repositório ainda não tem commits' };
+    return { reason: why('worktrees.noCommits') };
   }
   return { repo };
 }
@@ -169,16 +194,15 @@ async function exists(path: string) {
 /** Creates the worktree and its branch from the main checkout's HEAD. */
 export async function createWorktree(project: Project, session: Session, dataDir: string): Promise<SessionWorktree> {
   const { repo, reason } = await mainRepo(project);
-  if (!repo) throw fail(`Não é possível criar uma cópia isolada: ${reason}`);
+  if (!repo) throw fail(why('worktrees.cannotCreate', { reason: pt(reason!) }));
   const parent = worktreeRoot(dataDir);
   await mkdir(parent, { recursive: true });
   const realParent = await realpath(parent);
   // Inside the repository the copy would show up in the user's tree.
-  if (realParent === repo.top || realParent.startsWith(repo.top + sep))
-    throw fail('A pasta de dados do Adelic fica dentro do repositório; a cópia isolada poluiria o projeto');
+  if (realParent === repo.top || realParent.startsWith(repo.top + sep)) throw fail('worktrees.dataInsideRepo');
   const path = join(realParent, session.id);
-  if (!/^[\w-]{1,128}$/.test(session.id)) throw fail('Identificador de conversa inválido', 400);
-  if (await exists(path)) throw fail('Já existe uma pasta de cópia isolada para esta conversa');
+  if (!/^[\w-]{1,128}$/.test(session.id)) throw fail('worktrees.invalidSessionId', 400);
+  if (await exists(path)) throw fail('worktrees.folderExists');
   const base = (await git(repo.top, ['rev-parse', '--verify', 'HEAD^{commit}'], { repo })).toString().trim();
   let branch = branchName(session.id, session.title);
   for (let n = 2; n < 10; n++) {
@@ -204,7 +228,7 @@ interface Opened {
 }
 async function openWorktree(project: Project, worktree: SessionWorktree): Promise<Opened> {
   const main = await openRepo(project.path, false);
-  if (!main) throw fail('O repositório do projeto não existe mais', 410);
+  if (!main) throw fail('worktrees.repoGone', 410);
   const admin = await adminDir(main, worktree.path);
   if (!admin || !(await exists(worktree.path))) return { main };
   return { main, tree: { root: worktree.path, top: worktree.path, gitDir: admin, format: main.format } };
@@ -223,15 +247,14 @@ async function isAncestor(main: Repo, commit: string, of: string) {
 }
 
 /** Why the main checkout cannot take a merge now (dirty, detached, operation in progress), if so. */
-export async function mainBlocked(main: Repo): Promise<{ reason?: string; branch?: string }> {
+export async function mainBlocked(main: Repo): Promise<{ reason?: Translatable; branch?: string }> {
   const branch = await git(main.top, ['symbolic-ref', '-q', '--short', 'HEAD'], { repo: main }).then(
     (b) => b.toString().trim(),
     () => '',
   );
-  if (!branch) return { reason: 'O projeto não está em um branch (HEAD destacado); faça checkout de um branch antes' };
+  if (!branch) return { reason: why('worktrees.detached') };
   for (const marker of ['MERGE_HEAD', 'rebase-merge', 'rebase-apply', 'CHERRY_PICK_HEAD', 'REVERT_HEAD'])
-    if (await exists(join(main.gitDir, marker)))
-      return { branch, reason: 'Há uma operação do git em andamento no projeto (merge, rebase ou cherry-pick)' };
+    if (await exists(join(main.gitDir, marker))) return { branch, reason: why('worktrees.gitOperation') };
   const status = nulSplit(
     await git(main.top, ['status', '--porcelain=v1', '-z', '--untracked-files=normal', '--ignore-submodules=none'], {
       repo: main,
@@ -243,7 +266,7 @@ export async function mainBlocked(main: Repo): Promise<{ reason?: string; branch
     const shown = files.slice(0, 5).join(', ');
     return {
       branch,
-      reason: `O projeto tem alterações não commitadas (${shown}${files.length > 5 ? ', …' : ''}); faça commit ou guarde-as antes de aplicar`,
+      reason: why('worktrees.dirty', { files: `${shown}${files.length > 5 ? ', …' : ''}` }),
     };
   }
   return { branch };
@@ -256,9 +279,17 @@ async function snapshot(tree: Repo, base: string) {
 }
 
 /** Panel data: branch, files changed against `base` (uncommitted included), merge state. */
-export async function worktreeStatus(project: Project, worktree: SessionWorktree): Promise<WorktreeStatus> {
+export async function worktreeStatus(
+  project: Project,
+  worktree: SessionWorktree,
+): Promise<WorktreeStatus & { reasons?: StatusReasons }> {
   const { main, tree } = await openWorktree(project, worktree);
-  const result: WorktreeStatus = { enabled: true, available: true, worktree, exists: Boolean(tree) };
+  const result: WorktreeStatus & { reasons?: StatusReasons } = {
+    enabled: true,
+    available: true,
+    worktree,
+    exists: Boolean(tree),
+  };
   const tip = await branchTip(main, worktree.branch).catch(() => '');
   if (tip) {
     result.commits = Number(
@@ -283,10 +314,19 @@ export async function worktreeStatus(project: Project, worktree: SessionWorktree
   }
   const blocked = await mainBlocked(main);
   if (blocked.branch) result.mainBranch = blocked.branch;
-  if (!tree) result.applyBlocked = 'A pasta da cópia isolada não existe mais; descarte-a';
-  else if (blocked.reason) result.applyBlocked = blocked.reason;
-  else if (!result.dirty && !result.commits) result.applyBlocked = 'Não há alterações para aplicar';
-  else if (!result.dirty && result.merged) result.applyBlocked = 'As alterações já estão no projeto';
+  const applyBlocked = !tree
+    ? why('worktrees.folderGoneDiscard')
+    : blocked.reason
+      ? blocked.reason
+      : !result.dirty && !result.commits
+        ? why('worktrees.nothingToApply')
+        : !result.dirty && result.merged
+          ? why('worktrees.alreadyApplied')
+          : undefined;
+  if (applyBlocked) {
+    result.applyBlocked = pt(applyBlocked);
+    result.reasons = { applyBlocked };
+  }
   return result;
 }
 const listed = ({ path, status, additions, deletions, binary }: FileChange): FileChange => ({
@@ -300,9 +340,9 @@ const listed = ({ path, status, additions, deletions, binary }: FileChange): Fil
 /** Unified diff of one changed file against `base`, bounded like the checkpoint diffs. */
 export async function worktreeDiff(project: Project, worktree: SessionWorktree, path: string) {
   const { tree } = await openWorktree(project, worktree);
-  if (!tree) throw fail('A pasta da cópia isolada não existe mais', 410);
+  if (!tree) throw fail('worktrees.folderGone', 410);
   const { id, changes } = await snapshot(tree, worktree.base);
-  if (!changes.some((c) => c.path === path)) throw fail('Arquivo não foi alterado nesta cópia', 404);
+  if (!changes.some((c) => c.path === path)) throw fail('worktrees.fileNotChanged', 404);
   const out = await git(
     tree.top,
     [
@@ -332,11 +372,11 @@ export async function worktreeDiff(project: Project, worktree: SessionWorktree, 
  */
 export async function applyWorktree(project: Project, worktree: SessionWorktree, title: string) {
   const { main, tree } = await openWorktree(project, worktree);
-  if (!tree) throw fail('A pasta da cópia isolada não existe mais; descarte-a');
+  if (!tree) throw fail('worktrees.folderGoneDiscard');
   const blocked = await mainBlocked(main);
   if (blocked.reason) throw fail(blocked.reason);
   const status = await worktreeStatus(project, worktree);
-  if (status.reason) throw fail(status.reason, 422);
+  if (status.reason) throw new CheckpointError(status.reason, 422);
   if (status.dirty) {
     const config = await hardened(main, { identity: true });
     await git(tree.top, ['add', '-A', '--', '.'], { repo: tree, config });
@@ -344,9 +384,9 @@ export async function applyWorktree(project: Project, worktree: SessionWorktree,
       repo: tree,
       config,
     });
-  } else if (!status.commits) throw fail('Não há alterações para aplicar');
+  } else if (!status.commits) throw fail('worktrees.nothingToApply');
   const tip = await branchTip(main, worktree.branch);
-  if (await isAncestor(main, tip, 'HEAD')) throw fail('As alterações já estão no projeto');
+  if (await isAncestor(main, tip, 'HEAD')) throw fail('worktrees.alreadyApplied');
   const head = (await git(main.top, ['rev-parse', 'HEAD'], { repo: main })).toString().trim();
   // Checked again right before the merge: the user may have edited the project meanwhile.
   const again = await mainBlocked(main);
@@ -359,12 +399,7 @@ export async function applyWorktree(project: Project, worktree: SessionWorktree,
   );
   const present: string[] = [];
   for (const path of added) if (await exists(join(main.top, path))) present.push(path);
-  if (present.length)
-    throw fail(
-      'O branch cria arquivos que já existem no projeto (ignorados pelo git); mova-os antes de aplicar',
-      409,
-      present,
-    );
+  if (present.length) throw fail('worktrees.ignoredFiles', 409, present);
   const config = await hardened(main, { identity: true });
   try {
     await git(
@@ -390,13 +425,8 @@ export async function applyWorktree(project: Project, worktree: SessionWorktree,
       ? nulSplit(await git(main.top, ['diff', '--name-only', '-z', '--diff-filter=U'], { repo: main, config }))
       : [];
     if (merging) await git(main.top, ['merge', '--abort'], { repo: main, config });
-    if (conflicts.length)
-      throw fail(
-        `Conflito ao aplicar ${conflicts.length === 1 ? 'um arquivo' : `${conflicts.length} arquivos`}; o merge foi desfeito e o projeto ficou como estava.`,
-        409,
-        conflicts,
-      );
-    throw fail(`O git recusou o merge; o projeto não foi alterado (${e instanceof Error ? e.message : String(e)})`);
+    if (conflicts.length) throw fail(why('worktrees.conflicts', { count: conflicts.length }), 409, conflicts);
+    throw fail(why('worktrees.mergeRefused', { detail: e instanceof Error ? e.message : String(e) }));
   }
   const commit = (await git(main.top, ['rev-parse', 'HEAD'], { repo: main })).toString().trim();
   return { commit, previous: head, branch: blocked.branch! };

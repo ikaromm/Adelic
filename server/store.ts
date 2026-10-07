@@ -32,6 +32,7 @@ import { EMPTY_HOOKS, type ProjectHooks } from '../shared/hooks.js';
 import type { McpServerRecord } from '../shared/mcp.js';
 import { mcpServerView } from './mcp.js';
 import { migrate, type MigrationResult } from './migrations.js';
+import { httpError } from './i18n.js';
 
 const defaults: Settings = {
   defaultProviderId: 'codex',
@@ -324,7 +325,7 @@ export class Store {
     const target = this.db
       .prepare('SELECT rowid FROM messages WHERE id=? AND session_id=?')
       .get(messageId, sessionId) as { rowid: number } | undefined;
-    if (!target) throw Object.assign(new Error('Mensagem não encontrada nesta conversa'), { status: 404 });
+    if (!target) throw httpError(404, 'orchestrator.messageNotFound');
     const rows = this.db
       .prepare('SELECT id, run_id FROM messages WHERE session_id=? AND rowid>=? ORDER BY rowid')
       .all(sessionId, target.rowid) as { id: string; run_id: string | null }[];
@@ -352,13 +353,12 @@ export class Store {
    */
   branchSession(sourceId: string, messageId: string): Session {
     const source = this.getSession(sourceId);
-    if (!source) throw Object.assign(new Error('Conversa não encontrada'), { status: 404 });
+    if (!source) throw httpError(404, 'common.sessionNotFound');
     const all = this.listMessages(sourceId);
     const index = all.findIndex((m) => m.id === messageId);
-    if (index < 0) throw Object.assign(new Error('Mensagem não encontrada nesta conversa'), { status: 404 });
+    if (index < 0) throw httpError(404, 'orchestrator.messageNotFound');
     const copied = all.slice(0, index + 1);
-    if (copied.some((m) => m.status === 'running'))
-      throw Object.assign(new Error('Aguarde a resposta terminar para ramificar a partir dela'), { status: 409 });
+    if (copied.some((m) => m.status === 'running')) throw httpError(409, 'orchestrator.branchWaitAnswer');
     const now = new Date().toISOString();
     const suffix = ' (ramo)';
     const session: Session = {
@@ -669,7 +669,7 @@ export class Store {
       const duplicate = item.clientId ? items.find((i) => i.clientId === item.clientId) : undefined;
       if (duplicate) return duplicate;
       if (!options.ignoreLimit && items.length >= QUEUE_LIMIT)
-        throw Object.assign(new Error(`A fila já tem o máximo de ${QUEUE_LIMIT} mensagens`), { status: 409 });
+        throw httpError(409, 'orchestrator.queueFull', { max: QUEUE_LIMIT });
       const bound = this.db
         .prepare(`SELECT ${options.front ? 'MIN' : 'MAX'}(position) AS p FROM message_queue WHERE session_id=?`)
         .get(item.sessionId) as { p: number | null };

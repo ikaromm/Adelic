@@ -1,8 +1,8 @@
 import { Router, type Request } from 'express';
 import { UpdateApplySchema, UpdateCheckSchema, parseBody } from '../../shared/schemas.js';
-import type { SelfUpdater, UpdateGuard } from '../self-update.js';
+import { localizeUpdateStatus, type SelfUpdater, type UpdateGuard } from '../self-update.js';
 import { requestKind } from './auth.js';
-import { error, message } from './common.js';
+import { error } from './common.js';
 import type { BackendContext } from './context.js';
 
 /**
@@ -17,33 +17,32 @@ export function updateRoutes({ store, orchestrator }: BackendContext, updater: S
   const app = Router();
   const guard: UpdateGuard = {
     block: () => orchestrator.updateBlock(),
+    blockReason: () => orchestrator.updateBlockReason(),
     begin: () => orchestrator.beginUpdate(),
   };
   app.use('/api/update', (req, res, next) =>
-    updateRequestAllowed(req)
-      ? next()
-      : error(res, 403, 'Atualizações só podem ser verificadas e aplicadas neste computador, não pelo acesso remoto'),
+    updateRequestAllowed(req) ? next() : error(res, 403, 'update.localOnly'),
   );
   const fail = (res: Parameters<typeof error>[0], e: unknown) =>
-    error(res, (e as { status?: number }).status ?? 500, message(e));
-  app.get('/api/update/status', async (_req, res) => {
+    error(res, (e as { status?: number }).status ?? 500, e as Error);
+  app.get('/api/update/status', async (req, res) => {
     try {
-      res.json(await updater.status(store.getSettings()!, guard));
+      res.json(localizeUpdateStatus(await updater.status(store.getSettings()!, guard), req.locale));
     } catch (e) {
       fail(res, e);
     }
   });
   app.post('/api/update/check', async (req, res) => {
-    const parsed = parseBody(UpdateCheckSchema, req.body, 'Parâmetros inválidos');
+    const parsed = parseBody(UpdateCheckSchema, req.body, 'common.invalidParams', req.locale);
     if (!parsed.ok) return error(res, 400, parsed.message);
     try {
-      res.json(await updater.check(store.getSettings()!, guard, parsed.data.channel));
+      res.json(localizeUpdateStatus(await updater.check(store.getSettings()!, guard, parsed.data.channel), req.locale));
     } catch (e) {
       fail(res, e);
     }
   });
   app.post('/api/update/apply', async (req, res) => {
-    const parsed = parseBody(UpdateApplySchema, req.body, 'Parâmetros inválidos');
+    const parsed = parseBody(UpdateApplySchema, req.body, 'common.invalidParams', req.locale);
     if (!parsed.ok) return error(res, 400, parsed.message);
     try {
       res.status(202).json(

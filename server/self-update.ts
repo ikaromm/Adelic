@@ -25,6 +25,8 @@ import type {
 import { HARDENED_CONFIG, git, lines } from './checkpoints.js';
 import { appImageCheck, applyAppImage, type AppImageOptions, type AppImageRelease } from './self-update-appimage.js';
 import { checkForUpdate } from './updates.js';
+import type { Locale, Vars } from '../shared/i18n.js';
+import { localize, tr, type ServerKey, type Translatable } from './i18n.js';
 // Static import: esbuild inlines it into the desktop bundle, where package.json is not on disk.
 import pkg from '../package.json' with { type: 'json' };
 
@@ -40,6 +42,8 @@ export const BOOT_ID = randomUUID();
 export interface UpdateGuard {
   /** Why an update cannot start now (a run, undo, git operation…); undefined when idle. */
   block(): string | undefined;
+  /** The same reason as a catalog key, when the guard has one (the orchestrator does). */
+  blockReason?(): Translatable | undefined;
   /** Starts holding runs and git operations off (throws 409 when blocked); returns the release. */
   begin(): () => void;
 }
@@ -82,6 +86,27 @@ export class UpdateError extends Error {
   ) {
     super(message);
   }
+  /** An UpdateError whose message is a catalog key, translated per request (docs/i18n.md). */
+  static of(reason: Translatable, status = 409) {
+    return localize(new UpdateError('', status), reason.key, reason.vars);
+  }
+}
+/** A reason with its pt-BR text (what the status fields held before) and the key to translate it. */
+const reasonOf = (key: ServerKey, vars?: Vars): Translatable => ({ key, vars });
+const ptOf = (reason: Translatable | undefined) => reason && tr(undefined, reason.key, reason.vars);
+/** Keys of the status texts (`blocked`, `error`); the route translates them and drops this field. */
+export type StatusReasons = { blocked?: Translatable; error?: Translatable };
+/** The status texts in `locale`, without the `reasons` side channel. */
+export function localizeUpdateStatus<T extends { blocked?: string; error?: string; reasons?: StatusReasons }>(
+  status: T,
+  locale?: Locale,
+): Omit<T, 'reasons'> {
+  const { reasons, ...rest } = status;
+  if (!reasons || !locale) return rest;
+  const out = { ...rest } as { blocked?: string; error?: string };
+  if (reasons.blocked && out.blocked !== undefined) out.blocked = tr(locale, reasons.blocked.key, reasons.blocked.vars);
+  if (reasons.error && out.error !== undefined) out.error = tr(locale, reasons.error.key, reasons.error.vars);
+  return out as Omit<T, 'reasons'>;
 }
 
 const pkgName = (root: string) => {
@@ -311,6 +336,8 @@ export interface CheckoutState {
   install: boolean;
   switchTo?: UpdateChannel;
   blocked?: string;
+  /** `blocked` as a catalog key. */
+  blockedReason?: Translatable;
 }
 
 /**
@@ -339,7 +366,8 @@ export async function checkoutState(root: string, channel: UpdateChannel, fetche
   const branch = await run(root, ['symbolic-ref', '--quiet', '--short', 'HEAD']).catch(() => null);
   // Checked before `status`, which may already run a clean filter.
   const planted = await plantedPrograms(root);
-  if (planted.length)
+  if (planted.length) {
+    const blockedReason = reasonOf('update.filters', { filters: planted.join(', ') });
     return {
       branch,
       head,
@@ -348,12 +376,18 @@ export async function checkoutState(root: string, channel: UpdateChannel, fetche
       ahead: 0,
       commits: [],
       install: false,
-      blocked: `A configuração deste repositório define filtros que executam programas (${planted.join(', ')}); atualize manualmente`,
+      blocked: ptOf(blockedReason),
+      blockedReason,
     };
+  }
   // Tracked changes only; untracked files never block.
   const clean = !(await run(root, ['status', '--porcelain=v1', '--untracked-files=no', '--ignore-submodules=none']));
   const remote = `refs/remotes/origin/${channel}`;
   const state: CheckoutState = { branch, head, clean, behind: 0, ahead: 0, commits: [], install: false };
+  const block = (reason: Translatable) => {
+    state.blocked = ptOf(reason);
+    state.blockedReason = reason;
+  };
   if (!fetched || !(await ok(root, ['rev-parse', '--verify', '--quiet', `${remote}^{commit}`]))) return state;
   state.remote = await run(root, ['rev-parse', remote]);
   let base = 'HEAD';
@@ -364,11 +398,19 @@ export async function checkoutState(root: string, channel: UpdateChannel, fetche
       (await run(root, ['config', '--get', `branch.${channel}.merge`]).catch(() => '')) === local;
     const exists = await ok(root, ['rev-parse', '--verify', '--quiet', `${local}^{commit}`]);
     if (!exists || !tracks) {
-      state.blocked = `O checkout está ${branch ? `no branch ${branch}` : 'sem branch (HEAD destacado)'}; não há um branch local ${channel} que acompanhe origin/${channel}`;
+      block(
+        branch
+          ? reasonOf('update.noTrackingBranch.branch', { branch, channel })
+          : reasonOf('update.noTrackingBranch.detached', { channel }),
+      );
     } else if (!clean) {
-      state.blocked = `O checkout está ${branch ? `no branch ${branch}` : 'sem branch'} e tem alterações; para trocar para ${channel}, salve ou descarte as alterações`;
+      block(
+        branch
+          ? reasonOf('update.switchDirty.branch', { branch, channel })
+          : reasonOf('update.switchDirty.detached', { channel }),
+      );
     } else if (!(await ok(root, ['merge-base', '--is-ancestor', local, remote]))) {
-      state.blocked = `O branch local ${channel} tem commits que não estão em origin/${channel}; atualize-o manualmente`;
+      block(reasonOf('update.localAhead', { channel }));
     } else {
       state.switchTo = channel;
       base = local;
@@ -389,13 +431,9 @@ export async function checkoutState(root: string, channel: UpdateChannel, fetche
     await run(root, ['diff', '--no-ext-diff', '--name-only', baseSha, state.remote, '--', 'package-lock.json']),
   );
   if (!state.blocked) {
-    if (!clean)
-      state.blocked =
-        'Há alterações em arquivos rastreados; salve (commit) ou descarte antes de atualizar. Arquivos não rastreados não impedem.';
-    else if (state.ahead > 0 && state.behind > 0)
-      state.blocked = `O branch divergiu de origin/${channel} (${state.ahead} commit(s) locais); atualize manualmente`;
-    else if (state.ahead > 0)
-      state.blocked = `Há ${state.ahead} commit(s) locais que não estão em origin/${channel}; envie ou atualize manualmente`;
+    if (!clean) block(reasonOf('update.dirty'));
+    else if (state.ahead > 0 && state.behind > 0) block(reasonOf('update.diverged', { channel, ahead: state.ahead }));
+    else if (state.ahead > 0) block(reasonOf('update.ahead', { channel, ahead: state.ahead }));
   }
   return state;
 }
@@ -415,9 +453,10 @@ const exists = (path: string) =>
 export class SelfUpdateService implements SelfUpdater {
   private readonly tracker = new ProgressTracker();
   private detected?: Promise<{ kind: InstallKind; root?: string }>;
-  private checked?: { at: number; channel: UpdateChannel; error?: string };
+  private checked?: { at: number; channel: UpdateChannel; error?: string; errorReason?: Translatable };
   private release?: AppImageRelease | { latest: string; url: string; available: boolean };
   private releaseError?: string;
+  private releaseErrorReason?: Translatable;
   /** An apply is between its first check and the start of the job. */
   private starting = false;
 
@@ -453,28 +492,31 @@ export class SelfUpdateService implements SelfUpdater {
     const selected = this.channelOf(settings, channel);
     const { kind, root } = await this.install();
     if (this.tracker.running) return this.report(selected, guard);
-    let error: string | undefined;
+    let errorReason: Translatable | undefined;
     if (kind === 'checkout' && root) {
       try {
         await this.fetch(root, selected);
       } catch (e) {
-        error = `Não foi possível buscar origin/${selected}: ${(e as Error).message}`;
+        errorReason = reasonOf('update.fetchFailed', { channel: selected, detail: (e as Error).message });
       }
     } else if (kind === 'appimage') {
       try {
         this.release = await appImageCheck(this.options.appImage);
         this.releaseError = undefined;
+        this.releaseErrorReason = undefined;
       } catch (e) {
-        this.releaseError = `Não foi possível verificar atualizações: ${(e as Error).message}`;
+        this.releaseErrorReason = reasonOf('update.checkFailed', { detail: (e as Error).message });
+        this.releaseError = ptOf(this.releaseErrorReason);
       }
     } else {
       const result = await checkForUpdate({ force: true, fetcher: this.options.appImage?.fetcher });
       this.releaseError = result.error;
+      this.releaseErrorReason = undefined;
       this.release = result.latest
         ? { latest: result.latest, url: result.url!, available: result.available }
         : undefined;
     }
-    this.checked = { at: Date.now(), channel: selected, error };
+    this.checked = { at: Date.now(), channel: selected, error: ptOf(errorReason), errorReason };
     return this.report(selected, guard);
   }
 
@@ -493,7 +535,10 @@ export class SelfUpdateService implements SelfUpdater {
     ).then((out) => log?.(out.toString('utf8')));
   }
 
-  private async report(channel: UpdateChannel, guard: UpdateGuard): Promise<SelfUpdateStatus> {
+  private async report(
+    channel: UpdateChannel,
+    guard: UpdateGuard,
+  ): Promise<SelfUpdateStatus & { reasons?: StatusReasons }> {
     const { kind, root } = await this.install();
     const busy = this.tracker.running;
     const base = {
@@ -505,7 +550,20 @@ export class SelfUpdateService implements SelfUpdater {
       busy,
       ...(this.checked ? { checkedAt: new Date(this.checked.at).toISOString() } : {}),
     };
-    const blockedBy = (own?: string) => own ?? (busy ? 'Uma atualização já está em andamento' : guard.block());
+    // The guard answers in pt-BR; its key, when it has one, comes from blockReason().
+    const blockedBy = (own?: Translatable): Translatable | string | undefined =>
+      own ?? (busy ? reasonOf('update.running') : (guard.blockReason?.() ?? guard.block()));
+    /** `blocked` in pt-BR plus its key in `reasons`, and the error the same way. */
+    const texts = (blocked: Translatable | string | undefined, error?: Translatable | string) => {
+      const reasons: StatusReasons = {};
+      if (blocked && typeof blocked !== 'string') reasons.blocked = blocked;
+      if (error && typeof error !== 'string') reasons.error = error;
+      return {
+        ...(blocked ? { blocked: typeof blocked === 'string' ? blocked : ptOf(blocked)! } : {}),
+        ...(error ? { error: typeof error === 'string' ? error : ptOf(error)! } : {}),
+        ...(reasons.blocked || reasons.error ? { reasons } : {}),
+      };
+    };
     if (kind === 'checkout' && root) {
       const fetched = this.checked?.channel === channel && !this.checked.error;
       let state: CheckoutState;
@@ -516,18 +574,19 @@ export class SelfUpdateService implements SelfUpdater {
           ...base,
           available: false,
           canApply: false,
-          error: `Não foi possível ler o git: ${(e as Error).message}`,
+          ...texts(undefined, reasonOf('update.readGitFailed', { detail: (e as Error).message })),
         };
       }
       const available = Boolean(state.remote) && (state.behind > 0 || Boolean(state.switchTo)) && state.ahead === 0;
-      const blocked = available || state.blocked ? blockedBy(state.blocked) : undefined;
+      const blocked = available || state.blocked ? blockedBy(state.blockedReason) : undefined;
+      const checkError =
+        this.checked?.channel === channel ? (this.checked.errorReason ?? this.checked.error) : undefined;
       return {
         ...base,
         commit: state.head.slice(0, 12),
         available,
         canApply: available && !blocked,
-        ...(blocked ? { blocked } : {}),
-        ...(this.checked?.channel === channel && this.checked.error ? { error: this.checked.error } : {}),
+        ...texts(blocked, checkError),
         ...(state.remote ? { target: state.remote } : {}),
         checkout: {
           branch: state.branch,
@@ -544,18 +603,13 @@ export class SelfUpdateService implements SelfUpdater {
     const release = this.release;
     if (kind === 'appimage' && release && 'asset' in release) {
       const blocked = release.available
-        ? blockedBy(
-            release.writable
-              ? undefined
-              : `Sem permissão para substituir ${release.path}; baixe a nova versão pela página da release`,
-          )
+        ? blockedBy(release.writable ? undefined : reasonOf('update.noPermissionRelease', { path: release.path }))
         : undefined;
       return {
         ...base,
         available: release.available,
         canApply: release.available && !blocked,
-        ...(blocked ? { blocked } : {}),
-        ...(this.releaseError ? { error: this.releaseError } : {}),
+        ...texts(blocked, this.releaseErrorReason ?? this.releaseError),
         target: release.latest,
         release: { latest: release.latest, url: release.url, writable: release.writable, size: release.asset.size },
       };
@@ -564,10 +618,10 @@ export class SelfUpdateService implements SelfUpdater {
       ...base,
       available: Boolean(release?.available),
       canApply: false,
-      ...(release?.available
-        ? { blocked: 'Esta instalação não se atualiza sozinha; baixe a nova versão pela página da release' }
-        : {}),
-      ...(this.releaseError ? { error: this.releaseError } : {}),
+      ...texts(
+        release?.available ? reasonOf('update.manualOnly') : undefined,
+        this.releaseErrorReason ?? this.releaseError,
+      ),
       ...(release ? { release: { latest: release.latest, url: release.url, writable: false } } : {}),
     };
   }
@@ -577,7 +631,7 @@ export class SelfUpdateService implements SelfUpdater {
     guard: UpdateGuard,
     options: { channel?: UpdateChannel; target?: string } = {},
   ): Promise<UpdateProgress> {
-    if (this.tracker.running || this.starting) throw new UpdateError('Uma atualização já está em andamento');
+    if (this.tracker.running || this.starting) throw UpdateError.of(reasonOf('update.running'));
     this.starting = true;
     try {
       return await this.startApply(settings, guard, options);
@@ -597,22 +651,21 @@ export class SelfUpdateService implements SelfUpdater {
       // Refusals known without the network (changed files, another branch, local commits)
       // answer 409 right away; the job fetches and checks again before touching anything.
       const known = await checkoutState(root, channel, true);
-      if (known.blocked) throw new UpdateError(known.blocked);
+      if (known.blocked)
+        throw known.blockedReason ? UpdateError.of(known.blockedReason) : new UpdateError(known.blocked);
       const release = guard.begin();
       this.tracker.start(['fetch', 'switch', 'merge', 'install', 'build', 'restart'], options.target?.slice(0, 12));
       void this.applyCheckout(root, channel, options.target, release);
     } else if (kind === 'appimage') {
       const current = this.release;
-      if (!current || !('asset' in current) || !current.available)
-        throw new UpdateError('Verifique as atualizações antes de atualizar');
-      if (options.target && options.target !== current.latest)
-        throw new UpdateError('A versão disponível mudou; verifique de novo');
-      if (!current.writable) throw new UpdateError(`Sem permissão para substituir ${current.path}`);
+      if (!current || !('asset' in current) || !current.available) throw UpdateError.of(reasonOf('update.checkFirst'));
+      if (options.target && options.target !== current.latest) throw UpdateError.of(reasonOf('update.versionChanged'));
+      if (!current.writable) throw UpdateError.of(reasonOf('update.noPermission', { path: current.path }));
       const release = guard.begin();
       this.tracker.start(['download', 'verify', 'replace', 'restart'], current.latest);
       void this.applyAppImage(current, release);
     } else {
-      throw new UpdateError('Esta instalação não se atualiza pelo Adelic; use a página da release', 400);
+      throw UpdateError.of(reasonOf('update.notSelfUpdating'), 400);
     }
     return this.tracker.get();
   }
@@ -650,10 +703,9 @@ export class SelfUpdateService implements SelfUpdater {
         await this.fetch(root, channel, log);
         this.checked = { at: Date.now(), channel };
         const now = await checkoutState(root, channel, true);
-        if (now.blocked) throw new UpdateError(now.blocked);
-        if (!now.remote || (now.behind === 0 && !now.switchTo)) throw new UpdateError('O Adelic já está atualizado');
-        if (target && !now.remote.startsWith(target))
-          throw new UpdateError(`origin/${channel} mudou desde a verificação; verifique de novo`);
+        if (now.blocked) throw now.blockedReason ? UpdateError.of(now.blockedReason) : new UpdateError(now.blocked);
+        if (!now.remote || (now.behind === 0 && !now.switchTo)) throw UpdateError.of(reasonOf('update.upToDate'));
+        if (target && !now.remote.startsWith(target)) throw UpdateError.of(reasonOf('update.remoteMoved', { channel }));
         log(`origin/${channel} em ${now.remote.slice(0, 12)}: ${now.behind} commit(s) novos`);
         return now;
       });

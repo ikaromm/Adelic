@@ -26,7 +26,15 @@ const IMAGE_EXTENSIONS: Record<string, ImageMime> = {
 };
 
 export type AttachmentKind = 'image' | 'text';
-export type AttachmentCheck = { ok: true; kind: AttachmentKind; mime: string } | { ok: false; message: string };
+/** A refusal carries its pt-BR `message` and the server catalog key (`attachments.*`) to translate it. */
+export type AttachmentRefusal = { ok: false; message: string; key: string; vars: { name: string } };
+export type AttachmentCheck = { ok: true; kind: AttachmentKind; mime: string } | AttachmentRefusal;
+const refuse = (key: string, name: string, message: string): AttachmentRefusal => ({
+  ok: false,
+  message,
+  key,
+  vars: { name },
+});
 
 const extension = (name: string) => {
   const base = name.split(/[\\/]/).at(-1) ?? '';
@@ -48,20 +56,22 @@ export function checkAttachment(name: string, mime: string, size: number): Attac
   const declared = mime.toLowerCase();
   const image = (IMAGE_MIMES as readonly string[]).includes(declared) ? (declared as ImageMime) : IMAGE_EXTENSIONS[ext];
   if (image) {
-    if (size > MAX_IMAGE_BYTES) return { ok: false, message: `“${name}” passa de 10 MB, o limite para imagens.` };
+    if (size > MAX_IMAGE_BYTES)
+      return refuse('attachments.imageTooLarge', name, `“${name}” passa de 10 MB, o limite para imagens.`);
     return { ok: true, kind: 'image', mime: image };
   }
   if (declared.startsWith('image/'))
-    return { ok: false, message: `“${name}”: só são aceitas imagens PNG, JPEG, WebP ou GIF.` };
+    return refuse('attachments.imageType', name, `“${name}”: só são aceitas imagens PNG, JPEG, WebP ou GIF.`);
   if (TEXT_EXTENSIONS.has(ext) || TEXT_BASENAMES.has(basename(name)) || (!ext && declared.startsWith('text/'))) {
     if (size > MAX_TEXT_BYTES)
-      return { ok: false, message: `“${name}” passa de 512 KB, o limite para arquivos de texto.` };
+      return refuse('attachments.textTooLarge', name, `“${name}” passa de 512 KB, o limite para arquivos de texto.`);
     return { ok: true, kind: 'text', mime: 'text/plain' };
   }
-  return {
-    ok: false,
-    message: `“${name}” não é um tipo aceito. Anexe imagens (PNG, JPEG, WebP, GIF) ou arquivos de texto e código.`,
-  };
+  return refuse(
+    'attachments.type',
+    name,
+    `“${name}” não é um tipo aceito. Anexe imagens (PNG, JPEG, WebP, GIF) ou arquivos de texto e código.`,
+  );
 }
 
 /** Image type from the first bytes; undefined when the content is not one of the accepted formats. */

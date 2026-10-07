@@ -3,6 +3,7 @@
 // configuration, symlinks and a fake Graphify installation.
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { execFileSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, writeFile, symlink, rm, chmod, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import { classifyApproval, type ApprovalInput } from '../server/approval-policy';
@@ -382,9 +383,21 @@ const PENDING: string[] = [
   'unknowncmd',
 ];
 
+// The classifier auto-approves only canonical system binaries (/usr/bin or /bin). A command
+// whose binary this machine does not have is correctly left for confirmation, so those AUTO
+// rows are skipped where the binary is missing (CI runners lack `which` and `wpctl`).
+const SYSTEM_BIN_DIRS = ['/usr/bin', '/bin'];
+const hasSystemBinary = (name: string) => SYSTEM_BIN_DIRS.some((dir) => existsSync(`${dir}/${name}`));
+const binariesOf = (raw: string) =>
+  raw
+    .split(/\s*(?:;|&&|\|\||\|)\s*/)
+    .map((part) => part.trim().split(/\s+/)[0])
+    .filter((name): name is string => Boolean(name) && !name.includes('{{') && !name.includes('/'));
+const missingBinary = (raw: string) => binariesOf(raw).find((name) => !hasSystemBinary(name));
+
 describe('safe-command classifier table', () => {
   for (const raw of AUTO)
-    it(`auto: ${raw.slice(0, 90)}`, async () => {
+    it.skipIf(Boolean(missingBinary(raw)))(`auto: ${raw.slice(0, 90)}`, async () => {
       const result = await classifyApproval(input(expand(raw), { trustedNonLoginShell: true }));
       expect(result, result.reason).toMatchObject({ decision: 'auto' });
     });

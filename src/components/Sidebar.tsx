@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Activity, ArrowUpCircle, Brain, MessageSquare, Settings as SettingsIcon } from 'lucide-react';
+import { Activity, ArrowUpCircle, Brain, CalendarClock, MessageSquare, Settings as SettingsIcon } from 'lucide-react';
 import { api, type UpdateInfo } from '../api';
 import type { Session } from '../../shared/contracts';
 import { relativeTime } from '../format';
@@ -39,9 +39,9 @@ export function SessionItem({
   );
 }
 
-export type Page = 'chat' | 'activity' | 'memory' | 'settings';
+export type Page = 'chat' | 'activity' | 'automations' | 'memory' | 'settings';
 
-/** Footer navigation: Activity, Memory (with service status) and Settings. */
+/** Footer navigation: Activity, Automations, Memory (with service status) and Settings. */
 export function SidebarNav({
   page,
   goTo,
@@ -63,6 +63,15 @@ export function SidebarNav({
       >
         <Activity size={16} aria-hidden="true" />
         <span className="sidebar-label">Atividade</span>
+      </button>
+      <button
+        className={`nav-item ${page === 'automations' ? 'active' : ''}`}
+        aria-current={page === 'automations' ? 'page' : undefined}
+        title="Automações"
+        onClick={() => goTo('automations')}
+      >
+        <CalendarClock size={16} aria-hidden="true" />
+        <span className="sidebar-label">Automações</span>
       </button>
       <button
         className={`nav-item ${page === 'memory' ? 'active' : ''}`}

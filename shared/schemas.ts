@@ -10,6 +10,14 @@ import {
 } from './commands.js';
 import { MENTION_PATH_MAX } from './mentions.js';
 import { AUTO_COMPACT_MAX_TOKENS, AUTO_COMPACT_MIN_TOKENS } from './compaction.js';
+import {
+  AUTOMATION_DENY_MAX_MINUTES,
+  AUTOMATION_INTERVAL_MAX_HOURS,
+  AUTOMATION_INTERVAL_MIN_HOURS,
+  AUTOMATION_NAME_MAX,
+  AUTOMATION_PROMPT_MAX,
+  isValidTimeZone,
+} from './automations.js';
 
 // Request schemas shared by the server routes (and usable by the UI). Each field keeps
 // the exact error message the API returned before zod, so clients see no change.
@@ -194,6 +202,7 @@ export const SettingsPatchSchema = z.object({
     z.number().int().min(AUTO_COMPACT_MIN_TOKENS).max(AUTO_COMPACT_MAX_TOKENS),
     `autoCompactTokens deve ser um inteiro entre ${AUTO_COMPACT_MIN_TOKENS} e ${AUTO_COMPACT_MAX_TOKENS}`,
   ),
+  automations: optional(z.boolean(), 'automations deve ser booleano'),
 });
 /** "Compactar conversa" takes no options (docs/specs/compaction.md). */
 export const CompactSchema = z.object({}).strict();
@@ -238,6 +247,67 @@ export const PatchCommandSchema = z.object({
   description: optional(commandDescription, commandMessages.description),
   template: optional(commandTemplate, commandMessages.template),
   mode: optional(z.union([z.null(), z.enum(commandModes)]), commandMessages.mode),
+});
+
+// Scheduled automations (docs/specs/automations.md).
+export const AUTOMATION_MESSAGES = {
+  name: `Nome obrigatório (até ${AUTOMATION_NAME_MAX} caracteres)`,
+  prompt: `Pedido obrigatório (até ${AUTOMATION_PROMPT_MAX} caracteres)`,
+  projectId: 'projectId obrigatório: automações rodam sempre num projeto',
+  schedule: `Agenda inválida: diária ou semanal com horário HH:MM (semanal com ao menos um dia de 0 a 6), ou intervalo de ${AUTOMATION_INTERVAL_MIN_HOURS} a ${AUTOMATION_INTERVAL_MAX_HOURS} horas`,
+  timezone: 'Fuso horário desconhecido (use um nome IANA, como America/Sao_Paulo)',
+  deny: `denyApprovalsAfterMinutes deve ser null ou um inteiro de 1 a ${AUTOMATION_DENY_MAX_MINUTES}`,
+} as const;
+const automationTime = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/);
+export const AutomationScheduleSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('daily'), time: automationTime }).strict(),
+  z
+    .object({
+      kind: z.literal('weekly'),
+      days: z
+        .array(z.number().int().min(0).max(6))
+        .min(1)
+        .max(7)
+        .refine((days) => new Set(days).size === days.length)
+        .transform((days) => [...days].sort((a, b) => a - b)),
+      time: automationTime,
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal('interval'),
+      hours: z.number().int().min(AUTOMATION_INTERVAL_MIN_HOURS).max(AUTOMATION_INTERVAL_MAX_HOURS),
+    })
+    .strict(),
+]);
+const timeZone = z.string().refine(isValidTimeZone);
+const denyMinutes = z.union([z.null(), z.number().int().min(1).max(AUTOMATION_DENY_MAX_MINUTES)]);
+export const CreateAutomationSchema = z.object({
+  name: required(text(AUTOMATION_NAME_MAX), AUTOMATION_MESSAGES.name),
+  prompt: required(text(AUTOMATION_PROMPT_MAX), AUTOMATION_MESSAGES.prompt),
+  projectId: required(text(), AUTOMATION_MESSAGES.projectId),
+  providerId: optional(ProviderIdSchema, 'providerId inválido'),
+  model: optional(text(120), 'model inválido'),
+  mode: optional(ModeSchema, 'mode inválido'),
+  schedule: required(AutomationScheduleSchema, AUTOMATION_MESSAGES.schedule),
+  timezone: optional(timeZone, AUTOMATION_MESSAGES.timezone),
+  enabled: optional(z.boolean(), 'enabled deve ser booleano'),
+  catchUp: optional(z.boolean(), 'catchUp deve ser booleano'),
+  denyApprovalsAfterMinutes: optional(denyMinutes, AUTOMATION_MESSAGES.deny),
+});
+/** `null` on providerId, model or mode goes back to the defaults. */
+export const PatchAutomationSchema = z.object({
+  name: optional(text(AUTOMATION_NAME_MAX), AUTOMATION_MESSAGES.name),
+  prompt: optional(text(AUTOMATION_PROMPT_MAX), AUTOMATION_MESSAGES.prompt),
+  projectId: optional(text(), AUTOMATION_MESSAGES.projectId),
+  providerId: optional(ProviderIdSchema.nullable(), 'providerId inválido'),
+  model: optional(text(120).nullable(), 'model inválido'),
+  mode: optional(ModeSchema.nullable(), 'mode inválido'),
+  schedule: optional(AutomationScheduleSchema, AUTOMATION_MESSAGES.schedule),
+  timezone: optional(timeZone, AUTOMATION_MESSAGES.timezone),
+  enabled: optional(z.boolean(), 'enabled deve ser booleano'),
+  catchUp: optional(z.boolean(), 'catchUp deve ser booleano'),
+  denyApprovalsAfterMinutes: optional(denyMinutes, AUTOMATION_MESSAGES.deny),
 });
 
 /** Query of GET /api/projects/:id/files (the file autocomplete for `@` mentions). */

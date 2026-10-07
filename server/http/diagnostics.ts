@@ -91,6 +91,7 @@ export function diagnosticsRoutes({ store, providerList }: BackendContext) {
           runs: count('runs'),
           approvals: count('approvals'),
           attachments: count('attachments'),
+          automations: count('automations'),
         },
         backups: backups(store.dataDir),
       },

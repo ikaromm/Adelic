@@ -1,9 +1,10 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { startServer } from '../server/runtime.js';
+import { AutomationService } from '../server/automations.js';
 
 const dirs: string[] = [];
 const children: ChildProcess[] = [];
@@ -63,6 +64,23 @@ describe('server runtime', () => {
     } finally {
       process.chdir(originalCwd);
       await server.close();
+    }
+  });
+
+  it('stops the automations scheduler on close, before anything else shuts down', async () => {
+    const { dataDir, webDir } = fixture();
+    const stop = vi.spyOn(AutomationService.prototype, 'stop');
+    try {
+      const server = await startServer({ port: 0, webDir, dataDir });
+      const json = { 'content-type': 'application/json' };
+      await fetch(`${server.url}/api/settings`, { method: 'PATCH', headers: json, body: '{"automations":true}' });
+      const listed = await (await fetch(`${server.url}/api/automations`)).json();
+      expect(listed).toEqual({ automations: [], enabled: true });
+      expect(stop).not.toHaveBeenCalled();
+      await server.close();
+      expect(stop).toHaveBeenCalledTimes(1);
+    } finally {
+      stop.mockRestore();
     }
   });
 

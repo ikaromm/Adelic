@@ -26,6 +26,7 @@ import type {
   Skill,
 } from '../shared/contracts';
 import type { CommandList, CommandMode, SavedCommand } from '../shared/commands';
+import type { Automation, AutomationSchedule } from '../shared/automations';
 /** Report from /api/diagnostics: versions, paths and status only, without secrets or content. */
 export interface Diagnostics {
   generatedAt: string;
@@ -309,7 +310,34 @@ export const api = {
   // The origin guard requires a JSON body on every mutation, DELETE included.
   deleteCommand: (id: string) =>
     request<void>(`/api/commands/${encodeURIComponent(id)}`, { method: 'DELETE', body: JSON.stringify({}) }),
+  /** Scheduled automations (docs/specs/automations.md); `enabled` is the global switch. */
+  automations: () => request<{ automations: Automation[]; enabled: boolean }>('/api/automations'),
+  createAutomation: (data: AutomationInput) =>
+    request<Automation>('/api/automations', { method: 'POST', body: JSON.stringify(data) }),
+  updateAutomation: (id: string, data: Partial<AutomationInput> & { enabled?: boolean }) =>
+    request<Automation>(`/api/automations/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  deleteAutomation: (id: string) =>
+    request<void>(`/api/automations/${encodeURIComponent(id)}`, { method: 'DELETE', body: JSON.stringify({}) }),
+  runAutomation: (id: string) =>
+    request<{ automation: Automation; runId: string; messageId: string }>(
+      `/api/automations/${encodeURIComponent(id)}/run`,
+      { method: 'POST', body: JSON.stringify({}) },
+    ),
 };
+/** Editable fields of an automation; `null` on providerId, model or mode goes back to the defaults. */
+export interface AutomationInput {
+  name: string;
+  prompt: string;
+  projectId: string;
+  providerId?: Automation['providerId'] | null;
+  model?: string | null;
+  mode?: Automation['mode'] | null;
+  schedule: AutomationSchedule;
+  timezone: string;
+  catchUp: boolean;
+  denyApprovalsAfterMinutes: number | null;
+  enabled?: boolean;
+}
 /** Editable fields of a saved command; `mode: null` removes the override on PATCH. */
 export interface CommandInput {
   name: string;

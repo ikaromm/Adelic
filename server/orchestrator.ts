@@ -77,6 +77,8 @@ export interface StartOptions {
   planTask?: { planId: string; taskId: string; prompt: string };
   /** Edit and resend: this user message and everything after it are discarded first. */
   replaceFrom?: string;
+  /** Sent by this scheduled automation: the user message is marked (docs/specs/automations.md). */
+  automationId?: string;
 }
 /** A plan-mode run: its kind and the prompt that replaces the usual one. */
 type SpecialRun = { ref: RunPlanRef; prompt: string };
@@ -127,6 +129,10 @@ export class Orchestrator {
       isActive: (sessionId) => this.isActive(sessionId),
       emit: (event) => this.emit(event),
     });
+  }
+  /** Publishes an event from another service (automations) to the stream subscribers. */
+  publish(event: StreamEvent) {
+    this.emit(event);
   }
   subscribe(listener: (event: StreamEvent) => void) {
     this.listeners.add(listener);
@@ -310,6 +316,7 @@ export class Orchestrator {
         content,
         createdAt: now,
         ...(attachments.length ? { attachments: attachments.map(attachmentMeta) } : {}),
+        ...(options.automationId ? { automationId: options.automationId } : {}),
       };
       const assistant: Message = {
         id: assistantId,
@@ -1789,7 +1796,8 @@ export class Orchestrator {
     }
     throw Object.assign(new Error('Não há execução ativa'), { status: 409 });
   }
-  async decide(approvalId: string, sessionId: string, decision: 'approve' | 'deny') {
+  /** `note` replaces the activity text ("Aprovado"/"Negado"), e.g. for an automatic denial. */
+  async decide(approvalId: string, sessionId: string, decision: 'approve' | 'deny', note?: string) {
     const approval = this.store.getApproval(approvalId);
     if (!approval || approval.sessionId !== sessionId || approval.status !== 'pending')
       throw Object.assign(new Error('Aprovação não encontrada ou já respondida'), { status: 404 });
@@ -1807,9 +1815,15 @@ export class Orchestrator {
       current.status = decision === 'approve' ? 'approved' : 'denied';
       this.store.putApproval(current);
       this.emit({ type: 'approval', approval: current });
-      this.publishEvent(sessionId, approval.runId, 'approval', decision === 'approve' ? 'Aprovado' : 'Negado', {
-        status: current.status,
-      });
+      this.publishEvent(
+        sessionId,
+        approval.runId,
+        'approval',
+        note ?? (decision === 'approve' ? 'Aprovado' : 'Negado'),
+        {
+          status: current.status,
+        },
+      );
     } finally {
       this.deciding.delete(approvalId);
     }

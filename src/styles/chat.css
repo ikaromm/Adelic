@@ -2806,3 +2806,13 @@
     width: auto;
   }
 }
+
+/* User message sent by a scheduled automation. */
+.automation-badge {
+  padding: 1px 7px;
+  border: 1px solid var(--accent-border);
+  border-radius: var(--radius-full);
+  color: var(--accent);
+  font-size: var(--text-2xs);
+  font-weight: 600;
+}

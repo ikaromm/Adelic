@@ -63,6 +63,7 @@ import { usePlans } from './hooks/usePlans';
 import { PlanCard } from './components/PlanCard';
 import { projectOrchestration } from '../shared/contracts';
 import { ActivityPage } from './components/ActivityPage';
+import { AutomationsPage } from './components/AutomationsPage';
 import { ConversationSearch } from './components/ConversationSearch';
 import { CommandPalette } from './components/CommandPalette';
 import { downloadExport, useCommandPalette } from './hooks/useCommandPalette';
@@ -89,6 +90,8 @@ export default function App() {
   const [selectedProject, setSelectedProject] = useState('');
   const [page, setPage] = useState<Page>('chat');
   const [memoryVisited, setMemoryVisited] = useState(false);
+  // Bumped by `automations` stream events so the Automações page reloads its list.
+  const [automationsVersion, setAutomationsVersion] = useState(0);
   const [stream, setStream] = useState<LocalStream | null>(null);
   const [notice, setNotice] = useState('');
   const [busy, setBusy] = useState(false);
@@ -301,6 +304,10 @@ export default function App() {
         return;
       }
       notifyRun(event);
+      if (event.type === 'automations') {
+        setAutomationsVersion((value) => value + 1);
+        return;
+      }
       if (event.type === 'queue') {
         applyQueue(event.queue);
         return;
@@ -1082,7 +1089,8 @@ export default function App() {
       | 'autoRetry'
       | 'notifications'
       | 'autoCompact'
-      | 'autoCompactTokens',
+      | 'autoCompactTokens'
+      | 'automations',
     value: string | boolean | number,
   ) {
     if (!data) return;
@@ -1181,9 +1189,11 @@ export default function App() {
         : project?.name || 'Conversas'
       : page === 'activity'
         ? 'Atividade'
-        : page === 'memory'
-          ? 'Memória'
-          : 'Configurações';
+        : page === 'automations'
+          ? 'Automações'
+          : page === 'memory'
+            ? 'Memória'
+            : 'Configurações';
 
   /** One message of the conversation, with its retry notice and activity panel. */
   function renderTimelineMessage(message: Message) {
@@ -1934,6 +1944,16 @@ export default function App() {
         {data && page === 'activity' && (
           <ErrorBoundary scope="a atividade" resetKey={page}>
             <ActivityPage runs={data.runs} providers={data.providers} />
+          </ErrorBoundary>
+        )}
+        {data && page === 'automations' && (
+          <ErrorBoundary scope="as automações" resetKey={page}>
+            <AutomationsPage
+              data={data}
+              version={automationsVersion}
+              onOpenConversation={openConversation}
+              onOpenSettings={() => goTo('settings')}
+            />
           </ErrorBoundary>
         )}
         {data && memoryVisited && (

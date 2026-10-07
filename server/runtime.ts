@@ -115,6 +115,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Run
   let store: Store | undefined;
   let providers: ProviderRegistry | undefined;
   let orchestrator: ReturnType<typeof createBackend>['orchestrator'] | undefined;
+  let automations: ReturnType<typeof createBackend>['automations'] | undefined;
   let graphifyService: GraphifyService | undefined;
   let http: HttpServer | undefined;
   let remoteHttp: HttpServer | undefined;
@@ -129,6 +130,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Run
     const remote = options.remote === null ? undefined : (options.remote ?? remoteAccessFromEnv());
     const backend = createBackend(store, providers, graphifyService, remote);
     orchestrator = backend.orchestrator;
+    automations = backend.automations;
 
     if (options.development) {
       const { createServer: createViteServer } = await import('vite');
@@ -161,6 +163,8 @@ export async function startServer(options: StartServerOptions = {}): Promise<Run
             firstError ??= error;
           }
         };
+        // No automation may start while the server shuts down.
+        automations?.stop();
         await attempt(async () => {
           await closeServer(http!);
         });
@@ -198,6 +202,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Run
       close,
     };
   } catch (error) {
+    automations?.stop();
     await Promise.allSettled(
       [orchestrator?.shutdown(), graphifyService?.shutdown()].filter((pending): pending is Promise<void> =>
         Boolean(pending),

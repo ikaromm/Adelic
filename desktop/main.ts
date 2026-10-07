@@ -299,13 +299,18 @@ async function startDesktop() {
   backendNodeVersion = ready.nodeVersion || process.versions.node;
   writeReport();
 
-  // Only notifications from the app origin are allowed (permissionPolicy); the rest is denied.
+  // Only notifications and the microphone (audio only) from the app origin are allowed
+  // (permissionPolicy); the rest, camera and screen capture included, is denied.
   const appUrl = backendUrl;
   session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback, details) =>
-    callback(permissionPolicy(permission, details.requestingUrl, appUrl)),
+    callback(
+      permissionPolicy(permission, details.requestingUrl, appUrl, {
+        mediaTypes: 'mediaTypes' in details ? (details.mediaTypes ?? []) : undefined,
+      }),
+    ),
   );
-  session.defaultSession.setPermissionCheckHandler((_webContents, permission, requestingOrigin) =>
-    permissionPolicy(permission, requestingOrigin, appUrl),
+  session.defaultSession.setPermissionCheckHandler((_webContents, permission, requestingOrigin, details) =>
+    permissionPolicy(permission, requestingOrigin, appUrl, { mediaType: details.mediaType }),
   );
 
   const window = createWindow(resources.icon);

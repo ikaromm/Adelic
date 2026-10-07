@@ -381,6 +381,8 @@ export interface Settings {
   autoCompact?: boolean;
   /** Input-token threshold of the last run for `autoCompact` (history chars: 4× this). */
   autoCompactTokens?: number;
+  /** Microphone button in the composer, transcribed locally by voxtype (docs/specs/voice.md). Absent: on when available. */
+  voiceDictation?: boolean;
 }
 export interface Integration {
   id: string;

@@ -1,5 +1,5 @@
 import { ArrowUp, Bot, Brain, Code2, Command, Layers3, Shield, X } from 'lucide-react';
-import { type FormEvent, useId, useState } from 'react';
+import { type FormEvent, useEffect, useId, useState } from 'react';
 import {
   AUTO_COMPACT_DEFAULT_TOKENS,
   AUTO_COMPACT_MAX_TOKENS,
@@ -19,6 +19,8 @@ import type {
 import { MODEL_FALLBACK_MAX } from '../../shared/schemas';
 import { modelLabel } from '../../shared/model-fallback';
 import { integrationName } from '../labels';
+import { api } from '../api';
+import type { VoiceStatus } from '../../shared/voice';
 import { notificationPermission, notificationsEnabled } from '../hooks/useRunNotifications';
 import { CommandsCard } from './CommandsCard';
 import { DiagnosticsCard } from './DiagnosticsCard';
@@ -72,7 +74,8 @@ export function SettingsPage({
       | 'autoRetry'
       | 'notifications'
       | 'autoCompact'
-      | 'autoCompactTokens',
+      | 'autoCompactTokens'
+      | 'voiceDictation',
     value: string | boolean | number,
   ) => void;
   onSkill: (id: string, enabled: boolean) => void;
@@ -223,6 +226,10 @@ export function SettingsPage({
             <NotificationSetting
               enabled={notificationsEnabled(data.settings)}
               onChange={(enabled) => onSetting('notifications', enabled)}
+            />
+            <VoiceSetting
+              enabled={data.settings.voiceDictation !== false}
+              onChange={(enabled) => onSetting('voiceDictation', enabled)}
             />
           </section>
           <section className="settings-card">
@@ -473,6 +480,53 @@ function NotificationSetting({ enabled, onChange }: { enabled: boolean; onChange
       {problem && (
         <div className="inline-notice" role="status">
           {problem}
+        </div>
+      )}
+    </>
+  );
+}
+
+/** Local voice dictation (docs/specs/voice.md): on by default, with the server's availability. */
+function VoiceSetting({ enabled, onChange }: { enabled: boolean; onChange: (enabled: boolean) => void }) {
+  const [status, setStatus] = useState<VoiceStatus>();
+  useEffect(() => {
+    let live = true;
+    api
+      .voiceStatus()
+      .then((value) => live && setStatus(value))
+      .catch((e: Error) => live && setStatus({ available: false, reason: `Ditado indisponível: ${e.message}` }));
+    return () => {
+      live = false;
+    };
+  }, []);
+  const detail = !status
+    ? 'Verificando o voxtype…'
+    : status.available
+      ? `Disponível: ${[status.engine, status.model].filter(Boolean).join(' · ')}, neste computador.`
+      : status.reason;
+  return (
+    <>
+      <div className="setting-row">
+        <div>
+          <strong>Ditado por voz</strong>
+          <span>
+            Botão de microfone no campo de mensagem. O áudio é transcrito pelo voxtype neste computador e nunca sai dele
+            pelo Adelic.
+          </span>
+        </div>
+        <button
+          className={`toggle ${enabled ? 'on' : ''}`}
+          role="switch"
+          aria-checked={enabled}
+          aria-label="Ditado por voz"
+          onClick={() => onChange(!enabled)}
+        >
+          <span />
+        </button>
+      </div>
+      {enabled && detail && (
+        <div className="inline-notice" role="status">
+          {detail}
         </div>
       )}
     </>

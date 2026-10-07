@@ -35,7 +35,28 @@ describe('desktop resource and navigation policy', () => {
     expect(permissionPolicy('notifications', 'https://example.com/', app)).toBe(false);
     expect(permissionPolicy('notifications', 'http://127.0.0.1:4318/', app)).toBe(false);
     expect(permissionPolicy('media', 'http://127.0.0.1:4317/', app)).toBe(false);
+    expect(permissionPolicy('geolocation', 'http://127.0.0.1:4317/', app)).toBe(false);
     expect(permissionPolicy('clipboard-read', 'http://127.0.0.1:4317/', app)).toBe(false);
     expect(permissionPolicy('notifications', 'http://127.0.0.1:4317/', '')).toBe(false);
+  });
+
+  it('grants the microphone for dictation only to the app origin, and only audio', () => {
+    const app = 'http://127.0.0.1:4317';
+    // Permission request handler: details.mediaTypes.
+    expect(permissionPolicy('media', `${app}/`, app, { mediaTypes: ['audio'] })).toBe(true);
+    expect(permissionPolicy('media', `${app}/`, app, { mediaTypes: ['video'] })).toBe(false);
+    expect(permissionPolicy('media', `${app}/`, app, { mediaTypes: ['audio', 'video'] })).toBe(false);
+    expect(permissionPolicy('media', `${app}/`, app, { mediaTypes: [] })).toBe(false);
+    expect(permissionPolicy('media', 'https://example.com/', app, { mediaTypes: ['audio'] })).toBe(false);
+    expect(permissionPolicy('media', 'http://127.0.0.1:4318/', app, { mediaTypes: ['audio'] })).toBe(false);
+    expect(permissionPolicy('media', `${app}/`, '', { mediaTypes: ['audio'] })).toBe(false);
+    // Permission check handler: details.mediaType.
+    expect(permissionPolicy('media', app, app, { mediaType: 'audio' })).toBe(true);
+    expect(permissionPolicy('media', app, app, { mediaType: 'video' })).toBe(false);
+    expect(permissionPolicy('media', app, app, { mediaType: 'unknown' })).toBe(false);
+    expect(permissionPolicy('media', 'https://example.com', app, { mediaType: 'audio' })).toBe(false);
+    // Screen capture and other permissions stay denied even with audio details.
+    expect(permissionPolicy('display-capture', `${app}/`, app, { mediaTypes: ['audio'] })).toBe(false);
+    expect(permissionPolicy('clipboard-read', `${app}/`, app, { mediaTypes: ['audio'] })).toBe(false);
   });
 });

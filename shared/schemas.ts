@@ -190,6 +190,7 @@ export const SettingsPatchSchema = z.object({
     `modelFallback inválido (até ${MODEL_FALLBACK_MAX} modelos diferentes, cada um com providerId e model)`,
   ),
   autoCompact: optional(z.boolean(), 'autoCompact deve ser booleano'),
+  voiceDictation: optional(z.boolean(), 'voiceDictation deve ser booleano'),
   autoCompactTokens: optional(
     z.number().int().min(AUTO_COMPACT_MIN_TOKENS).max(AUTO_COMPACT_MAX_TOKENS),
     `autoCompactTokens deve ser um inteiro entre ${AUTO_COMPACT_MIN_TOKENS} e ${AUTO_COMPACT_MAX_TOKENS}`,

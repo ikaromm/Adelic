@@ -10,11 +10,11 @@ import {
   HOOK_TIMEOUT_DEFAULT,
   HOOK_TIMEOUT_MAX,
   HOOK_TIMEOUT_MIN,
-  checkHeadline,
   type CheckResult,
   type ProjectHooks,
 } from '../../shared/hooks';
 import { api } from '../api';
+import { t, useI18n } from '../i18n';
 
 interface CheckDraft {
   name: string;
@@ -31,19 +31,42 @@ const toDraft = (hooks: ProjectHooks) => ({
 /** First problem with the form, or '' (the API checks again). */
 function draftError(checks: CheckDraft[], blocked: string[]) {
   for (const [i, check] of checks.entries()) {
-    const n = i + 1;
+    const index = i + 1;
     if (!check.name.trim() || check.name.length > HOOK_NAME_MAX)
-      return `Verificação ${n}: nome obrigatório (até ${HOOK_NAME_MAX} caracteres)`;
+      return t('hooks.error.name', { index, max: HOOK_NAME_MAX });
     if (!check.command.trim() || check.command.length > HOOK_COMMAND_MAX)
-      return `Verificação ${n}: comando obrigatório (até ${HOOK_COMMAND_MAX} caracteres)`;
+      return t('hooks.error.command', { index, max: HOOK_COMMAND_MAX });
     const timeout = Number(check.timeoutSec);
     if (!Number.isInteger(timeout) || timeout < HOOK_TIMEOUT_MIN || timeout > HOOK_TIMEOUT_MAX)
-      return `Verificação ${n}: tempo limite de ${HOOK_TIMEOUT_MIN} a ${HOOK_TIMEOUT_MAX} segundos`;
+      return t('hooks.error.timeout', { index, min: HOOK_TIMEOUT_MIN, max: HOOK_TIMEOUT_MAX });
   }
-  if (blocked.length > BLOCKED_COMMANDS_MAX) return `Até ${BLOCKED_COMMANDS_MAX} comandos bloqueados`;
+  if (blocked.length > BLOCKED_COMMANDS_MAX) return t('hooks.error.blockedCount', { max: BLOCKED_COMMANDS_MAX });
   if (blocked.some((p) => p.length > BLOCKED_PATTERN_MAX))
-    return `Cada padrão bloqueado tem até ${BLOCKED_PATTERN_MAX} caracteres`;
+    return t('hooks.error.blockedLength', { max: BLOCKED_PATTERN_MAX });
   return '';
+}
+
+/** Test result line in the UI locale; pt-BR matches shared checkHeadline (the persisted activity text). */
+export function checkResultHeadline(result: CheckResult) {
+  const name = result.name;
+  const seconds = result.durationMs === undefined ? undefined : Math.max(0, Math.round(result.durationMs / 1000));
+  const detail = result.detail;
+  switch (result.status) {
+    case 'running':
+      return t('hooks.result.running', { name });
+    case 'passed':
+      return seconds === undefined ? t('hooks.result.passed', { name }) : t('hooks.result.passedIn', { name, seconds });
+    case 'failed':
+      return t('hooks.result.failed', { name, code: result.exitCode ?? '?' });
+    case 'timeout':
+      return seconds === undefined
+        ? t('hooks.result.timeout', { name })
+        : t('hooks.result.timeoutIn', { name, seconds });
+    case 'cancelled':
+      return detail ? t('hooks.result.cancelledDetail', { name, detail }) : t('hooks.result.cancelled', { name });
+    default:
+      return detail ? t('hooks.result.errorDetail', { name, detail }) : t('hooks.result.error', { name });
+  }
 }
 
 /**
@@ -51,6 +74,7 @@ function draftError(checks: CheckDraft[], blocked: string[]) {
  * commands of one project, saved only in Adelic, never read from the repository.
  */
 export function HooksCard({ project }: { project: Project }) {
+  const { t, tRich } = useI18n();
   const id = useId();
   const [loaded, setLoaded] = useState<ProjectHooks | null>(null);
   const [checks, setChecks] = useState<CheckDraft[]>([]);
@@ -114,7 +138,7 @@ export function HooksCard({ project }: { project: Project }) {
       setBlocked(draft.blocked);
       setAutoFix(draft.autoFix);
       setResults({});
-      setSaved('Verificações e bloqueios salvos.');
+      setSaved(t('hooks.saved'));
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -141,18 +165,15 @@ export function HooksCard({ project }: { project: Project }) {
           <ShieldCheck size={17} />
         </div>
         <div>
-          <h2 id={`${id}-title`}>Verificações e bloqueios</h2>
-          <p>
-            {project.name} · as verificações rodam depois de uma execução que alterou arquivos, no mesmo sandbox dos
-            agentes e sem rede. Ficam só no Adelic; nada é lido do repositório.
-          </p>
+          <h2 id={`${id}-title`}>{t('hooks.title')}</h2>
+          <p>{t('hooks.detail', { project: project.name })}</p>
         </div>
       </div>
-      {!loaded && !error && <p className="hooks-loading">Carregando…</p>}
+      {!loaded && !error && <p className="hooks-loading">{t('hooks.loading')}</p>}
       {loaded && (
-        <form onSubmit={save} aria-label="Verificações e bloqueios do projeto">
-          <h3 className="hooks-subtitle">Verificar depois de alterações</h3>
-          {checks.length === 0 && <p className="hooks-empty">Nenhuma verificação. Ex.: testes ou typecheck.</p>}
+        <form onSubmit={save} aria-label={t('hooks.form')}>
+          <h3 className="hooks-subtitle">{t('hooks.afterEdit')}</h3>
+          {checks.length === 0 && <p className="hooks-empty">{t('hooks.empty')}</p>}
           <ol className="hooks-checks">
             {checks.map((check, index) => {
               const result = results[index];
@@ -162,19 +183,19 @@ export function HooksCard({ project }: { project: Project }) {
                 savedCheck.command !== check.command.trim() ||
                 savedCheck.timeoutSec !== Number(check.timeoutSec);
               return (
-                <li key={index} aria-label={`Verificação ${index + 1}`}>
+                <li key={index} aria-label={t('hooks.check', { index: index + 1 })}>
                   <div className="hooks-check-row">
                     <label>
-                      Nome
+                      {t('hooks.name')}
                       <input
                         value={check.name}
                         maxLength={HOOK_NAME_MAX}
                         onChange={(e) => edit(index, { name: e.target.value })}
-                        placeholder="testes"
+                        placeholder={t('hooks.namePlaceholder')}
                       />
                     </label>
                     <label className="hooks-timeout">
-                      Tempo limite (s)
+                      {t('hooks.timeout')}
                       <input
                         type="number"
                         min={HOOK_TIMEOUT_MIN}
@@ -185,7 +206,7 @@ export function HooksCard({ project }: { project: Project }) {
                     </label>
                   </div>
                   <label>
-                    Comando
+                    {t('hooks.command')}
                     <input
                       className="hooks-command"
                       value={check.command}
@@ -202,29 +223,34 @@ export function HooksCard({ project }: { project: Project }) {
                         checked={check.enabled}
                         onChange={(e) => edit(index, { enabled: e.target.checked })}
                       />
-                      Ativa
+                      {t('hooks.enabled')}
                     </label>
                     <button
                       type="button"
                       className="ghost-button"
                       disabled={testing !== null || unsaved}
-                      title={unsaved ? 'Salve antes de testar' : undefined}
-                      aria-label={`Testar ${check.name || `verificação ${index + 1}`}`}
+                      title={unsaved ? t('hooks.saveFirst') : undefined}
+                      aria-label={t('hooks.testLabel', {
+                        name: check.name || t('hooks.unnamed', { index: index + 1 }),
+                      })}
                       onClick={() => void test(index)}
                     >
-                      {testing === index ? <LoaderCircle className="spin" size={13} /> : <Play size={13} />} Testar
+                      {testing === index ? <LoaderCircle className="spin" size={13} /> : <Play size={13} />}{' '}
+                      {t('hooks.test')}
                     </button>
                     <button
                       type="button"
                       className="ghost-button"
-                      aria-label={`Remover ${check.name || `verificação ${index + 1}`}`}
+                      aria-label={t('hooks.removeLabel', {
+                        name: check.name || t('hooks.unnamed', { index: index + 1 }),
+                      })}
                       onClick={() => {
                         setSaved('');
                         setResults({});
                         setChecks((list) => list.filter((_, i) => i !== index));
                       }}
                     >
-                      <Trash2 size={13} /> Remover
+                      <Trash2 size={13} /> {t('hooks.remove')}
                     </button>
                   </div>
                   {typeof result === 'string' && result && (
@@ -236,9 +262,9 @@ export function HooksCard({ project }: { project: Project }) {
                     <details className={`hooks-result ${result.status === 'passed' ? 'passed' : 'failed'}`} open>
                       <summary role="status">
                         {result.status === 'passed' ? <CheckCircle2 size={13} /> : <XCircle size={13} />}
-                        {checkHeadline(result)}
+                        {checkResultHeadline(result)}
                       </summary>
-                      <pre>{result.output || result.detail || 'Sem saída.'}</pre>
+                      <pre>{result.output || result.detail || t('hooks.noOutput')}</pre>
                     </details>
                   )}
                 </li>
@@ -257,20 +283,20 @@ export function HooksCard({ project }: { project: Project }) {
                 ]);
               }}
             >
-              <Plus size={15} /> Adicionar verificação
+              <Plus size={15} /> {t('hooks.add')}
             </button>
           )}
           <div className="setting-row">
             <div>
-              <strong>Corrigir automaticamente</strong>
-              <span>Se uma verificação falhar, pede uma correção ao agente uma vez, na mesma conversa.</span>
+              <strong>{t('hooks.autoFix')}</strong>
+              <span>{t('hooks.autoFixDetail')}</span>
             </div>
             <button
               type="button"
               className={`toggle ${autoFix ? 'on' : ''}`}
               role="switch"
               aria-checked={autoFix}
-              aria-label="Corrigir automaticamente"
+              aria-label={t('hooks.autoFix')}
               onClick={() => {
                 setSaved('');
                 setAutoFix((value) => !value);
@@ -280,7 +306,7 @@ export function HooksCard({ project }: { project: Project }) {
             </button>
           </div>
           <label className="hooks-blocked">
-            <span className="hooks-subtitle">Comandos bloqueados</span>
+            <span className="hooks-subtitle">{t('hooks.blocked')}</span>
             <textarea
               value={blocked}
               rows={4}
@@ -291,10 +317,7 @@ export function HooksCard({ project }: { project: Project }) {
               }}
               placeholder={'git push*\nrm -rf *'}
             />
-            <small>
-              Um padrão por linha (até {BLOCKED_COMMANDS_MAX}); <code>*</code> vale qualquer texto. O pedido de
-              aprovação de um comando que combine é negado, mesmo no modo automático. Só acrescenta restrições.
-            </small>
+            <small>{tRich('hooks.blockedHint', { max: BLOCKED_COMMANDS_MAX, star: <code>*</code> })}</small>
           </label>
           {error && (
             <div className="form-error" role="alert">
@@ -308,7 +331,7 @@ export function HooksCard({ project }: { project: Project }) {
           )}
           <div className="modal-actions">
             <button type="submit" className="primary-button" disabled={saving || !dirty}>
-              {saving && <LoaderCircle className="spin" size={15} />} Salvar verificações
+              {saving && <LoaderCircle className="spin" size={15} />} {t('hooks.save')}
             </button>
           </div>
         </form>

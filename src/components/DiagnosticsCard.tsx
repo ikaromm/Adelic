@@ -14,6 +14,7 @@ import { promptInstall, usePwa } from '../pwa/client';
 import { copyText } from '../Markdown';
 import type { UpdateChannel } from '../../shared/contracts';
 import { SelfUpdate } from './SelfUpdate';
+import { useI18n } from '../i18n';
 
 const field = (label: string, value: string | number | null | undefined) => (
   <div className="diagnostics-row" key={label}>
@@ -24,20 +25,17 @@ const field = (label: string, value: string | number | null | undefined) => (
 
 /** Installable app (docs/specs/pwa.md): the button appears only when the browser offers it. */
 function InstallRow() {
+  const { t } = useI18n();
   const { installable, standalone } = usePwa();
   return (
     <div className="setting-row">
       <div>
-        <strong>App no celular ou no computador</strong>
-        <span>
-          {standalone
-            ? 'O Adelic está aberto como app instalado.'
-            : 'No celular, a instalação exige HTTPS (por exemplo com tailscale serve); pelo IP em HTTP simples o navegador não oferece a opção.'}
-        </span>
+        <strong>{t('diagnostics.app')}</strong>
+        <span>{standalone ? t('diagnostics.appInstalled') : t('diagnostics.appHttps')}</span>
       </div>
       {installable && (
         <button type="button" className="secondary-button" onClick={() => void promptInstall()}>
-          <MonitorDown size={14} /> Instalar como app
+          <MonitorDown size={14} /> {t('diagnostics.install')}
         </button>
       )}
     </div>
@@ -56,6 +54,7 @@ export function DiagnosticsCard({
   updateChannel: UpdateChannel;
   onUpdateChannel: (channel: UpdateChannel) => void;
 }) {
+  const { t } = useI18n();
   const [update, setUpdate] = useState<UpdateInfo | null>(null);
   const [checking, setChecking] = useState(false);
   const checkNow = async () => {
@@ -89,13 +88,13 @@ export function DiagnosticsCard({
     if (await copyText(json)) {
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1500);
-    } else setError('Não foi possível copiar; use Baixar.');
+    } else setError(t('diagnostics.copyFailed'));
   };
   const download = () => {
     const url = URL.createObjectURL(new Blob([json], { type: 'application/json' }));
     const link = document.createElement('a');
     link.href = url;
-    link.download = `adelic-diagnostico-${report!.generatedAt.slice(0, 19).replace(/[:T]/g, '-')}.json`;
+    link.download = t('diagnostics.fileName', { date: report!.generatedAt.slice(0, 19).replace(/[:T]/g, '-') });
     link.click();
     URL.revokeObjectURL(url);
   };
@@ -106,23 +105,20 @@ export function DiagnosticsCard({
           <Stethoscope size={17} />
         </div>
         <div>
-          <h2 id="diagnostics-title">Diagnóstico</h2>
-          <p>Versões, caminhos e estado dos serviços para relatar problemas. Não inclui credenciais nem conversas.</p>
+          <h2 id="diagnostics-title">{t('diagnostics.title')}</h2>
+          <p>{t('diagnostics.detail')}</p>
         </div>
       </div>
       <div className="setting-row">
         <div>
-          <strong>Verificar novas versões</strong>
-          <span>
-            Consulta a última versão (release no GitHub ou, num checkout, o branch do canal) ao abrir o Adelic. Nunca
-            instala nada sem você pedir.
-          </span>
+          <strong>{t('diagnostics.updateCheck')}</strong>
+          <span>{t('diagnostics.updateCheckDetail')}</span>
         </div>
         <button
           className={`toggle ${updateCheck ? 'on' : ''}`}
           role="switch"
           aria-checked={updateCheck}
-          aria-label="Verificar novas versões"
+          aria-label={t('diagnostics.updateCheck')}
           onClick={() => onUpdateCheck(!updateCheck)}
         >
           <span />
@@ -130,7 +126,7 @@ export function DiagnosticsCard({
       </div>
       <div className="diagnostics-actions">
         <button type="button" className="secondary-button" onClick={() => void checkNow()} disabled={checking}>
-          {checking ? <LoaderCircle size={14} className="spin" /> : <RefreshCw size={14} />} Verificar agora
+          {checking ? <LoaderCircle size={14} className="spin" /> : <RefreshCw size={14} />} {t('diagnostics.checkNow')}
         </button>
       </div>
       {update && (
@@ -139,13 +135,13 @@ export function DiagnosticsCard({
             update.error
           ) : update.available ? (
             <>
-              Nova versão {update.latest} disponível (você usa {update.current}).{' '}
+              {t('diagnostics.newVersion', { latest: update.latest ?? '', current: update.current ?? '' })}{' '}
               <a href={update.url} target="_blank" rel="noreferrer">
-                Abrir a release <ExternalLink size={12} />
+                {t('diagnostics.openRelease')} <ExternalLink size={12} />
               </a>
             </>
           ) : (
-            `Você está na versão mais recente (${update.current}).`
+            t('diagnostics.upToDate', { current: update.current ?? '' })
           )}
         </p>
       )}
@@ -154,15 +150,16 @@ export function DiagnosticsCard({
       <div className="diagnostics-actions">
         <button type="button" className="secondary-button" onClick={() => void load()} disabled={busy}>
           {busy ? <LoaderCircle size={14} className="spin" /> : <Stethoscope size={14} />}
-          {report ? 'Atualizar diagnóstico' : 'Gerar diagnóstico'}
+          {report ? t('diagnostics.refresh') : t('diagnostics.generate')}
         </button>
         {report && (
           <>
             <button type="button" className="secondary-button" onClick={() => void copy()}>
-              {copied ? <Check size={14} /> : <ClipboardCopy size={14} />} {copied ? 'Copiado' : 'Copiar'}
+              {copied ? <Check size={14} /> : <ClipboardCopy size={14} />}{' '}
+              {copied ? t('diagnostics.copied') : t('diagnostics.copy')}
             </button>
             <button type="button" className="secondary-button" onClick={download}>
-              <Download size={14} /> Baixar JSON
+              <Download size={14} /> {t('diagnostics.download')}
             </button>
           </>
         )}
@@ -178,33 +175,57 @@ export function DiagnosticsCard({
             {field('Adelic', report.app.version)}
             {field('Node', report.app.node)}
             {field('Electron', report.app.electron)}
-            {field('Sistema', `${report.system.platform} ${report.system.arch} · ${report.system.kernel}`)}
-            {field('Dados', report.data.dir)}
-            {field('Esquema da base', `${report.data.schema.current} (suportado: ${report.data.schema.supported})`)}
             {field(
-              'Conteúdo',
-              `${report.data.counts.sessions} conversas · ${report.data.counts.messages} mensagens · ${report.data.counts.runs} execuções`,
+              t('diagnostics.system'),
+              `${report.system.platform} ${report.system.arch} · ${report.system.kernel}`,
+            )}
+            {field(t('diagnostics.data'), report.data.dir)}
+            {field(
+              t('diagnostics.schema'),
+              t('diagnostics.schemaValue', {
+                current: report.data.schema.current,
+                supported: report.data.schema.supported,
+              }),
             )}
             {field(
-              'Cópias da base',
+              t('diagnostics.content'),
+              t('diagnostics.contentValue', {
+                sessions: report.data.counts.sessions,
+                messages: report.data.counts.messages,
+                runs: report.data.counts.runs,
+              }),
+            )}
+            {field(
+              t('diagnostics.backups'),
               report.data.backups.length
-                ? `${report.data.backups.length} (mais recente ${report.data.backups[0].at.slice(0, 10)})`
-                : 'nenhuma',
+                ? t('diagnostics.backupsValue', {
+                    count: report.data.backups.length,
+                    date: report.data.backups[0].at.slice(0, 10),
+                  })
+                : t('diagnostics.none'),
             )}
-            {field('Bubblewrap', report.sandbox.bubblewrap ?? 'não encontrado')}
+            {field('Bubblewrap', report.sandbox.bubblewrap ?? t('diagnostics.notFound'))}
             {field(
               'ai-memory',
               report.memory.reachable
-                ? `${report.memory.version ?? 'versão desconhecida'} · ${report.memory.notes ?? '?'} notas · ${report.memory.url}`
-                : `indisponível em ${report.memory.url}`,
+                ? t('diagnostics.memoryValue', {
+                    version: report.memory.version ?? t('diagnostics.unknownVersion'),
+                    notes: report.memory.notes ?? '?',
+                    url: report.memory.url,
+                  })
+                : t('diagnostics.memoryDown', { url: report.memory.url }),
             )}
           </dl>
-          <h3>Agentes</h3>
+          <h3>{t('diagnostics.agents')}</h3>
           <dl>
             {report.providers.map((p) =>
               field(
                 p.id,
-                `${p.available ? 'disponível' : 'indisponível'} · ${p.models} modelos · ${p.version ?? 'versão desconhecida'}${p.binary ? ` · ${p.binary}` : ''}`,
+                t('diagnostics.providerValue', {
+                  status: p.available ? t('diagnostics.providerAvailable') : t('diagnostics.providerUnavailable'),
+                  models: p.models,
+                  version: p.version ?? t('diagnostics.unknownVersion'),
+                }) + (p.binary ? ` · ${p.binary}` : ''),
               ),
             )}
           </dl>

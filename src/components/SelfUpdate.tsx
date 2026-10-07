@@ -12,25 +12,14 @@ import {
 } from 'lucide-react';
 import type { SelfUpdateStatus, UpdateChannel, UpdateProgress } from '../../shared/contracts';
 import { api, type ApiError } from '../api';
+import { t, useI18n } from '../i18n';
 
-const KIND_LABEL: Record<SelfUpdateStatus['kind'], string> = {
-  checkout: 'checkout git (npm start)',
-  appimage: 'app desktop (AppImage)',
-  other: 'outra instalação',
-};
 const STEP_ICON = {
   pending: <span className="update-step-dot" aria-hidden="true" />,
   running: <LoaderCircle size={14} className="spin" aria-hidden="true" />,
   done: <Check size={14} aria-hidden="true" />,
   failed: <X size={14} aria-hidden="true" />,
   skipped: <span className="update-step-dot" aria-hidden="true" />,
-};
-const STEP_STATUS = {
-  pending: 'pendente',
-  running: 'em andamento',
-  done: 'concluído',
-  failed: 'falhou',
-  skipped: 'pulado',
 };
 const sleep = (ms: number) => new Promise((done) => window.setTimeout(done, ms));
 /** Set before the reload that follows a restart, so the card can say it worked. */
@@ -49,19 +38,24 @@ function takeUpdated() {
 function plan(status: SelfUpdateStatus) {
   if (status.kind === 'appimage' && status.release)
     return [
-      `Baixar o AppImage ${status.release.latest}${status.release.size ? ` (${Math.round(status.release.size / 1024 / 1024)} MB)` : ''} da release no GitHub`,
-      'Conferir o SHA-256 publicado na mesma release',
-      'Substituir o AppImage, guardando o atual como Adelic.AppImage.previous',
-      'Reiniciar o Adelic',
+      status.release.size
+        ? t('selfUpdate.plan.downloadSize', {
+            version: status.release.latest,
+            size: Math.round(status.release.size / 1024 / 1024),
+          })
+        : t('selfUpdate.plan.download', { version: status.release.latest }),
+      t('selfUpdate.plan.verify'),
+      t('selfUpdate.plan.replace'),
+      t('selfUpdate.plan.restartApp'),
     ];
   const c = status.checkout;
   if (!c) return [];
   return [
-    ...(c.switchTo ? [`Trocar para o branch ${c.switchTo}`] : []),
-    `Avançar para origin/${status.channel} (${c.behind} commit${c.behind === 1 ? '' : 's'}, só fast-forward)`,
-    ...(c.install ? ['Reinstalar as dependências (npm ci): o package-lock.json mudou'] : []),
-    'Compilar a interface (npm run build); a versão atual continua no ar até o build terminar',
-    'Reiniciar o servidor; execuções novas ficam bloqueadas até lá',
+    ...(c.switchTo ? [t('selfUpdate.plan.switch', { branch: c.switchTo })] : []),
+    t('selfUpdate.plan.merge', { channel: status.channel, count: c.behind }),
+    ...(c.install ? [t('selfUpdate.plan.install')] : []),
+    t('selfUpdate.plan.build'),
+    t('selfUpdate.plan.restartServer'),
   ];
 }
 
@@ -77,6 +71,7 @@ export function SelfUpdate({
   channel: UpdateChannel;
   onChannel: (channel: UpdateChannel) => void;
 }) {
+  const { t } = useI18n();
   const [status, setStatus] = useState<SelfUpdateStatus | null>(null);
   const [error, setError] = useState('');
   const [checking, setChecking] = useState(false);
@@ -104,29 +99,32 @@ export function SelfUpdate({
   }, [load, channel]);
 
   /** After the restart: wait for a new server process, then reload into the new version. */
-  const reconnect = useCallback(async (bootId: string) => {
-    setReconnecting(true);
-    const deadline = Date.now() + 180_000;
-    while (Date.now() < deadline) {
-      await sleep(1000);
-      try {
-        const next = await api.updateStatus();
-        if (next.bootId !== bootId) {
-          try {
-            sessionStorage.setItem(UPDATED_KEY, next.commit ?? next.version);
-          } catch {
-            /* Storage off: the reload alone still shows the new version. */
+  const reconnect = useCallback(
+    async (bootId: string) => {
+      setReconnecting(true);
+      const deadline = Date.now() + 180_000;
+      while (Date.now() < deadline) {
+        await sleep(1000);
+        try {
+          const next = await api.updateStatus();
+          if (next.bootId !== bootId) {
+            try {
+              sessionStorage.setItem(UPDATED_KEY, next.commit ?? next.version);
+            } catch {
+              /* Storage off: the reload alone still shows the new version. */
+            }
+            window.location.reload();
+            return;
           }
-          window.location.reload();
-          return;
+        } catch {
+          /* Down while it restarts. */
         }
-      } catch {
-        /* Down while it restarts. */
       }
-    }
-    setReconnecting(false);
-    setError('O Adelic não voltou em 3 minutos. Confira o processo e o arquivo self-update.log na pasta de dados.');
-  }, []);
+      setReconnecting(false);
+      setError(t('selfUpdate.noReturn'));
+    },
+    [t],
+  );
 
   const watch = useCallback(
     async (bootId: string) => {
@@ -193,8 +191,8 @@ export function SelfUpdate({
     return (
       <div className="setting-row">
         <div>
-          <strong>Atualizar Adelic</strong>
-          <span>Só pode ser feito neste computador, não pelo acesso remoto.</span>
+          <strong>{t('selfUpdate.title')}</strong>
+          <span>{t('selfUpdate.remoteOnly')}</span>
         </div>
       </div>
     );
@@ -204,37 +202,37 @@ export function SelfUpdate({
     <div className="self-update" aria-labelledby="self-update-title">
       <div className="setting-row">
         <div>
-          <strong id="self-update-title">Atualizar Adelic</strong>
+          <strong id="self-update-title">{t('selfUpdate.title')}</strong>
           <span>
-            Versão {current}
-            {status ? ` · ${KIND_LABEL[status.kind]}` : ''}
-            {c?.branch !== undefined ? ` · branch ${c.branch ?? '(sem branch)'}` : ''}
+            {t('selfUpdate.version', { version: current })}
+            {status ? ` · ${t(`selfUpdate.kind.${status.kind}`)}` : ''}
+            {c?.branch !== undefined ? t('selfUpdate.branch', { branch: c.branch ?? t('selfUpdate.noBranch') }) : ''}
           </span>
         </div>
         <button type="button" className="secondary-button" onClick={() => void check()} disabled={checking || running}>
-          {checking ? <LoaderCircle size={14} className="spin" /> : <RefreshCw size={14} />} Verificar atualizações
+          {checking ? <LoaderCircle size={14} className="spin" /> : <RefreshCw size={14} />} {t('selfUpdate.check')}
         </button>
       </div>
       {status?.kind === 'checkout' && (
         <div className="setting-row">
           <div>
-            <strong>Canal de atualização</strong>
-            <span>master é a versão estável; develop recebe as mudanças antes, como prévia.</span>
+            <strong>{t('selfUpdate.channel')}</strong>
+            <span>{t('selfUpdate.channelDetail')}</span>
           </div>
           <select
-            aria-label="Canal de atualização"
+            aria-label={t('selfUpdate.channel')}
             value={channel}
             disabled={running}
             onChange={(event) => onChannel(event.target.value as UpdateChannel)}
           >
-            <option value="master">master (estável)</option>
-            <option value="develop">develop (prévia)</option>
+            <option value="master">{t('selfUpdate.channel.master')}</option>
+            <option value="develop">{t('selfUpdate.channel.develop')}</option>
           </select>
         </div>
       )}
       {updated && (
         <p className="update-line" role="status">
-          <Check size={14} aria-hidden="true" /> Adelic atualizado e reiniciado ({updated}).
+          <Check size={14} aria-hidden="true" /> {t('selfUpdate.updated', { version: updated })}
         </p>
       )}
       {status && (
@@ -245,23 +243,27 @@ export function SelfUpdate({
               <ArrowUpCircle size={14} aria-hidden="true" />
               {status.kind === 'checkout' && c
                 ? c.switchTo
-                  ? `Trocar para ${c.switchTo}${c.behind ? ` e avançar ${c.behind} commit${c.behind === 1 ? '' : 's'}` : ''}.`
-                  : `${c.behind} commit${c.behind === 1 ? '' : 's'} novo${c.behind === 1 ? '' : 's'} em origin/${status.channel}.`
-                : `Nova versão ${status.release?.latest} disponível.`}
+                  ? c.behind
+                    ? t('selfUpdate.switchAndMerge', { branch: c.switchTo, count: c.behind })
+                    : t('selfUpdate.switchTo', { branch: c.switchTo })
+                  : t('selfUpdate.newCommits', { count: c.behind, channel: status.channel })
+                : t('selfUpdate.newVersion', { version: status.release?.latest ?? '' })}
             </p>
           ) : (
             status.checkedAt &&
             !status.error &&
-            !status.blocked && <p className="update-line">O Adelic está atualizado.</p>
+            !status.blocked && <p className="update-line">{t('selfUpdate.upToDate')}</p>
           )}
           {c && c.commits.length > 0 && (
-            <ul className="update-commits" aria-label="Commits da atualização">
+            <ul className="update-commits" aria-label={t('selfUpdate.commits')}>
               {c.commits.map((commit) => (
                 <li key={commit.hash}>
                   <code>{commit.hash}</code> {commit.subject}
                 </li>
               ))}
-              {c.behind > c.commits.length && <li className="update-more">e mais {c.behind - c.commits.length}…</li>}
+              {c.behind > c.commits.length && (
+                <li className="update-more">{t('selfUpdate.more', { count: c.behind - c.commits.length })}</li>
+              )}
             </ul>
           )}
           {status.blocked && (
@@ -272,7 +274,7 @@ export function SelfUpdate({
           <div className="diagnostics-actions">
             {status.canApply && !running && (
               <button type="button" className="primary-button" onClick={() => setConfirming(true)}>
-                <ArrowUpCircle size={14} /> Atualizar agora
+                <ArrowUpCircle size={14} /> {t('selfUpdate.apply')}
               </button>
             )}
             <a
@@ -281,7 +283,7 @@ export function SelfUpdate({
               target="_blank"
               rel="noreferrer"
             >
-              Página da release <ExternalLink size={12} />
+              {t('selfUpdate.releasePage')} <ExternalLink size={12} />
             </a>
           </div>
         </div>
@@ -293,34 +295,36 @@ export function SelfUpdate({
       )}
       {progress && progress.state !== 'idle' && (
         <div className="update-progress" aria-live="polite">
-          <ol aria-label="Etapas da atualização">
+          <ol aria-label={t('selfUpdate.steps')}>
             {progress.steps
               .filter((step) => step.status !== 'skipped')
               .map((step) => (
                 <li
                   key={step.id}
                   className={`update-step ${step.status}`}
-                  aria-label={`${step.label}: ${STEP_STATUS[step.status]}`}
+                  aria-label={t('selfUpdate.stepLabel', {
+                    step: t(`selfUpdate.step.${step.id}`),
+                    status: t(`selfUpdate.stepStatus.${step.status}`),
+                  })}
                 >
                   {STEP_ICON[step.status]}
-                  <span>{step.label}</span>
+                  <span>{t(`selfUpdate.step.${step.id}`)}</span>
                 </li>
               ))}
           </ol>
           {(progress.state === 'restarting' || reconnecting) && (
             <p className="update-line" role="status">
-              <RotateCw size={14} className="spin" aria-hidden="true" /> Reiniciando… a página recarrega quando o Adelic
-              voltar.
+              <RotateCw size={14} className="spin" aria-hidden="true" /> {t('selfUpdate.restarting')}
             </p>
           )}
           {progress.state === 'failed' && (
             <p className="update-line error-text" role="alert">
-              A atualização falhou: {progress.error}
+              {t('selfUpdate.failed', { error: progress.error ?? '' })}
             </p>
           )}
           {progress.log && (
             <details>
-              <summary>Saída</summary>
+              <summary>{t('selfUpdate.output')}</summary>
               <pre className="update-log">{progress.log}</pre>
             </details>
           )}
@@ -339,10 +343,15 @@ export function SelfUpdate({
                 {status.kind === 'checkout' ? <GitBranch size={17} /> : <ArrowUpCircle size={17} />}
               </div>
               <div>
-                <h2 id="update-confirm-title">Atualizar o Adelic?</h2>
-                <p>O servidor reinicia no fim; conversas e dados ficam como estão.</p>
+                <h2 id="update-confirm-title">{t('selfUpdate.confirm.title')}</h2>
+                <p>{t('selfUpdate.confirm.detail')}</p>
               </div>
-              <button type="button" className="icon-button" aria-label="Fechar" onClick={() => setConfirming(false)}>
+              <button
+                type="button"
+                className="icon-button"
+                aria-label={t('selfUpdate.confirm.close')}
+                onClick={() => setConfirming(false)}
+              >
                 <X size={17} />
               </button>
             </div>
@@ -360,15 +369,13 @@ export function SelfUpdate({
                 ))}
               </ul>
             )}
-            <p className="modal-note">
-              Se algo falhar antes do reinício, o Adelic volta ao estado atual e continua no ar.
-            </p>
+            <p className="modal-note">{t('selfUpdate.confirm.rollback')}</p>
             <div className="modal-actions">
               <button type="button" className="secondary-button" onClick={() => setConfirming(false)}>
-                Cancelar
+                {t('selfUpdate.confirm.cancel')}
               </button>
               <button type="button" className="primary-button" autoFocus onClick={() => void apply()}>
-                Atualizar e reiniciar
+                {t('selfUpdate.confirm.apply')}
               </button>
             </div>
           </div>

@@ -2,6 +2,8 @@ import { BookOpen, Pencil, Plus, Terminal, Trash2, X } from 'lucide-react';
 import { useCallback, useEffect, useId, useState, type FormEvent } from 'react';
 import {
   COMMAND_DESCRIPTION_MAX,
+  COMMAND_MESSAGES,
+  COMMAND_RESERVED,
   COMMAND_TEMPLATE_MAX,
   commandFieldsError,
   type CommandEntry,
@@ -10,14 +12,30 @@ import {
 } from '../../shared/commands';
 import type { Project } from '../../shared/contracts';
 import { api } from '../api';
+import { t, useI18n } from '../i18n';
 
-const sourceLabel: Record<CommandEntry['source'], string> = {
-  builtin: 'Embutido',
-  global: 'Global',
-  repo: 'Do repositório',
-  project: 'Do projeto',
-};
-const modeLabel: Record<CommandMode, string> = { fast: 'Rápido', balanced: 'Equilibrado', deep: 'Completo' };
+const sourceKey = {
+  builtin: 'commandsCard.source.builtin',
+  global: 'commandsCard.source.global',
+  repo: 'commandsCard.source.repo',
+  project: 'commandsCard.source.project',
+} as const satisfies Record<CommandEntry['source'], string>;
+const modeKey = {
+  fast: 'commandsCard.mode.fast',
+  balanced: 'commandsCard.mode.balanced',
+  deep: 'commandsCard.mode.deep',
+} as const satisfies Record<CommandMode, string>;
+
+/** commandFieldsError in the UI locale: the shared function returns the server's pt-BR text. */
+function fieldsError(fields: { name: string; description: string; template: string }) {
+  const problem = commandFieldsError(fields);
+  if (problem === COMMAND_MESSAGES.name) return t('commandsCard.error.name');
+  if (problem === COMMAND_RESERVED) return t('commandsCard.error.reserved');
+  if (problem === COMMAND_MESSAGES.description)
+    return t('commandsCard.error.description', { max: COMMAND_DESCRIPTION_MAX });
+  if (problem === COMMAND_MESSAGES.template) return t('commandsCard.error.template', { max: COMMAND_TEMPLATE_MAX });
+  return problem;
+}
 
 interface Draft {
   id?: string;
@@ -34,6 +52,7 @@ interface Draft {
  * edited and deleted; built-ins and repository files are listed read-only.
  */
 export function CommandsCard({ projects, project }: { projects: Project[]; project?: Project }) {
+  const { t, tRich } = useI18n();
   const [viewProject, setViewProject] = useState(project?.id ?? '');
   const [list, setList] = useState<CommandList | null>(null);
   const [loadError, setLoadError] = useState('');
@@ -73,7 +92,7 @@ export function CommandsCard({ projects, project }: { projects: Project[]; proje
   async function save(event: FormEvent) {
     event.preventDefault();
     if (!draft) return;
-    const problem = commandFieldsError(draft);
+    const problem = fieldsError(draft);
     if (problem) return setFormError(problem);
     setSaving(true);
     try {
@@ -102,7 +121,7 @@ export function CommandsCard({ projects, project }: { projects: Project[]; proje
       setLoadError((error as Error).message);
     }
   }
-  const scopeName = (id: string) => projects.find((p) => p.id === id)?.name ?? 'projeto';
+  const scopeName = (id: string) => projects.find((p) => p.id === id)?.name ?? t('commandsCard.projectFallback');
 
   return (
     <section className="settings-card commands-card" aria-labelledby={`${formId}-title`}>
@@ -111,27 +130,29 @@ export function CommandsCard({ projects, project }: { projects: Project[]; proje
           <Terminal size={17} />
         </div>
         <div>
-          <h2 id={`${formId}-title`}>Comandos</h2>
+          <h2 id={`${formId}-title`}>{t('commandsCard.title')}</h2>
           <p>
-            Digite <code>/nome</code> no início da mensagem. O texto depois do nome entra no lugar de{' '}
-            <code>{'{{args}}'}</code>. Ordem: projeto, repositório, global e embutido.
+            {tRich('commandsCard.detail', {
+              slash: <code>{t('commandsCard.slashName')}</code>,
+              args: <code>{'{{args}}'}</code>,
+            })}
           </p>
         </div>
       </div>
       <div className="setting-row">
         <div>
-          <strong>Ver comandos de</strong>
-          <span>Comandos do repositório vêm de .adelic/commands/*.md e só podem ser lidos aqui.</span>
+          <strong>{t('commandsCard.view')}</strong>
+          <span>{t('commandsCard.viewDetail')}</span>
         </div>
         <select
-          aria-label="Ver comandos de"
+          aria-label={t('commandsCard.view')}
           value={viewProject}
           onChange={(event) => {
             setViewProject(event.target.value);
             setDraft(null);
           }}
         >
-          <option value="">Somente globais</option>
+          <option value="">{t('commandsCard.globalOnly')}</option>
           {projects.map((p) => (
             <option key={p.id} value={p.id}>
               {p.name}
@@ -144,34 +165,34 @@ export function CommandsCard({ projects, project }: { projects: Project[]; proje
           {loadError}
         </div>
       )}
-      <ul className="commands-list" aria-label="Comandos disponíveis">
+      <ul className="commands-list" aria-label={t('commandsCard.list')}>
         {list?.commands.map((command) => (
           <li key={`${command.source}:${command.id}`} className={command.active ? undefined : 'shadowed'}>
             <div className="command-row-main">
               <strong>/{command.name}</strong>
-              <span className="command-badge">{sourceLabel[command.source]}</span>
-              {command.mode && <span className="command-badge">{modeLabel[command.mode]}</span>}
-              {!command.active && <span className="command-badge muted">Substituído</span>}
+              <span className="command-badge">{t(sourceKey[command.source])}</span>
+              {command.mode && <span className="command-badge">{t(modeKey[command.mode])}</span>}
+              {!command.active && <span className="command-badge muted">{t('commandsCard.shadowed')}</span>}
             </div>
             <span className="command-description">
-              {command.description || 'Sem descrição.'}
+              {command.description || t('commandsCard.noDescription')}
               {command.file && <> · {command.file}</>}
             </span>
             <div className="command-actions">
               {command.readOnly ? (
                 <details>
                   <summary>
-                    <BookOpen size={13} aria-hidden="true" /> Ver modelo
+                    <BookOpen size={13} aria-hidden="true" /> {t('commandsCard.viewTemplate')}
                   </summary>
                   <pre>{command.template}</pre>
                 </details>
               ) : confirmDelete === command.id ? (
                 <>
                   <button type="button" className="danger-button" onClick={() => void remove(command.id)}>
-                    Confirmar exclusão
+                    {t('commandsCard.confirmDelete')}
                   </button>
                   <button type="button" className="ghost-button" onClick={() => setConfirmDelete('')}>
-                    Manter
+                    {t('commandsCard.keep')}
                   </button>
                 </>
               ) : (
@@ -179,18 +200,18 @@ export function CommandsCard({ projects, project }: { projects: Project[]; proje
                   <button
                     type="button"
                     className="ghost-button"
-                    aria-label={`Editar /${command.name}`}
+                    aria-label={t('commandsCard.editLabel', { name: command.name })}
                     onClick={() => startEdit(command)}
                   >
-                    <Pencil size={13} /> Editar
+                    <Pencil size={13} /> {t('commandsCard.edit')}
                   </button>
                   <button
                     type="button"
                     className="ghost-button"
-                    aria-label={`Excluir /${command.name}`}
+                    aria-label={t('commandsCard.deleteLabel', { name: command.name })}
                     onClick={() => setConfirmDelete(command.id)}
                   >
-                    <Trash2 size={13} /> Excluir
+                    <Trash2 size={13} /> {t('commandsCard.delete')}
                   </button>
                 </>
               )}
@@ -200,7 +221,7 @@ export function CommandsCard({ projects, project }: { projects: Project[]; proje
       </ul>
       {list && list.issues.length > 0 && (
         <div className="command-issues" role="status">
-          <strong>Arquivos ignorados</strong>
+          <strong>{t('commandsCard.issues')}</strong>
           <ul>
             {list.issues.map((issue) => (
               <li key={issue.file}>
@@ -211,26 +232,35 @@ export function CommandsCard({ projects, project }: { projects: Project[]; proje
         </div>
       )}
       {draft ? (
-        <form className="command-form" onSubmit={save} aria-label={draft.id ? 'Editar comando' : 'Novo comando'}>
+        <form
+          className="command-form"
+          onSubmit={save}
+          aria-label={draft.id ? t('commandsCard.editForm') : t('commandsCard.new')}
+        >
           <div className="command-form-heading">
-            <strong>{draft.id ? `Editar /${draft.name}` : 'Novo comando'}</strong>
-            <button type="button" className="icon-button" aria-label="Fechar formulário" onClick={() => setDraft(null)}>
+            <strong>{draft.id ? t('commandsCard.editLabel', { name: draft.name }) : t('commandsCard.new')}</strong>
+            <button
+              type="button"
+              className="icon-button"
+              aria-label={t('commandsCard.closeForm')}
+              onClick={() => setDraft(null)}
+            >
               <X size={15} />
             </button>
           </div>
           <label>
-            Nome
+            {t('commandsCard.name')}
             <input
               value={draft.name}
               onChange={(e) => setDraft({ ...draft, name: e.target.value.toLowerCase() })}
-              placeholder="ex.: revisar-pr"
+              placeholder={t('commandsCard.namePlaceholder')}
               maxLength={32}
               spellCheck={false}
               autoFocus
             />
           </label>
           <label>
-            Descrição
+            {t('commandsCard.description')}
             <input
               value={draft.description}
               onChange={(e) => setDraft({ ...draft, description: e.target.value })}
@@ -238,13 +268,13 @@ export function CommandsCard({ projects, project }: { projects: Project[]; proje
             />
           </label>
           <label>
-            Modelo
+            {t('commandsCard.template')}
             <textarea
               value={draft.template}
               onChange={(e) => setDraft({ ...draft, template: e.target.value })}
               rows={5}
               maxLength={COMMAND_TEMPLATE_MAX}
-              placeholder="Revise {{args}} e aponte problemas concretos."
+              placeholder={t('commandsCard.templatePlaceholder')}
             />
             <small>
               {draft.template.length}/{COMMAND_TEMPLATE_MAX}
@@ -252,28 +282,28 @@ export function CommandsCard({ projects, project }: { projects: Project[]; proje
           </label>
           <div className="command-form-row">
             <label>
-              Modo nesta execução
+              {t('commandsCard.runMode')}
               <select
                 value={draft.mode}
                 onChange={(e) => setDraft({ ...draft, mode: e.target.value as Draft['mode'] })}
               >
-                <option value="">Modo da conversa</option>
-                <option value="fast">Rápido</option>
-                <option value="balanced">Equilibrado (Auto)</option>
-                <option value="deep">Completo</option>
+                <option value="">{t('commandsCard.conversationMode')}</option>
+                <option value="fast">{t('commandsCard.mode.fast')}</option>
+                <option value="balanced">{t('commandsCard.balancedAuto')}</option>
+                <option value="deep">{t('commandsCard.mode.deep')}</option>
               </select>
             </label>
             <label>
-              Escopo
+              {t('commandsCard.scope')}
               <select
                 value={draft.scope}
                 disabled={Boolean(draft.id)}
                 onChange={(e) => setDraft({ ...draft, scope: e.target.value })}
               >
-                <option value="">Global</option>
+                <option value="">{t('commandsCard.scopeGlobal')}</option>
                 {projects.map((p) => (
                   <option key={p.id} value={p.id}>
-                    Projeto: {p.name}
+                    {t('commandsCard.scopeProject', { name: p.name })}
                   </option>
                 ))}
               </select>
@@ -286,16 +316,20 @@ export function CommandsCard({ projects, project }: { projects: Project[]; proje
           )}
           <div className="modal-actions">
             <button type="button" className="secondary-button" onClick={() => setDraft(null)}>
-              Cancelar
+              {t('commandsCard.cancel')}
             </button>
             <button type="submit" className="primary-button" disabled={saving}>
-              {draft.id ? 'Salvar comando' : `Criar comando ${draft.scope ? `em ${scopeName(draft.scope)}` : 'global'}`}
+              {draft.id
+                ? t('commandsCard.save')
+                : draft.scope
+                  ? t('commandsCard.createIn', { project: scopeName(draft.scope) })
+                  : t('commandsCard.createGlobal')}
             </button>
           </div>
         </form>
       ) : (
         <button type="button" className="secondary-button" onClick={startNew}>
-          <Plus size={15} /> Novo comando
+          <Plus size={15} /> {t('commandsCard.new')}
         </button>
       )}
     </section>

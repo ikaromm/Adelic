@@ -170,6 +170,24 @@ export interface Message {
   firstTokenMs?: number;
   /** Files sent with a user message. */
   attachments?: AttachmentMeta[];
+  /**
+   * Provider handoff card (role 'system'): `content` is the summary carried to the new agent.
+   * Later runs see this summary plus the messages after it (docs/specs/provider-handoff.md).
+   */
+  handoff?: MessageHandoff;
+}
+export type HandoffSummaryMode = 'model' | 'local' | 'none';
+export interface MessageHandoff {
+  fromProviderId: ProviderId;
+  fromModel?: string;
+  fromName: string;
+  toProviderId: ProviderId;
+  toModel?: string;
+  toName: string;
+  /** 'model': written by the previous agent; 'local': built by Adelic from the last messages. */
+  source: 'model' | 'local';
+  /** Set when a model summary was requested but the local one was used, with the reason. */
+  fallback?: string;
 }
 export interface Run {
   id: string;

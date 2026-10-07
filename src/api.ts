@@ -5,6 +5,8 @@ import type {
   DelegatedTask,
   GraphifyQueryResult,
   GraphifyStatus,
+  HandoffSummaryMode,
+  Message,
   MemoryCatalog,
   MemoryHit,
   MemoryListing,
@@ -141,6 +143,12 @@ export const api = {
       model?: string | null;
     },
   ) => request<Session>(`/api/sessions/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  /** "Continuar com outro agente" (docs/specs/provider-handoff.md). */
+  handoff: (id: string, body: { providerId: string; model?: string; summary: HandoffSummaryMode }) =>
+    request<{ session: Session; message?: Message }>(`/api/sessions/${encodeURIComponent(id)}/handoff`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
   deleteSession: (id: string) => request<void>(`/api/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   send: (id: string, content: string, clientMessageId: string, attachmentIds: string[] = []) =>
     request<{ runId: string; messageId: string }>(`/api/sessions/${encodeURIComponent(id)}/messages`, {

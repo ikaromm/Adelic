@@ -21,12 +21,14 @@ import {
   Download,
   ListPlus,
   ClipboardList,
+  ArrowRightLeft,
 } from 'lucide-react';
 import type {
   AttachmentMeta,
   Bootstrap,
   GraphifyQueryResult,
   GraphifyStatus,
+  HandoffSummaryMode,
   Message,
   OrchestrationConfig,
   ProjectCoordination,
@@ -70,6 +72,7 @@ import { retryAlternatives } from '../shared/model-fallback';
 import { BranchOrigin, MessageEditActions, MessageEditor } from './components/EditBranch';
 import { useEditBranch } from './hooks/useEditBranch';
 import { SettingsPage } from './components/SettingsPage';
+import { HandoffDialog, type HandoffTarget } from './components/HandoffDialog';
 import { SIDEBAR_LIMIT, SessionItem, SidebarNav, UpdateNotice, type Page } from './components/Sidebar';
 
 type LocalStream = { runId: string; messageId: string; content: string };
@@ -95,6 +98,10 @@ export default function App() {
   const [projectQuery, setProjectQuery] = useState('');
   const [graphQueryResult, setGraphQueryResult] = useState<GraphifyQueryResult | null>(null);
   const [projectBusy, setProjectBusy] = useState(false);
+  // "Continuar com outro agente": open dialog (with the provider picked in the model menu, if any).
+  const [handoff, setHandoff] = useState<{ sessionId: string; target?: HandoffTarget } | null>(null);
+  const [handoffBusy, setHandoffBusy] = useState(false);
+  const [handoffError, setHandoffError] = useState('');
   const focusComposerRef = useRef(false);
   const [expandedLists, setExpandedLists] = useState<Record<string, boolean>>({});
   const now = useNow(60_000);
@@ -867,6 +874,51 @@ export default function App() {
     }
   }
 
+  function applySession(updated: Session) {
+    setDetail((current) =>
+      current?.session.id === updated.id ? { ...current, session: { ...current.session, ...updated } } : current,
+    );
+    setData((current) =>
+      current ? { ...current, sessions: current.sessions.map((s) => (s.id === updated.id ? updated : s)) } : current,
+    );
+  }
+
+  /** Opens the handoff dialog; `target` comes from the model menu (a different provider). */
+  function openHandoff(target?: HandoffTarget) {
+    if (!session || busy || session.activeRunId) return;
+    setHandoffError('');
+    setHandoff({ sessionId: session.id, ...(target ? { target } : {}) });
+  }
+
+  async function confirmHandoff(target: HandoffTarget, summary: HandoffSummaryMode) {
+    if (!handoff) return;
+    const sessionId = handoff.sessionId;
+    setHandoffBusy(true);
+    setBusy(true);
+    setHandoffError('');
+    try {
+      const result = await api.handoff(sessionId, { ...target, summary });
+      invalidateBootstrapRefreshes();
+      applySession(result.session);
+      const added = result.message;
+      if (added)
+        setDetail((current) =>
+          current?.session.id === sessionId && !current.messages.some((m) => m.id === added.id)
+            ? { ...current, messages: [...current.messages, added] }
+            : current,
+        );
+      setHandoff(null);
+      if (added?.handoff?.fallback && selectedSessionRef.current === sessionId)
+        setNotice(`Resumo gerado localmente: ${added.handoff.fallback}.`);
+      focusComposerRef.current = true;
+    } catch (error) {
+      setHandoffError((error as Error).message);
+    } finally {
+      setHandoffBusy(false);
+      setBusy(false);
+    }
+  }
+
   async function changeProjectOrchestration(projectId: string, patch: Partial<OrchestrationConfig>) {
     const previous = projectWriteRef.current.get(projectId) || Promise.resolve();
     const request = previous.then(async () => {
@@ -1272,6 +1324,18 @@ export default function App() {
           </div>
           <div className="topbar-right">
             {page === 'chat' && session && (
+              <button
+                type="button"
+                className="icon-button"
+                aria-label="Continuar com outro agente"
+                title="Continuar com outro agente"
+                disabled={busy || Boolean(session.activeRunId)}
+                onClick={() => openHandoff()}
+              >
+                <ArrowRightLeft size={16} />
+              </button>
+            )}
+            {page === 'chat' && session && (
               <a
                 className="icon-button"
                 href={`/api/sessions/${encodeURIComponent(session.id)}/export`}
@@ -1634,13 +1698,16 @@ export default function App() {
                           sessionId={session.id}
                           modelId={session.model}
                           disabled={busy || Boolean(session.activeRunId)}
-                          onChange={(providerId, model) =>
+                          onChange={(providerId, model) => {
+                            // A different agent in a conversation with messages asks about a summary first.
+                            if (providerId !== session.providerId && messages.some((m) => m.content.trim()))
+                              return openHandoff({ providerId, ...(model ? { model } : {}) });
                             void changeSession(
                               providerId === session.providerId
                                 ? { model: model || null }
                                 : { providerId, model: model || null },
-                            )
-                          }
+                            );
+                          }}
                         />
                         <ChoiceMenu
                           label="Thinking para próximas mensagens"
@@ -1870,6 +1937,18 @@ export default function App() {
           recents={palette.recents}
           onRun={palette.run}
           onClose={palette.close}
+        />
+      )}
+      {handoff && data && session?.id === handoff.sessionId && (
+        <HandoffDialog
+          providers={data.providers}
+          currentProviderId={session.providerId}
+          fixedTarget={handoff.target}
+          busy={handoffBusy}
+          error={handoffError}
+          onConfirm={(target, summary) => void confirmHandoff(target, summary)}
+          onCancelRunning={() => void api.cancel(handoff.sessionId).catch(() => undefined)}
+          onClose={() => setHandoff(null)}
         />
       )}
       {helpOpen && (

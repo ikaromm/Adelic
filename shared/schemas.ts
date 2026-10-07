@@ -97,6 +97,12 @@ export const PatchSessionSchema = z.object({
   thinking: optional(effort, 'thinking inválido'),
   planFirst: optional(z.boolean(), 'planFirst deve ser booleano'),
 });
+/** POST /api/sessions/:id/handoff (docs/specs/provider-handoff.md). */
+export const HandoffSchema = z.object({
+  providerId: required(ProviderIdSchema, 'providerId inválido'),
+  model: optional(text(120), 'model inválido'),
+  summary: required(z.enum(['model', 'local', 'none']), 'summary deve ser model, local ou none'),
+});
 
 export const AttachmentIdsSchema = z
   .array(z.string().regex(/^[0-9a-f-]{36}$/i))

@@ -1,7 +1,8 @@
-import type { ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 import {
   Activity,
   ArrowLeftRight,
+  ArrowRightLeft,
   ChevronDown,
   Code2,
   FileText,
@@ -59,6 +60,7 @@ export function MessageCard({
   /** Replaces a user message's bubble while it is being edited. */
   editor?: ReactNode;
 }) {
+  if (message.handoff) return <HandoffCard message={message} />;
   if (message.role === 'user')
     return (
       <div className={`message-row user-row ${editor ? 'editing' : ''}`.trim()}>
@@ -106,6 +108,56 @@ export function MessageCard({
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * "Passagem para <Agente>": the summary carried to the new provider (docs/specs/provider-handoff.md).
+ * Collapsed by default; the header says who wrote it and whether it is the local fallback.
+ */
+export function HandoffCard({ message }: { message: Message }) {
+  const [open, setOpen] = useState(false);
+  const handoff = message.handoff!;
+  const bodyId = `handoff-${message.id}`;
+  const source =
+    handoff.source === 'model'
+      ? `Resumo escrito por ${handoff.fromName}`
+      : handoff.fallback
+        ? `Resumo local: ${handoff.fallback}`
+        : 'Resumo local, sem chamada de modelo';
+  return (
+    <section className="message-row handoff-card" aria-label={`Passagem para ${handoff.toName}`}>
+      <button
+        type="button"
+        className="handoff-toggle"
+        aria-expanded={open}
+        aria-controls={bodyId}
+        onClick={() => setOpen((value) => !value)}
+      >
+        <span className="handoff-icon" aria-hidden="true">
+          <ArrowRightLeft size={14} />
+        </span>
+        <span className="handoff-heading">
+          <strong>
+            Passagem para {handoff.toName}
+            {handoff.toModel ? ` · ${handoff.toModel}` : ''}
+          </strong>
+          <small className={handoff.fallback ? 'handoff-fallback' : undefined}>
+            Resumo levado para {handoff.toName} · {source}
+          </small>
+        </span>
+        <time dateTime={message.createdAt}>{timeLabel(message.createdAt)}</time>
+        <ChevronDown size={14} className={open ? 'chevron open' : 'chevron'} aria-hidden="true" />
+      </button>
+      {open && (
+        <div className="handoff-body" id={bodyId}>
+          <Markdown>{message.content}</Markdown>
+          <div className="message-actions">
+            <CopyButton text={message.content} label="Copiar resumo" />
+          </div>
+        </div>
+      )}
+    </section>
   );
 }
 

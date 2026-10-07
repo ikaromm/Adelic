@@ -2564,3 +2564,89 @@
     max-width: 34%;
   }
 }
+/* Provider handoff (docs/specs/provider-handoff.md): the summary card and its dialog. */
+.handoff-card {
+  border: 1px solid color-mix(in srgb, var(--info) 35%, var(--border));
+  border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--info) 6%, var(--surface));
+}
+.handoff-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 0;
+  border-radius: inherit;
+  background: transparent;
+  color: var(--text-secondary);
+  text-align: left;
+}
+.handoff-toggle:hover {
+  background: var(--row-hover);
+}
+.handoff-toggle > time {
+  flex: none;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+}
+.handoff-toggle > .chevron {
+  flex: none;
+  color: var(--text-faint);
+  transition: transform var(--duration-fast) var(--ease);
+}
+.handoff-toggle > .chevron.open {
+  transform: rotate(180deg);
+}
+.handoff-icon {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: var(--radius-sm);
+  background: var(--info-soft);
+  color: var(--info);
+}
+.handoff-heading {
+  display: grid;
+  flex: 1;
+  gap: 2px;
+  min-width: 0;
+}
+.handoff-heading > strong {
+  color: var(--text);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.handoff-heading > small {
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  overflow-wrap: anywhere;
+}
+.handoff-heading > small.handoff-fallback {
+  color: var(--warning);
+}
+.handoff-body {
+  padding: 4px 14px 10px;
+  border-top: 1px solid var(--border-soft);
+}
+.handoff-options {
+  display: grid;
+  gap: 4px;
+  margin-bottom: 12px;
+}
+.handoff-options > .choice-option {
+  border: 1px solid var(--border);
+}
+.handoff-dialog .modal-note {
+  margin-top: 4px;
+}
+@media (max-width: 420px) {
+  .handoff-toggle > time {
+    display: none;
+  }
+}

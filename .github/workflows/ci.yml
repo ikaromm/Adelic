@@ -18,9 +18,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         with:
           # Same major as the development machine; package.json requires >=22.13.
           node-version: 26
@@ -74,9 +74,9 @@ jobs:
             sha256: acbf6ee84e744a9ab0a8e133a3eefbbb77811d6b4d0ca9a281e664358c1a1fc8
     name: ai-memory ${{ matrix.version }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         with:
           node-version: 26
           cache: npm
@@ -103,9 +103,9 @@ jobs:
     # 118 specs plus the Playwright browser install; 15 minutes was cut short on a slow runner.
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         with:
           node-version: 26
           cache: npm
@@ -131,7 +131,7 @@ jobs:
 
       - name: Upload report on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: playwright-report
           path: |
@@ -146,9 +146,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         with:
           node-version: 26
           cache: npm
@@ -169,7 +169,7 @@ jobs:
         run: xvfb-run --auto-servernum --server-args='-screen 0 1280x800x24' npm run desktop:smoke
 
       - name: Keep the AppImage for the distribution matrix
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: appimage
           path: release/Adelic-*-linux-x86_64.AppImage
@@ -200,14 +200,14 @@ jobs:
       # Electron's sandbox needs user namespaces inside the container.
       options: --security-opt seccomp=unconfined --security-opt apparmor=unconfined
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           sparse-checkout: |
             scripts/smoke-desktop.mjs
             package.json
           sparse-checkout-cone-mode: false
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           name: appimage
           path: release
@@ -246,7 +246,7 @@ jobs:
 
       - name: Smoke log
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: smoke-${{ strategy.job-index }}
           path: smoke.log

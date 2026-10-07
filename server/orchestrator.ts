@@ -26,6 +26,8 @@ import { attachmentMeta, IMAGES_UNSUPPORTED, loadRunAttachments } from './attach
 import { routeMessage, selectHistory, titleFromMessage } from './router.js';
 import { memoryContextFor } from './memory.js';
 import { expandMessage } from './commands.js';
+import { resolveMentions } from './mentions.js';
+import { parseMentions } from '../shared/mentions.js';
 import { Store } from './store.js';
 import {
   boundedCoordinatorContext,
@@ -330,6 +332,9 @@ export class Orchestrator {
         attachments,
         reserveProject,
         special,
+        // `@path` mentions come from what the user typed (or the task text), never from a
+        // command template, and are read when the run starts (docs/specs/mentions.md).
+        parseMentions(content),
       );
       reservation.result = { runId, messageId: userId };
       return reservation.result;
@@ -376,6 +381,7 @@ export class Orchestrator {
     attachments: StoredAttachment[] = [],
     mayWrite = false,
     special?: SpecialRun,
+    mentions: string[] = [],
   ) {
     let response = '',
       firstTokenAt: number | undefined;
@@ -433,6 +439,21 @@ export class Orchestrator {
         : '';
       const skillContext = special ? '' : applicableSkillContext(this.store, content, plan);
       const attached = await loadRunAttachments(this.store, attachments);
+      // Mentioned files join the inlined attachments, so every path (direct, coordinated,
+      // plan mode) receives them where it receives the attachments: in the prompt only.
+      if (mentions.length) {
+        const mentioned = await resolveMentions(project.path, mentions);
+        attached.text += mentioned.text;
+        if (mentioned.included.length)
+          this.publishEvent(
+            session.id,
+            run.id,
+            'status',
+            `${mentioned.included.length === 1 ? 'Arquivo mencionado incluído' : 'Arquivos mencionados incluídos'}: ${mentioned.included.join(', ')}`,
+          );
+        for (const ignored of mentioned.ignored)
+          this.publishEvent(session.id, run.id, 'status', `Menção ignorada: ${ignored.path} (${ignored.reason})`);
+      }
       const projectConfig = project.orchestration ?? { enabled: true, maxWorkers: 2, review: true };
       // Plan mode runs are one direct call: the plan already is the decomposition.
       if (projectConfig.enabled && !special) {

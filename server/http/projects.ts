@@ -1,7 +1,8 @@
 import { Router } from 'express';
 import { randomUUID } from 'node:crypto';
 import type { Project } from '../../shared/contracts.js';
-import { CreateProjectSchema, PatchProjectSchema, parseBody } from '../../shared/schemas.js';
+import { CreateProjectSchema, PatchProjectSchema, ProjectFilesQuerySchema, parseBody } from '../../shared/schemas.js';
+import { searchProjectFiles } from '../mentions.js';
 import { error, message } from './common.js';
 import { graphifyConfig, orchestrationConfig, projectPath } from './validation.js';
 import type { BackendContext } from './context.js';
@@ -42,6 +43,18 @@ export function projectsRoutes({ store, orchestrator }: BackendContext) {
     const result = orchestrator.coordination(req.params.id);
     if (!result) return error(res, 404, 'Projeto não encontrado');
     res.json(result);
+  });
+  // File autocomplete for `@` mentions (docs/specs/mentions.md): relative paths, ranked.
+  app.get('/api/projects/:id/files', async (req, res) => {
+    const project = store.getProject(req.params.id);
+    if (!project) return error(res, 404, 'Projeto não encontrado');
+    const query = parseBody(ProjectFilesQuerySchema, req.query, 'Parâmetros inválidos');
+    if (!query.ok) return error(res, 400, query.message);
+    try {
+      res.json(await searchProjectFiles(project.path, query.data.query, query.data.limit));
+    } catch (e) {
+      error(res, 409, `Não foi possível listar os arquivos do projeto: ${message(e)}`);
+    }
   });
   app.get('/api/tasks/:id', (req, res) => {
     const task = store.getTask(req.params.id);

@@ -17,6 +17,20 @@ import {
 import { useNow } from '../useNow';
 import { MessageAttachments } from './ComposerAttachments';
 import { RunChanges } from './RunChanges';
+import { mentionSegments } from '../../shared/mentions';
+
+/** User text with `@file` mentions shown as chips; the text itself is unchanged. */
+function UserText({ content }: { content: string }) {
+  return mentionSegments(content).map((segment, index) =>
+    segment.mention ? (
+      <span key={index} className="mention-chip" title={segment.mention}>
+        {segment.text}
+      </span>
+    ) : (
+      segment.text
+    ),
+  );
+}
 
 export function MessageCard({
   message,
@@ -32,7 +46,9 @@ export function MessageCard({
     return (
       <div className="message-row user-row">
         {message.attachments?.length ? <MessageAttachments attachments={message.attachments} /> : null}
-        <div className="user-bubble">{message.content}</div>
+        <div className="user-bubble">
+          <UserText content={message.content} />
+        </div>
         <div className="message-meta">
           <time dateTime={message.createdAt}>{timeLabel(message.createdAt)}</time>
           <CopyButton text={message.content} label="Copiar mensagem" />

@@ -92,7 +92,13 @@ function baseEnv(repo?: Repo, extra: Record<string, string> = {}) {
 function git(
   cwd: string,
   args: string[],
-  opts: { repo?: Repo; input?: string | Buffer; env?: Record<string, string>; maxBytes?: number } = {},
+  opts: {
+    repo?: Repo;
+    input?: string | Buffer;
+    env?: Record<string, string>;
+    maxBytes?: number;
+    timeoutMs?: number;
+  } = {},
 ): Promise<Buffer> {
   return new Promise((done, fail) => {
     const child = execFile(
@@ -102,7 +108,7 @@ function git(
         cwd,
         env: baseEnv(opts.repo, opts.env),
         encoding: 'buffer',
-        timeout: TIMEOUT_MS,
+        timeout: opts.timeoutMs ?? TIMEOUT_MS,
         maxBuffer: opts.maxBytes ?? 64 * 1024 * 1024,
         windowsHide: true,
       },
@@ -143,6 +149,26 @@ async function openRepo(path: string, requireToplevel: boolean): Promise<Repo | 
   if (requireToplevel && top !== root) return undefined;
   if (relative(top, root).startsWith('..')) return undefined;
   return { root, top, gitDir, format: format === 'sha256' ? 'sha256' : 'sha1' };
+}
+
+/**
+ * Tracked and non-ignored untracked files below `path` (relative to it, `/`-separated), with
+ * the same hardened git invocation as the checkpoints. Undefined when `path` is not inside a
+ * git work tree. Names that are not valid UTF-8 are dropped.
+ */
+export async function listGitFiles(
+  path: string,
+  opts: { timeoutMs?: number; maxBytes?: number } = {},
+): Promise<string[] | undefined> {
+  const repo = await openRepo(path, false);
+  if (!repo) return undefined;
+  // Run from the project folder: ls-files then lists only that subtree, relative to it.
+  const out = await git(repo.root, ['ls-files', '-z', '--cached', '--others', '--exclude-standard'], {
+    repo,
+    timeoutMs: opts.timeoutMs,
+    maxBytes: opts.maxBytes,
+  });
+  return [...new Set(nulSplit(out))].filter((p) => !p.includes('\uFFFD'));
 }
 
 /** C-style quoting understood by `--stdin-paths` (one path per line). */

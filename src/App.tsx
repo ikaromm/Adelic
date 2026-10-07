@@ -54,6 +54,8 @@ import { AttachButton, PendingAttachments } from './components/ComposerAttachmen
 import { composerKeyAction, useMessageQueue } from './hooks/useMessageQueue';
 import { useSlashCommands } from './hooks/useSlashCommands';
 import { CommandPopup } from './components/CommandPopup';
+import { useFileMentions } from './hooks/useFileMentions';
+import { MentionPopup } from './components/MentionPopup';
 import { MessageQueue } from './components/MessageQueue';
 import { usePlans } from './hooks/usePlans';
 import { PlanCard } from './components/PlanCard';
@@ -453,6 +455,14 @@ export default function App() {
   const attachments = useComposerAttachments(session?.id, setNotice);
   const slash = useSlashCommands(session?.projectId, composer, (value) =>
     setDrafts((current) => ({ ...current, [selectedSessionRef.current]: value })),
+  );
+  // `@file` mentions; never at the same time as the saved commands list.
+  const mentions = useFileMentions(
+    session?.projectId,
+    composer,
+    (value) => setDrafts((current) => ({ ...current, [selectedSessionRef.current]: value })),
+    composerRef,
+    slash.open,
   );
   useEffect(() => {
     if (!focusComposerRef.current || page !== 'chat') return;
@@ -1429,16 +1439,30 @@ export default function App() {
                         onHover={slash.setActiveIndex}
                       />
                     )}
+                    <MentionPopup
+                      id={mentions.listboxId}
+                      state={mentions.state}
+                      items={mentions.items}
+                      activeIndex={mentions.activeIndex}
+                      optionId={mentions.optionId}
+                      onSelect={mentions.select}
+                      onHover={mentions.setActiveIndex}
+                    />
                     <textarea
                       ref={composerRef}
                       className="composer-input"
                       value={composer}
-                      onChange={(event) => setDrafts((current) => ({ ...current, [session.id]: event.target.value }))}
+                      onChange={(event) => {
+                        mentions.trackCaret(event);
+                        setDrafts((current) => ({ ...current, [session.id]: event.target.value }));
+                      }}
+                      onSelect={mentions.trackCaret}
                       onPaste={attachments.onPaste}
-                      {...slash.inputProps}
+                      {...(mentions.open ? mentions.inputProps : slash.inputProps)}
                       onKeyDown={(event) => {
-                        // The open command list owns Enter, Tab, arrows and Escape.
+                        // An open list (commands or files) owns Enter, Tab, arrows and Escape.
                         if (slash.onKeyDown(event)) return;
+                        if (mentions.onKeyDown(event)) return;
                         const action = composerKeyAction(
                           { ...event, isComposing: event.nativeEvent.isComposing },
                           Boolean(session.activeRunId),

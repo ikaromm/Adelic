@@ -259,6 +259,12 @@ export const api = {
     }),
   skill: (id: string, enabled: boolean) =>
     request<Skill>(`/api/skills/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ enabled }) }),
+  /** Ranked project files for `@` mentions (relative paths). */
+  projectFiles: (projectId: string, query: string, limit = 50, signal?: AbortSignal) =>
+    request<{ files: string[]; truncated: boolean }>(
+      `/api/projects/${encodeURIComponent(projectId)}/files?${new URLSearchParams({ query, limit: String(limit) })}`,
+      { signal },
+    ),
   commands: (projectId?: string | null) =>
     request<CommandList>(`/api/commands${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ''}`),
   createCommand: (data: CommandInput & { projectId: string | null }) =>

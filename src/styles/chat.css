@@ -2390,3 +2390,47 @@
   line-height: 1.4;
   overflow-wrap: anywhere;
 }
+
+/* `@file` mentions: suggestions above the composer and chips in the user bubble. */
+.mention-popup > li {
+  align-items: center;
+}
+.mention-popup-path {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 8px;
+}
+.mention-popup-base {
+  flex: none;
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mention-popup-dir {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mention-popup-status {
+  padding: 10px 12px;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+.mention-chip {
+  padding: 0 4px;
+  border: 1px solid var(--user-bubble-border);
+  border-radius: var(--radius-xs);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}

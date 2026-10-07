@@ -1236,7 +1236,12 @@ rl.on('line', (line) => {
     const provider = fixtureCodex(binary);
     const controller = new AbortController();
     const running = provider.run(runInput('wait for cancellation'), () => undefined, controller.signal);
-    await new Promise((resolve) => setTimeout(resolve, 40));
+    // Abort only once the turn is registered: earlier, setup (thread/start, MCP checks) is
+    // still running and an abort there rejects instead of interrupting a turn. A fixed delay
+    // was too short on slower CI runners.
+    const turns = (provider as unknown as { turns: Map<string, unknown> }).turns;
+    for (let i = 0; i < 250 && !turns.size; i++) await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(turns.size).toBe(1);
     controller.abort();
     await expect(running).resolves.toMatchObject({ stopReason: 'cancelled' });
     await provider.shutdown();

@@ -227,6 +227,12 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ confirm: true }),
     }),
+  /** Repeats a finished run's request; with a target, switches the conversation to it first. */
+  retryRun: (id: string, target: { providerId?: string; model?: string } = {}) =>
+    request<{ runId: string; messageId: string; session: Session }>(`/api/runs/${encodeURIComponent(id)}/retry`, {
+      method: 'POST',
+      body: JSON.stringify(target),
+    }),
   approve: (id: string, decision: 'approve' | 'deny') =>
     request<void>(`/api/approvals/${encodeURIComponent(id)}`, { method: 'POST', body: JSON.stringify({ decision }) }),
   settings: (data: Partial<Settings>) =>

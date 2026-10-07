@@ -6,9 +6,11 @@ import type {
   DelegatedTask,
   Message,
   MessageQueue,
+  ModelRef,
   Project,
   QueuedMessage,
   ProviderEvent,
+  ProviderId,
   ProviderInfo,
   ProviderRegistry,
   Run,
@@ -44,11 +46,15 @@ import { adaptEffort, supportsEffort } from '../shared/reasoning.js';
 import {
   DEFAULT_RETRY,
   classifyFailure,
+  isCapacityKind,
+  retryInfo,
   withRetry,
-  type EffectTracker,
+  EffectTracker,
+  type RetryInfo,
   type RetryPolicy,
   type RetryProgress,
 } from './retry.js';
+import { availableModel, modelLabel, resolvedModel, sameModel } from '../shared/model-fallback.js';
 import { CheckpointError, checkpointAfter, checkpointBefore, restoreCheckpoint } from './checkpoints.js';
 import { buildPlanningPrompt, planCommand } from './plan-markdown.js';
 import { Plans } from './plans.js';
@@ -285,6 +291,7 @@ export class Orchestrator {
         id: runId,
         sessionId: session.id,
         providerId: session.providerId,
+        ...(session.model ? { model: session.model } : {}),
         status: 'running',
         route: plan,
         startedAt: now,
@@ -517,9 +524,11 @@ export class Orchestrator {
       this.store.updateMessage(assistant);
       this.emit({ type: 'run', run });
       this.emit({ type: 'message', message: assistant });
-      const performOnce = (effects: EffectTracker) =>
+      // `fallback`: an attempt with another model for this run only (Settings.modelFallback);
+      // its native session must not replace the conversation's.
+      const performOnce = (effects: EffectTracker, input: RunInput = directInput, fallback = false) =>
         this.providers.run(
-          directInput,
+          input,
           (event: ProviderEvent) => {
             if (event.type === 'delta' || event.type === 'tool' || event.type === 'approval')
               effects.note(event.type === 'delta' ? 'text' : event.type);
@@ -567,6 +576,7 @@ export class Orchestrator {
               this.emit({ type: 'approval', approval: a });
               this.publishEvent(session.id, run.id, 'approval', a.title, { status: a.status });
             } else if (event.type === 'session') {
+              if (fallback) return;
               session.nativeSessionId = event.nativeSessionId;
               this.store.putSession(session);
               this.emit({ type: 'session', session });
@@ -578,13 +588,39 @@ export class Orchestrator {
           },
           controller.signal,
         );
-      // Retries only while nothing was shown or executed; see server/retry.ts.
+      // Retries only while nothing was shown or executed; see server/retry.ts. Then, when the
+      // model stays overloaded, the configured fallback models (one attempt each).
       const perform = () =>
-        withRetry(performOnce, {
-          policy: this.retryPolicy(settings),
-          signal: controller.signal,
-          onRetry: (progress) => this.noteRetry(session.id, run, progress),
-        });
+        this.withModelFallback(
+          () =>
+            withRetry((effects) => performOnce(effects), {
+              policy: this.retryPolicy(settings),
+              signal: controller.signal,
+              onRetry: (progress) => this.noteRetry(session.id, run, progress),
+            }),
+          {
+            sessionId: session.id,
+            run,
+            settings,
+            catalog: providerCatalog,
+            signal: controller.signal,
+            current: { providerId: session.providerId, model: session.model },
+            input: directInput,
+          },
+          (target, effects) => {
+            // Another provider cannot resume this conversation's native session: no
+            // nativeSessionId, and the history already travels in the prompt (boundedPrompt).
+            const input = this.applyThinking(
+              { ...directInput, providerId: target.providerId, model: target.model, nativeSessionId: undefined },
+              session.thinking,
+              providerCatalog,
+            );
+            assistant.providerId = target.providerId;
+            this.store.updateMessage(assistant);
+            this.emit({ type: 'message', message: assistant });
+            return performOnce(effects, input, true);
+          },
+        );
       const result =
         plan.tools && settings.sandbox === 'workspace-write'
           ? await this.withProjectWrite(project.id, perform)
@@ -786,59 +822,93 @@ export class Orchestrator {
       }
       const startOutput = task.output || '',
         startContent = assistant.content;
-      const result = await withRetry(
-        (effects) => {
-          // A retried attempt starts from the state before the failed one.
-          task.output = startOutput;
-          if (streamDirect) assistant.content = startContent;
-          return this.providers.run(
-            effectiveInput,
-            (event: ProviderEvent) => {
-              if (event.type === 'delta' || event.type === 'tool' || event.type === 'approval')
-                effects.note(event.type === 'delta' ? 'text' : event.type);
-              if (event.type === 'approval') {
-                const owned: Approval = { ...event.approval, runId: run.id, sessionId: session.id };
-                this.store.putApproval(owned);
-                this.emit({ type: 'approval', approval: owned });
-                this.publishEvent(session.id, run.id, 'approval', owned.title, { status: owned.status });
-              } else if (event.type === 'delta') {
-                task.output = (task.output || '') + event.text;
-                this.store.putTask(task);
-                if (streamDirect) {
-                  if (!assistant.firstTokenMs) {
-                    run.firstTokenMs = Date.now() - Date.parse(run.startedAt);
-                    assistant.firstTokenMs = run.firstTokenMs;
-                  }
-                  assistant.content += event.text;
-                  this.store.updateMessage(assistant);
-                  this.emit({
-                    type: 'delta',
-                    sessionId: session.id,
-                    runId: run.id,
-                    messageId: assistant.id,
-                    text: event.text,
-                  });
+      const attempt = (effects: EffectTracker, attemptInput: RunInput) => {
+        // A retried attempt starts from the state before the failed one.
+        task.output = startOutput;
+        if (streamDirect) assistant.content = startContent;
+        return this.providers.run(
+          attemptInput,
+          (event: ProviderEvent) => {
+            if (event.type === 'delta' || event.type === 'tool' || event.type === 'approval')
+              effects.note(event.type === 'delta' ? 'text' : event.type);
+            if (event.type === 'approval') {
+              const owned: Approval = { ...event.approval, runId: run.id, sessionId: session.id };
+              this.store.putApproval(owned);
+              this.emit({ type: 'approval', approval: owned });
+              this.publishEvent(session.id, run.id, 'approval', owned.title, { status: owned.status });
+            } else if (event.type === 'delta') {
+              task.output = (task.output || '') + event.text;
+              this.store.putTask(task);
+              if (streamDirect) {
+                if (!assistant.firstTokenMs) {
+                  run.firstTokenMs = Date.now() - Date.parse(run.startedAt);
+                  assistant.firstTokenMs = run.firstTokenMs;
                 }
-              } else if (event.type === 'status') this.publishEvent(session.id, run.id, 'status', event.text);
-              else if (event.type === 'tool')
-                this.publishEvent(session.id, run.id, 'tool', event.description, {
-                  toolName: event.name,
-                  status: event.status,
-                  ...(event.toolCallId ? { toolCallId: `${input.runId}:${event.toolCallId}` } : {}),
+                assistant.content += event.text;
+                this.store.updateMessage(assistant);
+                this.emit({
+                  type: 'delta',
+                  sessionId: session.id,
+                  runId: run.id,
+                  messageId: assistant.id,
+                  text: event.text,
                 });
-              else if (event.type === 'usage') {
-                eventInput = event.inputTokens ?? eventInput;
-                eventOutput = event.outputTokens ?? eventOutput;
-                eventCost = event.costUsd ?? eventCost;
               }
-            },
-            controller.signal,
-          );
-        },
+            } else if (event.type === 'status') this.publishEvent(session.id, run.id, 'status', event.text);
+            else if (event.type === 'tool')
+              this.publishEvent(session.id, run.id, 'tool', event.description, {
+                toolName: event.name,
+                status: event.status,
+                ...(event.toolCallId ? { toolCallId: `${input.runId}:${event.toolCallId}` } : {}),
+              });
+            else if (event.type === 'usage') {
+              eventInput = event.inputTokens ?? eventInput;
+              eventOutput = event.outputTokens ?? eventOutput;
+              eventCost = event.costUsd ?? eventCost;
+            }
+          },
+          controller.signal,
+        );
+      };
+      const result = await this.withModelFallback(
+        () =>
+          withRetry((effects) => attempt(effects, effectiveInput), {
+            policy: this.retryPolicy(settings),
+            signal: controller.signal,
+            onRetry: (progress) => this.noteRetry(session.id, run, progress, task.title),
+          }),
         {
-          policy: this.retryPolicy(settings),
+          sessionId: session.id,
+          run,
+          settings,
+          catalog,
           signal: controller.signal,
-          onRetry: (progress) => this.noteRetry(session.id, run, progress, task.title),
+          current: { providerId: input.providerId, model: input.model },
+          input: effectiveInput,
+          taskTitle: task.title,
+        },
+        (target, effects) => {
+          // Delegated calls never resume a native session; their history is in the prompt.
+          const switched = this.applyThinking(
+            {
+              ...effectiveInput,
+              providerId: target.providerId,
+              model: target.model,
+              plan: { ...effectiveInput.plan, effort: input.plan.effort },
+            },
+            session.thinking,
+            catalog,
+          );
+          task.providerId = target.providerId;
+          task.model = target.model;
+          task.effort = switched.plan.effort;
+          emitTask(task);
+          if (streamDirect && assistant.providerId !== target.providerId) {
+            assistant.providerId = target.providerId;
+            this.store.updateMessage(assistant);
+            this.emit({ type: 'message', message: assistant });
+          }
+          return attempt(effects, switched);
         },
       );
       const inputTokens = eventInput ?? result.inputTokens,
@@ -1571,6 +1641,168 @@ export class Orchestrator {
     this.drains.set(sessionId, tracked);
     return tracked;
   }
+  /**
+   * Automatic model fallback (Settings.modelFallback, docs/specs/retries.md). Runs `primary`
+   * (the usual call with its automatic retries); when it ends overloaded or rate limited with
+   * the retries exhausted and no visible effect, tries each configured model once, in order,
+   * with the same safety rule. Only this run changes: the conversation keeps its model.
+   */
+  private async withModelFallback<T>(
+    primary: () => Promise<T>,
+    context: {
+      sessionId: string;
+      run: Run;
+      settings: Settings;
+      catalog: ProviderInfo[];
+      signal: AbortSignal;
+      current: ModelRef;
+      input: Pick<RunInput, 'plan' | 'attachments'>;
+      taskTitle?: string;
+    },
+    attempt: (target: Required<ModelRef>, effects: EffectTracker) => Promise<T>,
+  ): Promise<T> {
+    try {
+      return await primary();
+    } catch (error) {
+      const config = context.settings.modelFallback;
+      if (!config?.enabled || !config.models.length || !fallbackAllowed(error, context.signal)) throw error;
+      let last = error;
+      let from = context.current;
+      const tried: ModelRef[] = [context.current];
+      for (const target of config.models) {
+        if (context.signal.aborted) throw last;
+        if (tried.some((ref) => sameModel(context.catalog, ref, target))) continue;
+        if (!this.fallbackUsable(context.catalog, target, context.input)) continue;
+        tried.push(target);
+        const { kind, reason } = classifyFailure(last);
+        const label = reason.charAt(0).toUpperCase() + reason.slice(1);
+        const fromLabel = modelLabel(context.catalog, from),
+          toLabel = modelLabel(context.catalog, target);
+        context.run.fallback = {
+          from: context.run.fallback?.from ?? {
+            providerId: from.providerId,
+            model: resolvedModel(
+              context.catalog.find((p) => p.id === from.providerId),
+              from.model,
+            ),
+          },
+          to: { providerId: target.providerId, model: target.model },
+          reason,
+        };
+        this.store.putRun(context.run);
+        this.emit({ type: 'run', run: context.run });
+        this.publishEvent(
+          context.sessionId,
+          context.run.id,
+          'fallback',
+          `${label}: trocado de ${fromLabel} para ${toLabel}${context.taskTitle ? ` (${context.taskTitle})` : ''}`,
+          { error: errorText(last).slice(0, 300), status: kind },
+        );
+        const effects = new EffectTracker();
+        try {
+          return await attempt(target, effects);
+        } catch (next) {
+          if (context.signal.aborted) throw next;
+          const classified = classifyFailure(next);
+          if (next instanceof Error)
+            (next as Error & { retry?: RetryInfo }).retry = {
+              ...classified,
+              attempts: 1,
+              retryable: classified.kind !== 'permanent',
+              exhausted: true,
+              hadEffects: effects.any,
+              ...(effects.any
+                ? { why: `não repetido automaticamente: ${effects.describe()}` }
+                : isCapacityKind(classified.kind)
+                  ? { why: `também sobrecarregado depois da troca de modelo` }
+                  : {}),
+            };
+          last = next;
+          if (!fallbackAllowed(next, context.signal)) throw next;
+          from = target;
+        }
+      }
+      throw last;
+    }
+  }
+  /** A fallback target must be available, known and able to run this request. */
+  private fallbackUsable(
+    catalog: ProviderInfo[],
+    target: Required<ModelRef>,
+    input: Pick<RunInput, 'plan' | 'attachments'>,
+  ) {
+    if (
+      !availableModel(catalog, target) ||
+      !resolvedModel(
+        catalog.find((p) => p.id === target.providerId),
+        target.model,
+      )
+    )
+      return false;
+    const caps = catalog.find((p) => p.id === target.providerId)!.capabilities;
+    if (input.plan.tools && !caps.tools) return false;
+    if (input.plan.level === 'fast' && !caps.fast) return false;
+    if (input.attachments?.length && !caps.images) return false;
+    return true;
+  }
+  /**
+   * "Tentar de novo" / "Tentar com outro modelo" (POST /api/runs/:id/retry): sends the run's
+   * request again as a new run. With a provider or model, the conversation switches to it first,
+   * like PATCH /api/sessions/:id (no native session, thinking kept only when supported), and the
+   * switch is undone when the new run cannot start.
+   */
+  async retryRun(runId: string, target: { providerId?: ProviderId; model?: string } = {}) {
+    const run = this.store.getRun(runId);
+    if (!run) throw Object.assign(new Error('Execução não encontrada'), { status: 404 });
+    const session = this.requireSession(run.sessionId);
+    if (run.status === 'running' || session.activeRunId || this.isActive(session.id))
+      throw Object.assign(new Error('Já existe uma execução ativa nesta conversa'), { status: 409 });
+    if (run.plan?.kind === 'task')
+      throw Object.assign(new Error('Tarefas de um plano são repetidas pelo cartão do plano'), { status: 409 });
+    const request = this.store.listMessages(session.id).find((m) => m.runId === run.id && m.role === 'user');
+    if (!request) throw Object.assign(new Error('Pedido desta execução não encontrado'), { status: 404 });
+    const attachments = (request.attachments ?? []).map((meta) => {
+      const stored = this.store.getAttachment(meta.id);
+      if (!stored || stored.sessionId !== session.id)
+        throw Object.assign(new Error(`Anexo “${meta.name}” não está mais disponível`), { status: 400 });
+      return stored;
+    });
+    const previous = structuredClone(session);
+    let next = session;
+    if (target.providerId !== undefined || target.model !== undefined) {
+      const providerId = target.providerId ?? session.providerId;
+      const catalog = await this.providerList();
+      const provider = catalog.find((p) => p.id === providerId);
+      if (!provider?.available)
+        throw Object.assign(new Error(provider?.detail || 'Provedor indisponível'), { status: 400 });
+      if (target.model && !provider.models.some((m) => m.id === target.model))
+        throw Object.assign(new Error('Modelo não anunciado para este provedor'), { status: 400 });
+      const model = target.model ?? (providerId === session.providerId ? session.model : undefined);
+      const latest = this.requireSession(session.id);
+      if (latest.activeRunId || this.isActive(latest.id) || JSON.stringify(latest) !== JSON.stringify(previous))
+        throw Object.assign(new Error('A conversa mudou durante a troca de modelo'), { status: 409 });
+      next = { ...latest, providerId, model, updatedAt: new Date().toISOString() };
+      if (!model) delete next.model;
+      if (next.thinking && next.thinking !== 'auto' && !supportsEffort(provider, model, next.thinking))
+        next.thinking = 'auto';
+      if (providerId !== previous.providerId || model !== previous.model) delete next.nativeSessionId;
+      this.store.putSession(next);
+      this.emit({ type: 'session', session: next });
+    }
+    try {
+      const started = await this.start(next, request.content, undefined, attachments);
+      return { ...started, session: this.store.getSession(session.id) ?? next };
+    } catch (error) {
+      if (next !== session) {
+        const current = this.store.getSession(session.id);
+        if (current && !current.activeRunId && JSON.stringify(current) === JSON.stringify(next)) {
+          this.store.putSession(previous);
+          this.emit({ type: 'session', session: previous });
+        }
+      }
+      throw error;
+    }
+  }
   private retryPolicy(settings: Settings): RetryPolicy {
     const retries = settings.autoRetry === false ? 0 : DEFAULT_RETRY.retries;
     return { ...DEFAULT_RETRY, ...this.retryOverrides, retries: this.retryOverrides?.retries ?? retries };
@@ -1612,9 +1844,15 @@ function realPath(path: string) {
 function overlaps(a: string, b: string) {
   return a === b || a.startsWith(b + sep) || b.startsWith(a + sep);
 }
+/** The model fallback follows only an overloaded or rate limited attempt that is safe to repeat. */
+function fallbackAllowed(error: unknown, signal: AbortSignal) {
+  if (signal.aborted) return false;
+  const retry = retryInfo(error);
+  return Boolean(retry && isCapacityKind(retry.kind) && retry.exhausted && !retry.hadEffects);
+}
 /** Failure details for the UI: from withRetry when it ran, else classified here. */
 function failureOf(e: unknown): Run['failure'] {
-  const retry = (e as { retry?: Run['failure'] } | null)?.retry;
+  const retry = retryInfo(e);
   if (retry)
     return {
       kind: retry.kind,

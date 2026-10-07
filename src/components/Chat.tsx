@@ -1,6 +1,17 @@
 import type { ReactNode } from 'react';
-import { Activity, ChevronDown, Code2, FileText, LoaderCircle, RotateCcw, Sparkles, X } from 'lucide-react';
-import type { Bootstrap, DelegatedTask, Message, Run, SessionDetail } from '../../shared/contracts';
+import {
+  Activity,
+  ArrowLeftRight,
+  ChevronDown,
+  Code2,
+  FileText,
+  LoaderCircle,
+  RotateCcw,
+  Sparkles,
+  X,
+} from 'lucide-react';
+import type { Bootstrap, DelegatedTask, Message, ModelRef, Run, SessionDetail } from '../../shared/contracts';
+import { isCapacityFailure } from '../../shared/model-fallback';
 import { CopyButton, Markdown } from '../Markdown';
 import { formatCost, formatDuration, formatTokens } from '../format';
 import { taskRoleName, taskStatusName, timeLabel } from '../labels';
@@ -146,6 +157,7 @@ export function RunActivityPanel({
     !running && activity.retries.length
       ? `${activity.retries.length} ${activity.retries.length === 1 ? 'nova tentativa' : 'novas tentativas'}`
       : '',
+    activity.fallbacks.length ? 'modelo trocado' : '',
     activity.tasks.length ? `${activity.tasks.length} ${activity.tasks.length === 1 ? 'tarefa' : 'tarefas'}` : '',
     activity.actions.length ? `${activity.actions.length} ${activity.actions.length === 1 ? 'ação' : 'ações'}` : '',
     !running && totalTokens ? `${totalTokens} tokens` : '',
@@ -242,6 +254,13 @@ export function RunActivityPanel({
                 </div>
               ),
             )}
+            {activity.fallbacks.map((event) => (
+              <div className="activity-event fallback" key={event.id} title={event.error}>
+                <ArrowLeftRight size={13} aria-hidden="true" />
+                <span>{event.text}</span>
+                <time>{timeLabel(event.createdAt)}</time>
+              </div>
+            ))}
             {activity.retries.map((event) => (
               <div className="activity-event retry" key={event.id} title={event.error}>
                 <RotateCcw size={13} aria-hidden="true" />
@@ -276,9 +295,26 @@ export function RunActivityPanel({
   );
 }
 
-/** Shown under a failed answer: why it failed, whether retrying may help, and a button. */
-export function RetryNotice({ run, disabled, onRetry }: { run?: Run; disabled: boolean; onRetry: () => void }) {
+/**
+ * Shown under a failed answer: why it failed, whether retrying may help, and a button. When the
+ * model was overloaded or rate limited it also offers up to three other models.
+ */
+export function RetryNotice({
+  run,
+  disabled,
+  onRetry,
+  alternatives = [],
+  onSwitch,
+}: {
+  run?: Run;
+  disabled: boolean;
+  onRetry: () => void;
+  /** Other models to try, with their labels ("Codex · GPT-6 Luna"). */
+  alternatives?: { ref: Required<ModelRef>; label: string }[];
+  onSwitch?: (target: Required<ModelRef>) => void;
+}) {
   const failure = run?.failure;
+  const offerSwitch = Boolean(onSwitch && alternatives.length && isCapacityFailure(failure));
   const retries = run?.retries ?? 0;
   const detail = [
     failure?.reason && `Motivo: ${failure.reason}`,
@@ -295,9 +331,32 @@ export function RetryNotice({ run, disabled, onRetry }: { run?: Run; disabled: b
           : 'Falha temporária. Você pode tentar de novo.'}
         {detail && <small>{detail}</small>}
       </span>
-      <button type="button" className="secondary-button" onClick={onRetry} disabled={disabled}>
-        <RotateCcw size={14} /> Tentar de novo
-      </button>
+      <div className="retry-actions">
+        <button type="button" className="secondary-button" onClick={onRetry} disabled={disabled}>
+          <RotateCcw size={14} /> Tentar de novo
+        </button>
+        {offerSwitch && (
+          <details className="retry-switch">
+            <summary className="secondary-button" aria-disabled={disabled}>
+              <ArrowLeftRight size={14} /> Tentar com outro modelo
+            </summary>
+            <ul aria-label="Outros modelos">
+              {alternatives.map((item) => (
+                <li key={`${item.ref.providerId}:${item.ref.model}`}>
+                  <button
+                    type="button"
+                    className="ghost-button"
+                    disabled={disabled}
+                    onClick={() => onSwitch?.(item.ref)}
+                  >
+                    {item.label}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </details>
+        )}
+      </div>
     </div>
   );
 }

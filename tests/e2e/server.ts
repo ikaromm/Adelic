@@ -13,6 +13,8 @@
 //   [eco]     → answers "Eco: <current request>" so tests can see what the agent received
 //               (saved commands: the expanded template, not the typed `/name`)
 //   [mencoes] → answers the "[Arquivo mencionado: …]" labels found in the prompt
+//   [sobrecarga] → the default model (e2e-model) fails as overloaded before any output; any
+//               other model (e2e-reserva) answers with the model it ran on (model fallback)
 import { createServer } from 'node:http';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -38,7 +40,10 @@ const codex: ProviderInfo = {
   available: true,
   status: 'ready',
   detail: 'Provedor simulado para testes E2E',
-  models: [{ id: 'e2e-model', name: 'E2E Model', isDefault: true, efforts: ['low', 'medium'] }],
+  models: [
+    { id: 'e2e-model', name: 'E2E Model', isDefault: true, efforts: ['low', 'medium'] },
+    { id: 'e2e-reserva', name: 'E2E Reserva', efforts: ['low', 'medium'] },
+  ],
   defaultModel: 'e2e-model',
   capabilities: { fast: true, tools: true, approvals: true, cancel: true, reasoning: true, images: true },
 };
@@ -97,6 +102,7 @@ const providers: ProviderRegistry = {
         '[escrever]',
         '[eco]',
         '[mencoes]',
+        '[sobrecarga]',
       ].find((m) => current.toLowerCase().includes(m)) ?? '';
     try {
       // Fails once with a timeout before any output, then answers: retried automatically.
@@ -106,6 +112,15 @@ const providers: ProviderRegistry = {
         if (n === 1) throw new Error('Kiro stream failed: The operation timed out.');
         emit({ type: 'delta', text: 'Recuperado depois de uma nova tentativa.' });
         return { text: 'Recuperado depois de uma nova tentativa.', stopReason: 'completed' };
+      }
+      // Overloaded on the default model only: retried, then the fallback or "Tentar com outro modelo".
+      if (marker === '[sobrecarga]') {
+        const model = input.model ?? codex.defaultModel;
+        if (model === codex.defaultModel)
+          throw new Error('Selected model is at capacity. Please try a different model.');
+        const text = `Respondido por ${model}.`;
+        emit({ type: 'delta', text });
+        return { text, stopReason: 'completed' };
       }
       // Fails after showing text: not repeated automatically, the UI offers "Tentar de novo".
       if (marker === '[quebra]') {

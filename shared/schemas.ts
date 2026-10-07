@@ -146,6 +146,22 @@ export const SendNowSchema = z.object({
 export const ApprovalDecisionSchema = z.object({
   decision: required(z.enum(['approve', 'deny']), 'decision deve ser approve ou deny'),
 });
+export const MODEL_FALLBACK_MAX = 3;
+/** Settings › "Trocar de modelo se o atual estiver sobrecarregado": up to 3 distinct models. */
+export const ModelFallbackSchema = z
+  .object({
+    enabled: z.boolean(),
+    models: z
+      .array(z.object({ providerId: ProviderIdSchema, model: text(120) }).strict())
+      .max(MODEL_FALLBACK_MAX)
+      .refine((items) => new Set(items.map((i) => `${i.providerId}\u0000${i.model}`)).size === items.length),
+  })
+  .strict();
+/** "Tentar com outro modelo": the run is repeated with this provider and/or model. */
+export const RetryRunSchema = z.object({
+  providerId: optional(ProviderIdSchema, 'providerId inválido'),
+  model: optional(text(120), 'model inválido'),
+});
 export const SettingsPatchSchema = z.object({
   defaultProviderId: optional(ProviderIdSchema, 'defaultProviderId inválido'),
   defaultMode: optional(ModeSchema, 'defaultMode inválido'),
@@ -156,6 +172,10 @@ export const SettingsPatchSchema = z.object({
   updateCheck: optional(z.boolean(), 'updateCheck deve ser booleano'),
   autoRetry: optional(z.boolean(), 'autoRetry deve ser booleano'),
   notifications: optional(z.boolean(), 'notifications deve ser booleano'),
+  modelFallback: optional(
+    ModelFallbackSchema,
+    `modelFallback inválido (até ${MODEL_FALLBACK_MAX} modelos diferentes, cada um com providerId e model)`,
+  ),
 });
 export const RestoreRunSchema = z.object({
   confirm: required(z.literal(true), 'confirm: true é obrigatório para desfazer alterações'),

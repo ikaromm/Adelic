@@ -1606,7 +1606,8 @@
 }
 
 /* Automatic retries and the retry button under a failed answer. */
-.activity-event.retry {
+.activity-event.retry,
+.activity-event.fallback {
   color: var(--warning);
 }
 .retry-notice {
@@ -1635,10 +1636,56 @@
 .retry-notice small {
   color: var(--text-secondary);
 }
+.retry-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.retry-switch {
+  position: relative;
+}
+.retry-switch > summary {
+  list-style: none;
+  cursor: pointer;
+}
+.retry-switch > summary::-webkit-details-marker {
+  display: none;
+}
+.retry-switch[open] > summary {
+  border-color: var(--border-strong);
+}
+.retry-switch ul {
+  display: grid;
+  gap: 2px;
+  margin: 6px 0 0;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-raised);
+  list-style: none;
+}
+.retry-switch li .ghost-button {
+  width: 100%;
+  justify-content: flex-start;
+  white-space: normal;
+  text-align: left;
+  line-height: 1.3;
+  padding-block: 6px;
+}
 @media (max-width: 520px) {
   .retry-notice {
     flex-direction: column;
     align-items: stretch;
+  }
+  .retry-actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .retry-actions > .secondary-button,
+  .retry-switch > summary {
+    width: 100%;
   }
 }
 

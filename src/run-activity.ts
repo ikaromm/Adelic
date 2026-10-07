@@ -7,6 +7,8 @@ export interface RunActivity {
   actions: RunEvent[];
   /** Automatic retries, newest last. */
   retries: RunEvent[];
+  /** Automatic model switches (Settings.modelFallback). */
+  fallbacks: RunEvent[];
 }
 
 /** Keep one visible record for tool lifecycle updates such as started/completed. */
@@ -45,10 +47,13 @@ export function activityForRun(runId: string, tasks: DelegatedTask[], events: Ru
   }
   return {
     tasks: runTasks,
-    events: runEvents.filter((event) => event.type !== 'error' && event.type !== 'tool' && event.type !== 'retry'),
+    events: runEvents.filter(
+      (event) => event.type !== 'error' && event.type !== 'tool' && event.type !== 'retry' && event.type !== 'fallback',
+    ),
     errors: runEvents.filter((event) => event.type === 'error'),
     actions,
     retries: runEvents.filter((event) => event.type === 'retry'),
+    fallbacks: runEvents.filter((event) => event.type === 'fallback'),
   };
 }
 
@@ -57,7 +62,8 @@ export function activityIsVisible(activity: RunActivity): boolean {
     activity.tasks.length > 0 ||
     activity.actions.length > 0 ||
     activity.errors.length > 0 ||
-    activity.retries.length > 0
+    activity.retries.length > 0 ||
+    activity.fallbacks.length > 0
   );
 }
 

@@ -185,12 +185,29 @@ export interface Run {
   error?: string;
   /** Automatic retries that happened before the final outcome (0 or absent: none). */
   retries?: number;
-  /** Set on failures: whether repeating may help, and why it was not repeated automatically. */
-  failure?: { kind: 'transient' | 'capacity' | 'permanent'; reason: string; retryable: boolean; why?: string };
+  /** Conversation model when the run started; absent means the provider's default. */
+  model?: string;
+  /**
+   * Set on failures: whether repeating may help, and why it was not repeated automatically.
+   * `capacity` only appears on runs recorded before it was split into overloaded and rate_limit.
+   */
+  failure?: {
+    kind: 'transient' | 'overloaded' | 'rate_limit' | 'capacity' | 'permanent';
+    reason: string;
+    retryable: boolean;
+    why?: string;
+  };
+  /** Automatic model fallback (Settings.modelFallback): the model that answered instead. */
+  fallback?: { from: ModelRef; to: ModelRef; reason: string };
   /** Snapshot of the project files around a run that could write; see docs/specs/checkpoints.md. */
   checkpoint?: RunCheckpoint;
   /** Plan mode: a read-only planning run, or the run of one task of an approved plan. */
   plan?: RunPlanRef;
+}
+/** A provider and one of its models; no model means the provider's default. */
+export interface ModelRef {
+  providerId: ProviderId;
+  model?: string;
 }
 export type RunPlanRef = { kind: 'plan' } | { kind: 'task'; planId: string; taskId: string };
 export type PlanStatus = 'draft' | 'approved' | 'rejected' | 'executing' | 'done';
@@ -293,7 +310,7 @@ export interface RunEvent {
   id: string;
   runId: string;
   sessionId: string;
-  type: 'status' | 'tool' | 'approval' | 'error' | 'retry';
+  type: 'status' | 'tool' | 'approval' | 'error' | 'retry' | 'fallback';
   text: string;
   createdAt: string;
   toolName?: string;
@@ -314,6 +331,11 @@ export interface Settings {
   approvalMode?: 'auto-safe' | 'manual';
   /** Automatic retry of transient failures that had no visible effect (default on). */
   autoRetry?: boolean;
+  /**
+   * Opt-in: when the model stays overloaded or rate limited after the automatic retries, try
+   * these models in order, once each, for that run only (docs/specs/retries.md).
+   */
+  modelFallback?: { enabled: boolean; models: { providerId: ProviderId; model: string }[] };
   /** Opt-in: check GitHub for a newer release (one anonymous request, never installs). */
   updateCheck?: boolean;
   /** System notification when a run finishes, fails or needs approval while the window is in the background. Absent: on in the desktop app, off in a browser. */

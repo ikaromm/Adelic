@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, constants, copyFileSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -294,24 +294,142 @@ export class Store {
       .run(m.id, m.sessionId, m.runId ?? null, clientId ?? null, JSON.stringify(m));
     return m;
   }
-  createRun(user: Message, assistant: Message, run: Run, session: Session, clientId?: string) {
-    this.db.exec('BEGIN IMMEDIATE');
-    try {
+  /**
+   * Stores a new run with its two messages. With `replaceFrom` (edit and resend), the same
+   * transaction first discards that message and every later one in the conversation.
+   */
+  createRun(user: Message, assistant: Message, run: Run, session: Session, clientId?: string, replaceFrom?: string) {
+    return this.transaction(() => {
+      const discarded = replaceFrom ? this.discardFrom(session.id, replaceFrom) : undefined;
       this.addMessage(user, clientId);
       this.addMessage(assistant);
       this.putRun(run);
       this.putSession(session);
-      this.db.exec('COMMIT');
+      return discarded;
+    });
+  }
+  /**
+   * Edit and resend (docs/specs/edit-branch.md): deletes `messageId` and every later message
+   * of the conversation (the FTS triggers drop them from search) and the events of their
+   * runs. Runs stay for history and audit, marked `discardedAt`; plans written by a
+   * discarded planning run are rejected. Call inside a transaction.
+   */
+  private discardFrom(sessionId: string, messageId: string) {
+    const target = this.db
+      .prepare('SELECT rowid FROM messages WHERE id=? AND session_id=?')
+      .get(messageId, sessionId) as { rowid: number } | undefined;
+    if (!target) throw Object.assign(new Error('Mensagem não encontrada nesta conversa'), { status: 404 });
+    const rows = this.db
+      .prepare('SELECT id, run_id FROM messages WHERE session_id=? AND rowid>=? ORDER BY rowid')
+      .all(sessionId, target.rowid) as { id: string; run_id: string | null }[];
+    const runIds = [...new Set(rows.flatMap((row) => (row.run_id ? [row.run_id] : [])))];
+    this.db.prepare('DELETE FROM messages WHERE session_id=? AND rowid>=?').run(sessionId, target.rowid);
+    const at = new Date().toISOString();
+    const plans: Plan[] = [];
+    for (const runId of runIds) {
+      this.db.prepare("DELETE FROM events WHERE session_id=? AND json_extract(data,'$.runId')=?").run(sessionId, runId);
+      this.db
+        .prepare("UPDATE runs SET data=json_set(data,'$.discardedAt',?) WHERE id=? AND session_id=?")
+        .run(at, runId, sessionId);
+    }
+    for (const plan of this.listPlans(sessionId)) {
+      if (!runIds.includes(plan.runId) || plan.status === 'rejected' || plan.status === 'done') continue;
+      const { executionMode: _mode, stopRequested: _stop, ...rest } = plan;
+      plans.push(this.putPlan({ ...rest, status: 'rejected', updatedAt: at }));
+    }
+    return { messageIds: rows.map((row) => row.id), runIds, plans };
+  }
+  /**
+   * "Ramificar daqui": a new conversation with copies of the messages up to and including
+   * `messageId` (new ids; attachments copied as new rows and files). Plans, queue, runs and
+   * events are not copied. Refuses (409) to copy a message whose run is still running.
+   */
+  branchSession(sourceId: string, messageId: string): Session {
+    const source = this.getSession(sourceId);
+    if (!source) throw Object.assign(new Error('Conversa não encontrada'), { status: 404 });
+    const all = this.listMessages(sourceId);
+    const index = all.findIndex((m) => m.id === messageId);
+    if (index < 0) throw Object.assign(new Error('Mensagem não encontrada nesta conversa'), { status: 404 });
+    const copied = all.slice(0, index + 1);
+    if (copied.some((m) => m.status === 'running'))
+      throw Object.assign(new Error('Aguarde a resposta terminar para ramificar a partir dela'), { status: 409 });
+    const now = new Date().toISOString();
+    const suffix = ' (ramo)';
+    const session: Session = {
+      id: randomUUID(),
+      projectId: source.projectId,
+      title: `${source.title.slice(0, 160 - suffix.length)}${suffix}`,
+      providerId: source.providerId,
+      ...(source.model ? { model: source.model } : {}),
+      mode: source.mode,
+      ...(source.thinking ? { thinking: source.thinking } : {}),
+      ...(source.planFirst ? { planFirst: true } : {}),
+      createdAt: now,
+      updatedAt: now,
+      branchedFrom: { sessionId: source.id, messageId },
+    };
+    // Files first (outside SQL), then every row in one transaction; a failure removes the files.
+    const attachmentIds = new Map<string, StoredAttachment>();
+    const dir = this.attachmentDir(session.id);
+    try {
+      for (const message of copied)
+        for (const meta of message.attachments ?? []) {
+          if (attachmentIds.has(meta.id)) continue;
+          const original = this.getAttachment(meta.id);
+          if (!original || original.sessionId !== source.id || !existsSync(this.attachmentPath(original))) continue;
+          const id = randomUUID();
+          // Stored names are `<uuid>-<safe name>`; keep the safe name under the new id.
+          const file = `${id}-${original.file.slice(37) || 'arquivo'}`;
+          mkdirSync(join(this.dataDir, 'attachments'), { recursive: true, mode: 0o700 });
+          mkdirSync(dir, { recursive: true, mode: 0o700 });
+          copyFileSync(this.attachmentPath(original), join(dir, file), constants.COPYFILE_EXCL);
+          chmodSync(join(dir, file), 0o600);
+          attachmentIds.set(meta.id, { ...original, id, sessionId: session.id, file, createdAt: now });
+        }
+      // Copies keep their run pairing (user prompt ↔ answer) under fresh run ids that point to
+      // no stored run, so nothing in the branch refers back to the original's runs.
+      const runIds = new Map<string, string>();
+      const runOf = (id?: string) => {
+        if (!id) return undefined;
+        if (!runIds.has(id)) runIds.set(id, randomUUID());
+        return runIds.get(id);
+      };
+      this.transaction(() => {
+        this.putSession(session);
+        for (const attachment of attachmentIds.values())
+          this.db
+            .prepare('INSERT INTO attachments(id,session_id,data) VALUES(?,?,?)')
+            .run(attachment.id, session.id, JSON.stringify(attachment));
+        for (const message of copied) {
+          const { runId: _run, attachments: metas, ...rest } = message;
+          const kept = (metas ?? []).flatMap((meta) => {
+            const copy = attachmentIds.get(meta.id);
+            return copy ? [{ id: copy.id, name: copy.name, mime: copy.mime, size: copy.size }] : [];
+          });
+          const runId = runOf(message.runId);
+          this.addMessage({
+            ...rest,
+            id: randomUUID(),
+            sessionId: session.id,
+            ...(runId ? { runId } : {}),
+            ...(kept.length ? { attachments: kept } : {}),
+          });
+        }
+      });
     } catch (error) {
-      this.db.exec('ROLLBACK');
+      rmSync(dir, { recursive: true, force: true });
       throw error;
     }
+    return session;
   }
   findClientMessage(sessionId: string, clientId: string) {
     const row = this.db
       .prepare('SELECT run_id FROM messages WHERE session_id=? AND client_id=?')
       .get(sessionId, clientId) as { run_id: string | null } | undefined;
     return row?.run_id ?? undefined;
+  }
+  getMessage(id: string) {
+    return this.get<Message>('messages', id);
   }
   listMessages(sessionId: string) {
     return this.rows<Message>('messages', 'WHERE session_id=? ORDER BY rowid', [sessionId]);

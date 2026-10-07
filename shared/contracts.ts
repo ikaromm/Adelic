@@ -136,6 +136,8 @@ export interface Session {
   nativeSessionId?: string;
   /** "Planejar antes": every message first produces a read-only plan to approve (docs/specs/plan-mode.md). */
   planFirst?: boolean;
+  /** "Ramificar daqui": the conversation and message this one was copied from (docs/specs/edit-branch.md). */
+  branchedFrom?: { sessionId: string; messageId: string };
 }
 export interface RoutePlan {
   /** Availability for this phase; fast user turns may use tools while internal planning stays false. */
@@ -203,6 +205,8 @@ export interface Run {
   checkpoint?: RunCheckpoint;
   /** Plan mode: a read-only planning run, or the run of one task of an approved plan. */
   plan?: RunPlanRef;
+  /** Its messages were discarded by "Editar" on an earlier message; kept for history and audit. */
+  discardedAt?: string;
 }
 /** A provider and one of its models; no model means the provider's default. */
 export interface ModelRef {

@@ -147,6 +147,18 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ content, clientMessageId, ...(attachmentIds.length ? { attachmentIds } : {}) }),
     }),
+  /** Edit and resend (docs/specs/edit-branch.md): discards this message and the later ones. */
+  editMessage: (id: string, messageId: string, content: string, clientMessageId: string, attachmentIds: string[]) =>
+    request<{ runId: string; messageId: string }>(
+      `/api/sessions/${encodeURIComponent(id)}/messages/${encodeURIComponent(messageId)}/edit`,
+      { method: 'POST', body: JSON.stringify({ content, clientMessageId, attachmentIds }) },
+    ),
+  /** "Ramificar daqui": a new conversation with the messages up to and including `messageId`. */
+  branch: (id: string, messageId: string) =>
+    request<Session>(`/api/sessions/${encodeURIComponent(id)}/branch`, {
+      method: 'POST',
+      body: JSON.stringify({ messageId }),
+    }),
   /** Uploads one file (content in base64) to a conversation; returns its metadata. */
   uploadAttachment: (sessionId: string, file: { name: string; mime: string; data: string }, signal?: AbortSignal) =>
     request<AttachmentMeta>(`/api/sessions/${encodeURIComponent(sessionId)}/attachments`, {

@@ -6,7 +6,9 @@ import { attachmentMeta, decodeUpload } from '../attachments.js';
 import { supportsEffort } from '../../shared/reasoning.js';
 import {
   ApprovalDecisionSchema,
+  BranchSessionSchema,
   CreateSessionSchema,
+  EditMessageSchema,
   PatchSessionSchema,
   QueueEditSchema,
   QueueMessageSchema,
@@ -255,6 +257,42 @@ export function sessionsRoutes({ store, orchestrator, providerList }: BackendCon
     } catch (e) {
       const status = errorStatus(e) || 500;
       error(res, status, message(e));
+    }
+  });
+  // Edit and resend, and branch a conversation (docs/specs/edit-branch.md).
+  app.post('/api/sessions/:id/messages/:messageId/edit', async (req, res) => {
+    const s = store.getSession(req.params.id);
+    if (!s) return error(res, 404, 'Conversa não encontrada');
+    // The message itself is checked by the orchestrator, after the clientMessageId lookup:
+    // a repeated request finds its run even though the edited message no longer exists.
+    const parsed = parseBody(EditMessageSchema, req.body, 'content obrigatório (máximo 32000 caracteres)');
+    if (!parsed.ok) return error(res, 400, parsed.message);
+    const { content, clientMessageId, attachmentIds } = parsed.data;
+    const attachments = attachmentIds ? ownedAttachments(s.id, attachmentIds) : undefined;
+    if (attachmentIds && !attachments) return error(res, 400, MISSING_ATTACHMENT);
+    try {
+      const result = await orchestrator.editAndResend(
+        s.id,
+        req.params.messageId,
+        content,
+        attachments,
+        clientMessageId,
+      );
+      res.status(202).json(result);
+    } catch (e) {
+      error(res, errorStatus(e) || 500, message(e));
+    }
+  });
+  app.post('/api/sessions/:id/branch', (req, res) => {
+    const s = store.getSession(req.params.id);
+    if (!s) return error(res, 404, 'Conversa não encontrada');
+    const parsed = parseBody(BranchSessionSchema, req.body, 'messageId obrigatório');
+    if (!parsed.ok) return error(res, 400, parsed.message);
+    try {
+      res.status(201).json(store.branchSession(s.id, parsed.data.messageId));
+    } catch (e) {
+      const status = errorStatus(e);
+      error(res, status || 500, status ? message(e) : `Não foi possível ramificar a conversa: ${message(e)}`);
     }
   });
   app.post('/api/sessions/:id/cancel', async (req, res) => {

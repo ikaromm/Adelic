@@ -2481,3 +2481,86 @@
   box-decoration-break: clone;
   -webkit-box-decoration-break: clone;
 }
+/* Edit and resend, and branch (docs/specs/edit-branch.md). */
+.message-action:disabled {
+  cursor: not-allowed;
+}
+.message-row:hover .message-action:disabled,
+.message-row:focus-within .message-action:disabled {
+  opacity: 0.45;
+}
+.user-row.editing {
+  align-items: stretch;
+}
+.message-editor {
+  display: grid;
+  gap: 8px;
+  width: min(100%, 640px);
+  margin-left: auto;
+  padding: 10px;
+  border: 1px solid var(--accent-border);
+  border-radius: var(--radius-lg);
+  background: var(--user-bubble);
+}
+.message-editor-input {
+  width: 100%;
+  min-height: 56px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--canvas);
+  color: var(--text);
+  font: inherit;
+  font-size: var(--text-chat);
+  line-height: 1.55;
+  resize: vertical;
+}
+.message-editor-input:focus-visible {
+  border-color: var(--accent-border);
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.message-editor-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
+.message-editor-hint {
+  flex: 1 1 160px;
+  min-width: 0;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+}
+.message-editor-confirm {
+  display: grid;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--warning-border);
+  border-radius: var(--radius-md);
+  background: var(--warning-soft);
+  color: var(--text);
+  font-size: var(--text-sm);
+}
+.branch-origin {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 40%;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  font-weight: 500;
+}
+.branch-origin > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.branch-origin > svg {
+  flex: none;
+}
+@media (max-width: 480px) {
+  .branch-origin {
+    max-width: 34%;
+  }
+}

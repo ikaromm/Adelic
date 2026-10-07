@@ -47,23 +47,34 @@ export function MessageCard({
   message,
   providerName,
   body,
+  actions,
+  editor,
 }: {
   message: Message;
   providerName: string;
   /** Replaces the rendered answer (plan mode shows the plan card instead of its Markdown). */
   body?: ReactNode;
+  /** Extra hover/focus actions next to "Copiar" (edit, branch). */
+  actions?: ReactNode;
+  /** Replaces a user message's bubble while it is being edited. */
+  editor?: ReactNode;
 }) {
   if (message.role === 'user')
     return (
-      <div className="message-row user-row">
-        {message.attachments?.length ? <MessageAttachments attachments={message.attachments} /> : null}
-        <div className="user-bubble">
-          <UserText content={message.content} />
-        </div>
-        <div className="message-meta">
-          <time dateTime={message.createdAt}>{timeLabel(message.createdAt)}</time>
-          <CopyButton text={message.content} label="Copiar mensagem" />
-        </div>
+      <div className={`message-row user-row ${editor ? 'editing' : ''}`.trim()}>
+        {editor ?? (
+          <>
+            {message.attachments?.length ? <MessageAttachments attachments={message.attachments} /> : null}
+            <div className="user-bubble">
+              <UserText content={message.content} />
+            </div>
+            <div className="message-meta">
+              <time dateTime={message.createdAt}>{timeLabel(message.createdAt)}</time>
+              <CopyButton text={message.content} label="Copiar mensagem" />
+              {actions}
+            </div>
+          </>
+        )}
       </div>
     );
   const content =
@@ -88,9 +99,10 @@ export function MessageCard({
           <X size={13} /> Execução falhou
         </div>
       )}
-      {message.content && (
+      {(message.content || actions) && (
         <div className="message-actions">
-          <CopyButton text={message.content} label="Copiar resposta" />
+          {message.content && <CopyButton text={message.content} label="Copiar resposta" />}
+          {actions}
         </div>
       )}
     </div>

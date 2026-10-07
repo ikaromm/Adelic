@@ -63,6 +63,8 @@ type Started = { runId: string; messageId: string };
 /** Internal start options: plan mode task runs (server/plans.ts). */
 export interface StartOptions {
   planTask?: { planId: string; taskId: string; prompt: string };
+  /** Edit and resend: this user message and everything after it are discarded first. */
+  replaceFrom?: string;
 }
 /** A plan-mode run: its kind and the prompt that replaces the usual one. */
 type SpecialRun = { ref: RunPlanRef; prompt: string };
@@ -212,8 +214,12 @@ export class Orchestrator {
         throw Object.assign(new Error('As alterações de uma execução estão sendo desfeitas neste projeto'), {
           status: 409,
         });
+      const stored = this.store.listMessages(session.id);
+      // Edit and resend: the run sees only the messages before the edited one.
+      const cut = options.replaceFrom ? stored.findIndex((m) => m.id === options.replaceFrom) : stored.length;
+      if (cut < 0) throw Object.assign(new Error('Mensagem não encontrada nesta conversa'), { status: 404 });
       const projectSnapshot = structuredClone(project),
-        history = this.store.listMessages(session.id),
+        history = stored.slice(0, cut),
         settings = startingSettings;
       // `/plano` and "Planejar antes" plan first; task runs carry their prompt. Otherwise
       // `/name args` runs the saved command's template (the user message keeps the typed text)
@@ -303,7 +309,10 @@ export class Orchestrator {
         title: session.title === 'Nova conversa' ? titleFromMessage(planRequest || content) : session.title,
         updatedAt: now,
       };
-      this.store.createRun(user, assistant, run, session, clientMessageId);
+      // The native thread already holds the discarded turns and cannot be rewound: the next
+      // run starts a fresh one, with the remaining history in its prompt.
+      if (options.replaceFrom) delete session.nativeSessionId;
+      const discarded = this.store.createRun(user, assistant, run, session, clientMessageId, options.replaceFrom);
       if (options.planTask) this.plans.taskStarted(options.planTask.planId, options.planTask.taskId, runId);
       if (reserveProject) this.reservedProjectWrites.set(project.id, runId);
       const active = { runId, controller, projectPath } as {
@@ -315,6 +324,11 @@ export class Orchestrator {
       this.active.set(session.id, active);
       this.starting.delete(session.id);
       reservation.finish();
+      if (discarded) {
+        for (const rejected of discarded.plans) this.emit({ type: 'plan', plan: rejected });
+        // Other tabs drop the discarded messages on their next reconcile.
+        this.emit({ type: 'refresh' });
+      }
       this.emit({ type: 'message', message: user });
       this.emit({ type: 'message', message: assistant });
       this.emit({ type: 'run', run });
@@ -352,6 +366,46 @@ export class Orchestrator {
       if (this.starting.get(session.id) === reservation) this.starting.delete(session.id);
       reservation.finish();
     }
+  }
+  /**
+   * "Editar" on a user message (docs/specs/edit-branch.md): replaces it and discards every
+   * later message, then starts a run with the new text. Refused (409) while a run is active
+   * or a plan is executing in the conversation.
+   */
+  editAndResend(
+    sessionId: string,
+    messageId: string,
+    content: string,
+    /** Already validated as belonging to this conversation; undefined keeps the message's own. */
+    attachments: StoredAttachment[] | undefined,
+    clientMessageId?: string,
+  ): Promise<Started> {
+    const session = this.requireSession(sessionId);
+    if (clientMessageId) {
+      const existing = this.store.findClientMessage(sessionId, clientMessageId);
+      if (existing) return Promise.resolve(this.startedResult(sessionId, existing));
+    }
+    const message = this.store.getMessage(messageId);
+    if (!message || message.sessionId !== sessionId)
+      throw Object.assign(new Error('Mensagem não encontrada nesta conversa'), { status: 404 });
+    if (message.role !== 'user')
+      throw Object.assign(new Error('Só mensagens do usuário podem ser editadas'), { status: 400 });
+    if (session.activeRunId || this.isActive(sessionId))
+      throw Object.assign(new Error('Há uma execução em andamento nesta conversa; aguarde ou cancele antes'), {
+        status: 409,
+      });
+    if (this.store.listPlans(sessionId).some((plan) => plan.status === 'executing'))
+      throw Object.assign(new Error('Um plano está em execução nesta conversa; pare o plano antes de editar'), {
+        status: 409,
+      });
+    const kept =
+      attachments ??
+      (message.attachments ?? []).flatMap((meta) => {
+        const stored = this.store.getAttachment(meta.id);
+        return stored && stored.sessionId === sessionId ? [stored] : [];
+      });
+    // No await before start(): its reservation is taken synchronously, so the checks above hold.
+    return this.start(session, content, clientMessageId, kept, { replaceFrom: messageId });
   }
   private startedResult(sessionId: string, runId: string): Started {
     return {

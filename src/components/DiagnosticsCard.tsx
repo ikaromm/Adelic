@@ -1,6 +1,16 @@
 import { useState } from 'react';
-import { Check, ClipboardCopy, Download, ExternalLink, LoaderCircle, RefreshCw, Stethoscope } from 'lucide-react';
+import {
+  Check,
+  ClipboardCopy,
+  Download,
+  ExternalLink,
+  LoaderCircle,
+  MonitorDown,
+  RefreshCw,
+  Stethoscope,
+} from 'lucide-react';
 import { api, type Diagnostics, type UpdateInfo } from '../api';
+import { promptInstall, usePwa } from '../pwa/client';
 
 const field = (label: string, value: string | number | null | undefined) => (
   <div className="diagnostics-row" key={label}>
@@ -8,6 +18,28 @@ const field = (label: string, value: string | number | null | undefined) => (
     <dd>{value === null || value === undefined || value === '' ? '—' : value}</dd>
   </div>
 );
+
+/** Installable app (docs/specs/pwa.md): the button appears only when the browser offers it. */
+function InstallRow() {
+  const { installable, standalone } = usePwa();
+  return (
+    <div className="setting-row">
+      <div>
+        <strong>App no celular ou no computador</strong>
+        <span>
+          {standalone
+            ? 'O Adelic está aberto como app instalado.'
+            : 'No celular, a instalação exige HTTPS (por exemplo com tailscale serve); pelo IP em HTTP simples o navegador não oferece a opção.'}
+        </span>
+      </div>
+      {installable && (
+        <button type="button" className="secondary-button" onClick={() => void promptInstall()}>
+          <MonitorDown size={14} /> Instalar como app
+        </button>
+      )}
+    </div>
+  );
+}
 
 /** Settings card that loads /api/diagnostics on demand and lets the user copy or save it. */
 export function DiagnosticsCard({
@@ -109,6 +141,7 @@ export function DiagnosticsCard({
           )}
         </p>
       )}
+      <InstallRow />
       <div className="diagnostics-actions">
         <button type="button" className="secondary-button" onClick={() => void load()} disabled={busy}>
           {busy ? <LoaderCircle size={14} className="spin" /> : <Stethoscope size={14} />}

@@ -1,4 +1,3 @@
-import express from 'express';
 import type { ViteDevServer } from 'vite';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync, realpathSync } from 'node:fs';
@@ -11,6 +10,7 @@ import { GraphifyService } from './graphify.js';
 import { createBackend } from './index.js';
 import { Store } from './store.js';
 import { remoteAccessFromEnv, type RemoteAccess } from './http/auth.js';
+import { webAssets } from './http/web.js';
 
 export interface StartServerOptions {
   port?: number;
@@ -91,20 +91,6 @@ async function acquireDataLock(realDataDir: string): Promise<Cleanup> {
     }));
 }
 
-function mountWebAssets(app: ReturnType<typeof createBackend>['app'], webDir: string) {
-  const absoluteWebDir = resolve(webDir);
-  app.use(express.static(absoluteWebDir, { fallthrough: true }));
-  app.use((req, res, next) => {
-    if (req.method !== 'GET' || req.path.startsWith('/api/')) {
-      next();
-      return;
-    }
-    res.sendFile(join(absoluteWebDir, 'index.html'), (error) => {
-      if (error) next(error);
-    });
-  });
-}
-
 export async function startServer(options: StartServerOptions = {}): Promise<RunningServer> {
   const requestedDataDir = options.dataDir ?? process.env.ADELIC_DATA_DIR ?? join(homedir(), '.local/share/adelic');
   mkdirSync(resolve(requestedDataDir), { recursive: true });
@@ -137,7 +123,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Run
       vite = await createViteServer({ server: { middlewareMode: true }, appType: 'spa' });
       backend.app.use(vite.middlewares);
     } else if (options.webDir) {
-      mountWebAssets(backend.app, options.webDir);
+      backend.app.use(webAssets(options.webDir));
     }
 
     http = createHttpServer(backend.app);

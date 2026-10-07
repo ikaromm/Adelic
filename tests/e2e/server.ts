@@ -26,12 +26,12 @@
 // recording as "texto ditado"; GET /e2e/voice?mode=local|remote|missing switches its setup.
 import { createServer } from 'node:http';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import express from 'express';
 import type { ProviderInfo, ProviderRegistry } from '../../shared/contracts.js';
 import { createBackend } from '../../server/index.js';
+import { webAssets } from '../../server/http/web.js';
 import { Store } from '../../server/store.js';
 import { emitApproval } from '../../server/providers/common.js';
 import { PLAN_PROMPT_MARKER, TASK_PROMPT_MARKER } from '../../server/plan-markdown.js';
@@ -313,8 +313,16 @@ const web = resolve(import.meta.dirname, '../../dist');
 app.get('/e2e/releases/latest', (_req, res) =>
   res.json({ tag_name: 'v99.0.0', html_url: 'https://github.com/ikaromm/Adelic/releases/tag/v99.0.0' }),
 );
-app.use(express.static(web));
-app.use((_req, res) => res.sendFile(join(web, 'index.html')));
+// Installable-app update flow (pwa.spec.ts): each POST makes /sw.js differ by one comment,
+// which the browser sees as a new worker version.
+let swBump = 0;
+app.post('/e2e/sw-bump', (_req, res) => res.json({ bump: ++swBump }));
+app.get('/sw.js', (_req, res, next) => {
+  if (!swBump) return next();
+  res.set({ 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-cache' });
+  res.send(`${readFileSync(join(web, 'sw.js'), 'utf8')}\n// e2e ${swBump}\n`);
+});
+app.use(webAssets(web));
 createServer(app).listen(port, '127.0.0.1', () =>
   console.log(`E2E server on http://127.0.0.1:${port} (data ${dataDir})`),
 );

@@ -21,6 +21,9 @@ export default defineConfig({
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
     viewport: { width: 1280, height: 800 },
+    // The production build registers a service worker (docs/specs/pwa.md). Specs run without
+    // it so cached shells never leak between them; tests/e2e/pwa.spec.ts opts back in.
+    serviceWorkers: 'block',
     launchOptions: executablePath ? { executablePath } : {},
   },
   // Two isolated servers: one whose ai-memory is unreachable (error paths), one with a

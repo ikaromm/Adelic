@@ -2,6 +2,10 @@
 
 ## Não publicado
 
+_Nada ainda._
+
+## 0.5.0 — 2026-10-07
+
 - Correção: `ssh` falhava dentro do sandbox dos agentes e do terminal ("Bad owner or permissions on /etc/ssh/ssh_config.d/…"), porque no user namespace os arquivos do root aparecem como `nobody`. A configuração de cliente do OpenSSH passa a ser lida de cópias do usuário, somente leitura, e o socket do ssh-agent sob `/tmp` fica acessível. Veja [SSH dentro do sandbox](docs/specs/safe-command-approvals.md#ssh-dentro-do-sandbox).
 - **Memória das conversas avulsas** (Configurações › Memória): escolha um escopo do ai-memory, como `pessoal/ambiente-ikaromm`, para conversas sem projeto; pedidos como "busca na memória o IP da VM" ou "search memory" passam a consultar só esse escopo, e a resposta diz qual escopo foi pesquisado quando nada é encontrado. Desligada por padrão. Veja [memória compartilhada](docs/specs/shared-memory.md#memória-das-conversas-avulsas).
 - **Interface em inglês** (base): Configurações › Idioma / Language escolhe Português, English ou Automático (idioma do navegador), salvo no servidor e lembrado na tela de login; login, barra lateral, campo de mensagem e Configurações já traduzidos, e as mensagens de erro do servidor seguem o idioma pedido. O selo do topo mostra se a conexão é Local, Tailnet ou Internet, e pela internet o seletor de permissões mostra a aprovação manual obrigatória. Veja [idioma da interface](docs/i18n.md).

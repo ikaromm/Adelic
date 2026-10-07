@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Page } from './fixtures';
 
 // Command palette (docs/specs/command-palette.md) against the real backend and web build.
 

@@ -1,4 +1,4 @@
-import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
+import { expect, test, type APIRequestContext, type Page } from './fixtures';
 
 // Usage limits (docs/specs/spend-limits.md) against the real backend with the scripted
 // provider: `[pesado]` reports 500 000 input tokens (+5 output), `[normal]` about 4 600.

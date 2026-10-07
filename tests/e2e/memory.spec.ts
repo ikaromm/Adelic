@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test } from './fixtures';
 import { fakeMemoryPort, memoryAppPort } from '../../playwright.config';
 
 // Memory library against the simulated ai-memory (tests/e2e/fake-memory.ts).

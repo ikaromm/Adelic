@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Page } from './fixtures';
 
 // Attachments end to end: picker, drag-and-drop, limits, upload, the run receiving the files
 // (the scripted provider echoes what it got) and the sent message showing them.

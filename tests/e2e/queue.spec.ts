@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Page } from './fixtures';
 
 // Message queue while the agent works (docs/specs/message-queue.md), against the real
 // backend with the scripted provider: [lento] streams until cancelled, [medio] finishes

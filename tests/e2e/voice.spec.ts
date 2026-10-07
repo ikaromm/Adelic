@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Page } from './fixtures';
 
 // Local voice dictation (docs/specs/voice.md). The microphone and MediaRecorder are replaced
 // by stubs in the page, and the E2E server's fake voxtype (tests/e2e/server.ts) transcribes

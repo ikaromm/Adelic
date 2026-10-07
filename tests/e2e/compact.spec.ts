@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Page } from './fixtures';
 
 // Conversation compaction (docs/specs/compaction.md) against the real backend with the scripted
 // provider: a compaction prompt answers a fixed summary ("Resumo-E2E…"), and `[eco]` answers

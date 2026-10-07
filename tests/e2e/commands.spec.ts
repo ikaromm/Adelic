@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Page } from './fixtures';
 
 // Saved commands (docs/specs/saved-commands.md) against the real backend with the scripted
 // provider: the template starts with [eco], so the agent answers with the text it received.

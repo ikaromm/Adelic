@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Page } from './fixtures';
 import { funnelPort } from '../../playwright.config';
 
 // English UI (docs/i18n.md): Settings › Idioma switches the interface at once, is saved on the

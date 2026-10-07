@@ -344,7 +344,7 @@ const fakeTailscale: TailscaleRunner = async (args) => {
 // "Atualizar Adelic": a scripted checkout two commits behind; the restart only flips the commit.
 const updater = createFakeUpdater();
 // Short retry delays so the retry flows finish quickly.
-const { app } = createBackend(
+const { app, orchestrator } = createBackend(
   store,
   providers,
   undefined,
@@ -363,6 +363,19 @@ const { app } = createBackend(
   updater.service,
 );
 app.post('/e2e/update/reset', (_req, res) => res.json(updater.reset()));
+// Test isolation (tests/e2e/fixtures.ts calls it before each test): cancels runs an earlier test
+// left going (a [lento] answer, a held plan task) and clears the update lock, so one failure
+// cannot cascade into the next specs through the shared server.
+app.post('/e2e/settle', async (_req, res) => {
+  holdPlanTasks = false;
+  for (const resolve of heldPlanTasks.splice(0)) resolve();
+  const sessions = store.listSessions().filter((session) => session.activeRunId || orchestrator.isActive(session.id));
+  await Promise.all(sessions.map((session) => orchestrator.cancel(session.id).catch(() => undefined)));
+  for (let i = 0; i < 100 && store.listSessions().some((s) => s.activeRunId || orchestrator.isActive(s.id)); i++)
+    await sleep(50, new AbortController().signal).catch(() => undefined);
+  updater.reset();
+  res.json({ cancelled: sessions.length });
+});
 app.post('/e2e/plan-tasks', (req, res) => {
   holdPlanTasks = req.body?.hold === true;
   // Releasing lets every held task finish now.

@@ -26,6 +26,10 @@ export function createFakeUpdater() {
   let bootId = randomUUID();
   let checked = false;
   let progress: UpdateProgress = { state: 'idle', steps: [], log: '' };
+  // Each apply gets a generation; reset() bumps it so an apply still walking its steps stops
+  // and releases the orchestrator's update lock instead of holding it into the next test.
+  let generation = 0;
+  let releaseLock: (() => void) | undefined;
   const status = (channel: UpdateChannel): SelfUpdateStatus => {
     const behind = checked && commit === OLD ? 2 : 0;
     const busy = progress.state === 'running' || progress.state === 'restarting';
@@ -52,8 +56,9 @@ export function createFakeUpdater() {
       },
     };
   };
-  async function run() {
+  async function run(mine: number) {
     for (const [id] of STEPS) {
+      if (mine !== generation) return;
       const step = progress.steps.find((s) => s.id === id)!;
       if (id === 'switch' || id === 'install') {
         step.status = 'skipped';
@@ -65,12 +70,14 @@ export function createFakeUpdater() {
       if (id === 'restart') {
         progress.state = 'restarting';
         await sleep(1200);
+        if (mine !== generation) return;
         // The "new process": another commit and boot id, idle again.
         commit = NEW;
         bootId = randomUUID();
         progress = { state: 'idle', steps: [], log: '' };
         return;
       }
+      if (mine !== generation) return;
       step.status = 'done';
     }
   }
@@ -88,6 +95,8 @@ export function createFakeUpdater() {
       if (options.target && options.target !== NEW)
         throw Object.assign(new Error('mudou desde a verificação'), { status: 409 });
       const release = guard.begin();
+      releaseLock = release;
+      const mine = ++generation;
       progress = {
         state: 'running',
         steps: STEPS.map(([id, label]) => ({ id, label, status: 'pending' })),
@@ -95,7 +104,10 @@ export function createFakeUpdater() {
         target: NEW,
         startedAt: new Date().toISOString(),
       };
-      void run().finally(release);
+      void run(mine).finally(() => {
+        release();
+        if (releaseLock === release) releaseLock = undefined;
+      });
       return progress;
     },
     progress: () => progress,
@@ -103,6 +115,9 @@ export function createFakeUpdater() {
   return {
     service,
     reset() {
+      generation++;
+      releaseLock?.();
+      releaseLock = undefined;
       commit = OLD;
       checked = false;
       bootId = randomUUID();

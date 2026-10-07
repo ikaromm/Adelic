@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Page } from './fixtures';
 import { funnelPort } from '../../playwright.config';
 
 // Remote login (docs/specs/remote-access.md). The E2E server has a second loopback listener in

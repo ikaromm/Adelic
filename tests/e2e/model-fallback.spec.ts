@@ -1,4 +1,4 @@
-import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
+import { expect, test, type APIRequestContext, type Page } from './fixtures';
 
 // Switching model when the current one is overloaded (docs/specs/retries.md, "Troca de modelo").
 // The scripted provider (tests/e2e/server.ts) fails `[sobrecarga]` as overloaded on its default

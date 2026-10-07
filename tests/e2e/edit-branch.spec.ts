@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Page } from './fixtures';
 
 // Edit and resend, and branch a conversation (docs/specs/edit-branch.md), against the real
 // backend with the scripted provider: [eco] answers "Eco: <current request>".

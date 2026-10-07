@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Page } from './fixtures';
 
 // Provider handoff (docs/specs/provider-handoff.md) against the real backend with two scripted
 // providers, "Codex (E2E)" and "Kiro (E2E)". The handoff prompt gets a fixed summary;

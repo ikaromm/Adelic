@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Page } from './fixtures';
 
 // Installable app (docs/specs/pwa.md) on the production build. 127.0.0.1 is a secure
 // context, so the service worker registers like it would over HTTPS. Every other spec

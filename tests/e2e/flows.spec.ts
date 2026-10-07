@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Page } from './fixtures';
 
 // Critical user flows against the real backend and web build, with a scripted provider
 // (tests/e2e/server.ts). Each test starts its own conversation, so they do not depend

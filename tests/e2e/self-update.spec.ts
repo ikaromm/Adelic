@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Page } from './fixtures';
 
 // "Atualizar Adelic" (docs/specs/self-update.md) against the E2E server's scripted updater
 // (tests/e2e/fake-updater.ts): a checkout two commits behind, whose "restart" flips the

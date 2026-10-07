@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Page } from './fixtures';
 
 // System notifications while the window is in the background (src/hooks/useRunNotifications.ts).
 // window.Notification is replaced by a recorder and the page pretends to be hidden and

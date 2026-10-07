@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test } from './fixtures';
 
 // Remote access over plain HTTP (a Tailscale IP, docs/specs/remote-access.md) is not a secure
 // context, so browsers omit APIs such as crypto.randomUUID and navigator.clipboard. The tests

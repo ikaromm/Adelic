@@ -39,7 +39,7 @@ export function SessionItem({
   );
 }
 
-export type Page = 'chat' | 'activity' | 'automations' | 'memory' | 'settings';
+export type Page = 'chat' | 'activity' | 'automations' | 'memory' | 'settings' | 'git';
 
 /** Footer navigation: Activity, Automations, Memory (with service status) and Settings. */
 export function SidebarNav({

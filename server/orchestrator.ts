@@ -106,6 +106,8 @@ export class Orchestrator {
   >();
   /** Real paths of project folders being restored to a checkpoint; runs there cannot start. */
   private restoring = new Set<string>();
+  /** Real paths of repositories where a git panel mutation (stage, commit, push…) is running. */
+  private gitOps = new Set<string>();
   private starting = new Map<string, StartingRun>();
   private shuttingDown = false;
   private deciding = new Set<string>();
@@ -246,6 +248,10 @@ export class Orchestrator {
       const projectPath = realPath(project.path);
       if ([...this.restoring].some((path) => overlaps(path, projectPath)))
         throw Object.assign(new Error('As alterações de uma execução estão sendo desfeitas neste projeto'), {
+          status: 409,
+        });
+      if ([...this.gitOps].some((path) => overlaps(path, projectPath)))
+        throw Object.assign(new Error('Uma operação do git está em andamento neste projeto; tente de novo'), {
           status: 409,
         });
       const stored = this.store.listMessages(session.id);
@@ -1767,6 +1773,35 @@ export class Orchestrator {
     return false;
   }
   /**
+   * Why git panel mutations are refused in `path` right now: a run that may write in an
+   * overlapping folder, an undo or another git operation there. Undefined when allowed.
+   */
+  gitBlock(path: string): string | undefined {
+    const root = realPath(path);
+    const writing = [...new Set([...this.writingProjects, ...this.reservedProjectWrites.keys()])].some((id) => {
+      const sessionId = id.startsWith('detached:') ? id.slice('detached:'.length) : undefined;
+      const folder = sessionId ? join(this.store.dataDir, 'conversations', sessionId) : this.store.getProject(id)?.path;
+      return folder !== undefined && overlaps(realPath(folder), root);
+    });
+    if (writing) return 'Há uma execução alterando arquivos neste projeto; aguarde ela terminar';
+    if ([...this.restoring].some((p) => overlaps(p, root)))
+      return 'As alterações de uma execução estão sendo desfeitas neste projeto';
+    if ([...this.gitOps].some((p) => overlaps(p, root))) return 'Outra operação do git está em andamento neste projeto';
+    return undefined;
+  }
+  /** Runs a git panel mutation in `path`; 409 when gitBlock refuses. New runs there wait for 409. */
+  async withGitOperation<T>(path: string, work: () => Promise<T>): Promise<T> {
+    const reason = this.gitBlock(path);
+    if (reason) throw Object.assign(new Error(reason), { status: 409 });
+    const root = realPath(path);
+    this.gitOps.add(root);
+    try {
+      return await work();
+    } finally {
+      this.gitOps.delete(root);
+    }
+  }
+  /**
    * Puts back the files a finished run changed (see server/checkpoints.ts). Refused while any
    * run is active in that folder, and new runs there wait for 409 until it finishes.
    */
@@ -1778,7 +1813,7 @@ export class Orchestrator {
     if (!run.checkpoint?.available || !root || !run.checkpoint.after)
       throw new CheckpointError('Esta execução não tem alterações registradas para desfazer', 404);
     if (run.checkpoint.restoredAt) throw new CheckpointError('As alterações desta execução já foram desfeitas');
-    if (this.busyAt(root) || [...this.restoring].some((path) => overlaps(path, root)))
+    if (this.busyAt(root) || [...this.restoring, ...this.gitOps].some((path) => overlaps(path, root)))
       throw new CheckpointError('Há uma execução em andamento neste projeto; aguarde ou cancele antes de desfazer');
     this.restoring.add(root);
     try {

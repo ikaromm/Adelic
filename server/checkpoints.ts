@@ -38,19 +38,53 @@ export const LIMITS = {
 };
 const TIMEOUT_MS = 120_000;
 
-const SAFE_CONFIG = [
+/** Every hook event git knows; config-defined hooks (`hook.<name>.command`) ignore core.hooksPath. */
+const HOOK_EVENTS = [
+  'applypatch-msg',
+  'pre-applypatch',
+  'post-applypatch',
+  'pre-commit',
+  'pre-merge-commit',
+  'prepare-commit-msg',
+  'commit-msg',
+  'post-commit',
+  'pre-rebase',
+  'post-checkout',
+  'post-merge',
+  'pre-push',
+  'pre-receive',
+  'update',
+  'proc-receive',
+  'post-receive',
+  'post-update',
+  'reference-transaction',
+  'push-to-checkout',
+  'pre-auto-gc',
+  'post-rewrite',
+  'sendemail-validate',
+  'fsmonitor-watchman',
+  'post-index-change',
+];
+/** Disables hooks from the hooks folder and from `hook.*` config alike. */
+export const HOOKS_OFF = ['core.hooksPath=/dev/null', ...HOOK_EVENTS.map((e) => `hook.${e}.enabled=false`)].flatMap(
+  (c) => ['-c', c],
+);
+/** `-c` pairs that stop repository config from running programs, except hooks (see HOOKS_OFF). */
+export const HARDENED_BASE = [
   'core.fsmonitor=false',
   'core.untrackedCache=false',
   'core.splitIndex=false',
-  'core.hooksPath=/dev/null',
   'core.quotePath=false',
   'commit.gpgSign=false',
   'gc.auto=0',
   'maintenance.auto=false',
   'color.ui=false',
-  'user.name=Adelic',
-  'user.email=adelic@localhost',
+  'log.showSignature=false',
 ].flatMap((c) => ['-c', c]);
+/** `-c` pairs that stop repository config from running programs or redirecting output. */
+export const HARDENED_CONFIG = [...HARDENED_BASE, ...HOOKS_OFF];
+/** Checkpoint commits (never on a branch) carry the Adelic identity. */
+export const SAFE_CONFIG = [...HARDENED_CONFIG, '-c', 'user.name=Adelic', '-c', 'user.email=adelic@localhost'];
 
 export class CheckpointError extends Error {
   constructor(
@@ -62,7 +96,7 @@ export class CheckpointError extends Error {
   }
 }
 
-interface Repo {
+export interface Repo {
   /** Real path of the snapshotted folder (the project); may be below the repository top. */
   root: string;
   /** Repository top level; tree and file paths are relative to it. */
@@ -71,7 +105,7 @@ interface Repo {
   format: 'sha1' | 'sha256';
 }
 
-function baseEnv(repo?: Repo, extra: Record<string, string> = {}) {
+export function baseEnv(repo?: Repo, extra: Record<string, string> = {}) {
   const env: NodeJS.ProcessEnv = {};
   // Inherited GIT_* variables (GIT_DIR, GIT_INDEX_FILE…) would redirect the commands.
   for (const [key, value] of Object.entries(process.env)) if (!key.startsWith('GIT_')) env[key] = value;
@@ -89,21 +123,26 @@ function baseEnv(repo?: Repo, extra: Record<string, string> = {}) {
   };
 }
 
-function git(
-  cwd: string,
-  args: string[],
-  opts: {
-    repo?: Repo;
-    input?: string | Buffer;
-    env?: Record<string, string>;
-    maxBytes?: number;
-    timeoutMs?: number;
-  } = {},
-): Promise<Buffer> {
+export interface GitOptions {
+  repo?: Repo;
+  input?: string | Buffer;
+  env?: Record<string, string>;
+  maxBytes?: number;
+  timeoutMs?: number;
+  /** `-c` arguments placed before the command; defaults to SAFE_CONFIG (with the Adelic identity). */
+  config?: string[];
+  /** Exit codes other than 0 that still count as success (e.g. 1 for `diff --no-index`). */
+  okCodes?: number[];
+  /** Output beyond `maxBytes` is cut instead of failing (the command is stopped). */
+  truncate?: boolean;
+}
+
+/** Runs git with execFile (no shell), a timeout and the hardened environment. */
+export function git(cwd: string, args: string[], opts: GitOptions = {}): Promise<Buffer> {
   return new Promise((done, fail) => {
     const child = execFile(
       'git',
-      [...SAFE_CONFIG, ...args],
+      [...(opts.config ?? SAFE_CONFIG), ...args],
       {
         cwd,
         env: baseEnv(opts.repo, opts.env),
@@ -113,9 +152,12 @@ function git(
         windowsHide: true,
       },
       (error, stdout, stderr) => {
-        if (error) {
+        const code = (error as { code?: unknown } | null)?.code;
+        if (error && opts.truncate && code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') done(stdout);
+        else if (error && typeof code === 'number' && opts.okCodes?.includes(code) && !error.killed) done(stdout);
+        else if (error) {
           const detail = stderr.toString('utf8').trim().split('\n').at(-1) || error.message;
-          fail(Object.assign(new Error(`git ${args[0]}: ${detail}`), { code: (error as { code?: unknown }).code }));
+          fail(Object.assign(new Error(`git ${args[0]}: ${detail}`), { code, stderr: stderr.toString('utf8') }));
         } else done(stdout);
       },
     );
@@ -126,11 +168,11 @@ function git(
 
 /** Git records only the owner's execute bit. */
 const fileMode = (mode: number) => (mode & 0o100 ? '100755' : '100644');
-const lines = (b: Buffer) => b.toString('utf8').split('\n').filter(Boolean);
-const nulSplit = (b: Buffer) => b.toString('utf8').split('\0').filter(Boolean);
+export const lines = (b: Buffer) => b.toString('utf8').split('\n').filter(Boolean);
+export const nulSplit = (b: Buffer) => b.toString('utf8').split('\0').filter(Boolean);
 
 /** Finds the repository for `path`, or undefined when it is not inside a work tree. */
-async function openRepo(path: string, requireToplevel: boolean): Promise<Repo | undefined> {
+export async function openRepo(path: string, requireToplevel: boolean): Promise<Repo | undefined> {
   let root: string;
   try {
     root = await realpath(path);
@@ -481,7 +523,7 @@ export async function restoreCheckpoint(runId: string, checkpoint: RunCheckpoint
 }
 
 /** Directories left empty by removing an added file (git does not track empty directories). */
-async function removeEmptyParents(root: string, target: string) {
+export async function removeEmptyParents(root: string, target: string) {
   for (let dir = dirname(target); dir.startsWith(root + sep); dir = dirname(dir)) {
     try {
       await rmdir(dir);

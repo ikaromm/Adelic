@@ -112,6 +112,7 @@ export const CreateProjectSchema = z.object({
 });
 export const PatchProjectSchema = z.object({
   name: optional(text(), 'Campos de projeto inválidos'),
+  git: optional(z.object({ runHooks: z.boolean() }).strict(), 'git inválido'),
   memoryWorkspace: optional(text(100), 'Campos de projeto inválidos'),
   memoryProject: optional(text(100), 'Campos de projeto inválidos'),
   spendLimits: optional(
@@ -414,3 +415,29 @@ export const SharedMemoryWriteSchema = z.object({
 });
 /** Legacy save bound to an Adelic project (no version check from the client). */
 export const ProjectMemoryWriteSchema = z.object({ projectId: text(), path: text(500), body: memoryBody });
+
+/** Git panel (docs/specs/git-panel.md). Paths are checked against the current status list. */
+export const GIT_COMMIT_MESSAGE_MAX = 5000;
+const gitPaths = z.array(z.string().min(1).max(4096)).max(1000);
+export const GitStageSchema = z
+  .object({ paths: optional(gitPaths, 'paths inválido'), all: optional(z.boolean(), 'all inválido') })
+  .refine((v) => v.all === true || (v.paths?.length ?? 0) > 0, { message: 'Informe paths ou all: true' });
+export const GitDiscardSchema = z.object({
+  paths: required(gitPaths.min(1), 'paths obrigatório'),
+  confirm: required(z.literal(true), 'confirm: true é obrigatório para descartar alterações'),
+  /** Also confirms files that have staged changes too (those are kept). */
+  mixed: optional(z.boolean(), 'mixed inválido'),
+});
+export const GitCommitSchema = z.object({
+  message: required(
+    z.string().refine((m) => m.trim().length > 0 && m.length <= GIT_COMMIT_MESSAGE_MAX),
+    `Mensagem obrigatória, com até ${GIT_COMMIT_MESSAGE_MAX} caracteres`,
+  ),
+});
+export const GitPushSchema = z.object({
+  confirm: required(z.literal(true), 'confirm: true é obrigatório para enviar'),
+});
+export const GitDiffQuerySchema = z.object({
+  path: required(z.string().min(1).max(4096), 'path obrigatório'),
+  staged: optional(z.enum(['0', '1', 'true', 'false']), 'staged inválido'),
+});

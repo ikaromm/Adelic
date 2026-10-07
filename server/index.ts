@@ -13,6 +13,7 @@ import { commandsRoutes } from './http/commands.js';
 import { automationsRoutes } from './http/automations.js';
 import { AutomationService, type AutomationClock } from './automations.js';
 import { diagnosticsRoutes } from './http/diagnostics.js';
+import { gitRoutes } from './http/git.js';
 import { memoryRoutes } from './http/memory.js';
 import { projectsRoutes } from './http/projects.js';
 import { plansRoutes } from './http/plans.js';
@@ -119,6 +120,7 @@ export function createBackend(
   const automations = new AutomationService(store, orchestrator, automationClock);
   const context: BackendContext = { store, orchestrator, providerList, automations };
   app.use(projectsRoutes(context));
+  app.use(gitRoutes(context));
   app.use(sessionsRoutes(context));
   app.use(runsRoutes(context));
   app.use(plansRoutes(context));

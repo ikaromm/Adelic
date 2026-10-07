@@ -88,6 +88,7 @@ export function projectsRoutes({ store, orchestrator }: BackendContext) {
       if (Object.keys(merged).length) p.spendLimits = merged;
       else delete p.spendLimits;
     }
+    if (fields.data.git) p.git = fields.data.git;
     res.json(store.updateProject(p));
   });
   return app;

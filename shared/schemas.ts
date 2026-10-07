@@ -10,6 +10,16 @@ import {
 } from './commands.js';
 import { MENTION_PATH_MAX } from './mentions.js';
 import { AUTO_COMPACT_MAX_TOKENS, AUTO_COMPACT_MIN_TOKENS } from './compaction.js';
+import {
+  BLOCKED_COMMANDS_MAX,
+  BLOCKED_PATTERN_MAX,
+  HOOK_CHECKS_MAX,
+  HOOK_COMMAND_MAX,
+  HOOK_NAME_MAX,
+  HOOK_TIMEOUT_DEFAULT,
+  HOOK_TIMEOUT_MAX,
+  HOOK_TIMEOUT_MIN,
+} from './hooks.js';
 
 // Request schemas shared by the server routes (and usable by the UI). Each field keeps
 // the exact error message the API returned before zod, so clients see no change.
@@ -238,6 +248,48 @@ export const PatchCommandSchema = z.object({
   description: optional(commandDescription, commandMessages.description),
   template: optional(commandTemplate, commandMessages.template),
   mode: optional(z.union([z.null(), z.enum(commandModes)]), commandMessages.mode),
+});
+
+// Per-project hooks (docs/specs/project-hooks.md).
+const AfterEditCheckSchema = z
+  .object({
+    name: text(HOOK_NAME_MAX),
+    command: text(HOOK_COMMAND_MAX).refine((value) => !value.includes('\0')),
+    timeoutSec: z.number().int().min(HOOK_TIMEOUT_MIN).max(HOOK_TIMEOUT_MAX).default(HOOK_TIMEOUT_DEFAULT),
+    enabled: z.boolean().default(true),
+  })
+  .strict();
+export const HOOKS_MESSAGES = {
+  afterEdit: `afterEdit inválido: até ${HOOK_CHECKS_MAX} verificações com name (até ${HOOK_NAME_MAX} caracteres), command (até ${HOOK_COMMAND_MAX}), timeoutSec de ${HOOK_TIMEOUT_MIN} a ${HOOK_TIMEOUT_MAX} e enabled`,
+  blockedCommands: `blockedCommands inválido: até ${BLOCKED_COMMANDS_MAX} padrões de até ${BLOCKED_PATTERN_MAX} caracteres, sem repetição`,
+  autoFix: 'autoFix deve ser booleano',
+};
+/** PUT /api/projects/:id/hooks replaces the whole configuration; absent fields become empty/off. */
+export const ProjectHooksSchema = z
+  .object({
+    afterEdit: optional(z.array(AfterEditCheckSchema).max(HOOK_CHECKS_MAX), HOOKS_MESSAGES.afterEdit).transform(
+      (value) => value ?? [],
+    ),
+    blockedCommands: optional(
+      z
+        .array(text(BLOCKED_PATTERN_MAX).transform((value) => value.replace(/\s+/g, ' ')))
+        .max(BLOCKED_COMMANDS_MAX)
+        .refine((items) => new Set(items).size === items.length),
+      HOOKS_MESSAGES.blockedCommands,
+    ).transform((value) => value ?? []),
+    autoFix: optional(z.boolean(), HOOKS_MESSAGES.autoFix).transform((value) => value ?? false),
+  })
+  .strict();
+/** POST /api/projects/:id/hooks/test runs one configured check now. */
+export const HookTestSchema = z.object({
+  index: required(
+    z
+      .number()
+      .int()
+      .min(0)
+      .max(HOOK_CHECKS_MAX - 1),
+    'index inválido',
+  ),
 });
 
 /** Query of GET /api/projects/:id/files (the file autocomplete for `@` mentions). */

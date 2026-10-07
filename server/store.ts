@@ -26,6 +26,7 @@ import {
   QUEUE_LIMIT,
 } from '../shared/contracts.js';
 import type { SavedCommand } from '../shared/commands.js';
+import { EMPTY_HOOKS, type ProjectHooks } from '../shared/hooks.js';
 import { migrate, type MigrationResult } from './migrations.js';
 
 const defaults: Settings = {
@@ -697,6 +698,20 @@ export class Store {
       )
       .run(command.id, command.projectId, JSON.stringify(command));
     return command;
+  }
+  /** Per-project hooks (docs/specs/project-hooks.md); empty when never configured. */
+  getHooks(projectId: string): ProjectHooks {
+    const row = this.db.prepare('SELECT data FROM project_hooks WHERE project_id=?').get(projectId) as
+      { data: string } | undefined;
+    return row ? { ...EMPTY_HOOKS, ...(JSON.parse(row.data) as Partial<ProjectHooks>) } : structuredClone(EMPTY_HOOKS);
+  }
+  putHooks(projectId: string, hooks: ProjectHooks) {
+    this.db
+      .prepare(
+        'INSERT INTO project_hooks(project_id,data) VALUES(?,?) ON CONFLICT(project_id) DO UPDATE SET data=excluded.data',
+      )
+      .run(projectId, JSON.stringify(hooks));
+    return this.getHooks(projectId);
   }
   deleteCommand(id: string) {
     return Number(this.db.prepare('DELETE FROM commands WHERE id=?').run(id).changes) > 0;

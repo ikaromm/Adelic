@@ -4,6 +4,7 @@ import {
   activityForRun,
   activityIsVisible,
   actionNeedsDisclosure,
+  checksSummary,
   commandPreview,
   runStatusLabel,
   statusLabel,
@@ -112,5 +113,36 @@ describe('conversation activity grouping', () => {
     const long = commandPreview(`bash -lc '${'x'.repeat(400)}'`);
     expect(long).toHaveLength(240);
     expect(long.endsWith('…')).toBe(true);
+  });
+});
+
+describe('project checks in the run activity', () => {
+  const at = (id: string, extra: Partial<RunEvent>): RunEvent => ({
+    id,
+    runId: 'r',
+    sessionId: 's',
+    type: 'status',
+    text: id,
+    createdAt: `2026-10-07T00:00:0${id.length}Z`,
+    ...extra,
+  });
+  it('separates checks and blocked commands from the other events and summarises the checks', () => {
+    const events = [
+      at('c1', { type: 'check', check: { name: 'a', status: 'passed' } }),
+      at('c22', { type: 'check', check: { name: 'b', status: 'failed', exitCode: 1 } }),
+      at('b333', { type: 'approval', status: 'blocked', text: 'Comando bloqueado pelas regras do projeto: git push' }),
+      at('s4444', { type: 'approval', status: 'denied' }),
+    ];
+    const activity = activityForRun('r', [], events);
+    expect(activity.checks.map((e) => e.id)).toEqual(['c1', 'c22']);
+    expect(activity.blocked.map((e) => e.id)).toEqual(['b333']);
+    expect(activity.events.map((e) => e.id)).toEqual(['s4444']);
+    expect(activityIsVisible(activityForRun('r', [], [events[2]!]))).toBe(true);
+    expect(checksSummary(activity.checks)).toBe('2 verificações · 1 falhou');
+    expect(checksSummary([events[0]!])).toBe('1 verificação ok');
+    expect(checksSummary([at('x', { type: 'check', check: { name: 'x', status: 'running' } })])).toBe(
+      '1 verificação · rodando',
+    );
+    expect(checksSummary([])).toBe('');
   });
 });

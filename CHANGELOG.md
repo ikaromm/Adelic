@@ -2,6 +2,7 @@
 
 ## Não publicado
 
+- **Verificações e bloqueios** por projeto (Configurações): até 5 verificações (ex.: `npm test`) rodam depois de uma execução que alterou arquivos, no sandbox dos agentes e sem rede, com resultado e saída na atividade; **Corrigir automaticamente** (desligado por padrão) pede uma correção ao agente uma vez; comandos que casam com padrões bloqueados (`git push*`) são negados sem perguntar, mesmo no modo automático. Veja [verificações e bloqueios](docs/specs/project-hooks.md).
 - Menções `@arquivo` no campo de mensagem: a lista sugere os arquivos do projeto enquanto você digita, e os arquivos de texto mencionados (até 5, 512 KB cada) entram no pedido ao agente, com o caminho conferido para não sair do projeto. Veja [menções de arquivos](docs/specs/mentions.md).
 - Troca de modelo quando o atual está sobrecarregado ou no limite de requisições: **Tentar com outro modelo** oferece até 3 alternativas e muda a conversa para a escolhida; opcionalmente, **Trocar de modelo se o atual estiver sobrecarregado** tenta até 3 modelos configurados, só naquela resposta, depois das novas tentativas e só sem efeito visível. Veja [troca de modelo](docs/specs/retries.md#troca-de-modelo).
 - Paleta de comandos com Ctrl+P (⌘P): ações, conversas, projetos, agente e modelo, modo e comandos salvos, com busca sem acentos e escolhas recentes primeiro. Veja [paleta de comandos](docs/specs/command-palette.md).

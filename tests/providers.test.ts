@@ -1648,6 +1648,44 @@ rl.on('line', (line) => {
     }
   });
 
+  it('declines a command blocked by the project rules even when the safe classifier would approve it', async () => {
+    const prior = process.env.FAKE_SCENARIO;
+    process.env.FAKE_SCENARIO = 'command-approval';
+    const testTmp = path.join(process.cwd(), '.adelic/test-tmp');
+    await mkdir(testTmp, { recursive: true });
+    const directory = await mkdtemp(path.join(testTmp, 'codex-blocked-'));
+    temporaryDirectories.push(directory);
+    const approvalLog = path.join(directory, 'approval.json');
+    const provider = fixtureCodex(await fakeServer({ approvalLog }));
+    const events: { status?: string; title?: string; blocked?: string; command?: string }[] = [];
+    try {
+      await expect(
+        provider.run(
+          {
+            ...runInput('run a safe command'),
+            cwd: directory,
+            sandbox: 'workspace-write' as const,
+            approvalMode: 'auto-safe',
+            blockedCommands: ['p*d'],
+            plan: { ...runInput('x').plan, tools: true },
+          },
+          (event) => {
+            if (event.type === 'approval') events.push(event.approval);
+          },
+          new AbortController().signal,
+        ),
+      ).resolves.toMatchObject({ stopReason: 'completed' });
+      expect(events).toMatchObject([
+        { status: 'denied', title: 'Comando bloqueado pelas regras do projeto', blocked: 'p*d', command: 'pwd' },
+      ]);
+      expect(JSON.parse(await readFile(approvalLog, 'utf8'))).toMatchObject({ result: { decision: 'decline' } });
+    } finally {
+      await provider.shutdown();
+      if (prior === undefined) delete process.env.FAKE_SCENARIO;
+      else process.env.FAKE_SCENARIO = prior;
+    }
+  });
+
   it('responds with a JSON-RPC error to unknown server requests instead of leaving them pending', async () => {
     const prior = process.env.FAKE_SCENARIO;
     process.env.FAKE_SCENARIO = 'unknown-request';

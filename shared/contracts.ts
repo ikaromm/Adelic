@@ -1,3 +1,4 @@
+import type { CheckResult } from './hooks.js';
 export type ProviderId = 'codex' | 'claude' | 'kiro' | 'opencode';
 export type Mode = 'auto' | 'fast' | 'deep';
 export type ReasoningEffort = string;
@@ -227,6 +228,8 @@ export interface Run {
   discardedAt?: string;
   /** A manual "Compactar conversa" run: one read-only summary call, no messages. */
   compaction?: { auto: boolean };
+  /** "Corrigir automaticamente": the run started because checks of `sourceRunId` failed. */
+  hookFix?: { sourceRunId: string };
 }
 /** A provider and one of its models; no model means the provider's default. */
 export interface ModelRef {
@@ -318,6 +321,10 @@ export interface Approval {
   detail: string;
   kind: 'command' | 'file' | 'tool';
   status: 'pending' | 'approved' | 'denied';
+  /** Full command text, when the runtime sent one (matched against the project's blocked commands). */
+  command?: string;
+  /** The project's blocked-command pattern that denied it (docs/specs/project-hooks.md). */
+  blocked?: string;
 }
 /** A message waiting for the active run of its conversation to finish. */
 export interface QueuedMessage {
@@ -347,7 +354,7 @@ export interface RunEvent {
   id: string;
   runId: string;
   sessionId: string;
-  type: 'status' | 'tool' | 'approval' | 'error' | 'retry' | 'fallback';
+  type: 'status' | 'tool' | 'approval' | 'error' | 'retry' | 'fallback' | 'check';
   text: string;
   createdAt: string;
   toolName?: string;
@@ -358,6 +365,8 @@ export interface RunEvent {
   of?: number;
   delayMs?: number;
   error?: string;
+  /** 'check' events: one after-edit check of the project, updated while it runs. */
+  check?: CheckResult;
 }
 export interface Settings {
   defaultProviderId: ProviderId;
@@ -482,6 +491,11 @@ export interface RunInput {
    * not listed here: the orchestrator already inlined them into `prompt`.
    */
   attachments?: { path: string; name: string; mime: string }[];
+  /**
+   * The project's blocked-command patterns. Providers that auto-approve deny a matching
+   * command before that decision; the orchestrator denies matching pending requests.
+   */
+  blockedCommands?: string[];
 }
 export type ProviderEvent =
   | { type: 'delta'; text: string }

@@ -61,6 +61,8 @@ import { buildPlanningPrompt, planCommand } from './plan-markdown.js';
 import { Plans } from './plans.js';
 import { boundedHistory, handoffHistory, performHandoff, type HandoffRequest } from './provider-handoff.js';
 import { COMPACTING_TEXT, COMPACT_INVALID, compactCommand } from '../shared/compaction.js';
+import { blockedBy, EMPTY_HOOKS, normalizeCommand, type ProjectHooks } from '../shared/hooks.js';
+import { HookChecks, fixLabel, fixPrompt, type runCheck } from './hooks.js';
 import {
   autoCompactReason,
   buildCompactionPrompt,
@@ -77,6 +79,8 @@ export interface StartOptions {
   planTask?: { planId: string; taskId: string; prompt: string };
   /** Edit and resend: this user message and everything after it are discarded first. */
   replaceFrom?: string;
+  /** "Corrigir automaticamente": `content` is the visible label, `prompt` goes to the agent. */
+  hookFix?: { sourceRunId: string; prompt: string };
 }
 /** A plan-mode run: its kind and the prompt that replaces the usual one. */
 type SpecialRun = { ref: RunPlanRef; prompt: string };
@@ -96,7 +100,7 @@ interface StartingRun {
 export class Orchestrator {
   private active = new Map<
     string,
-    { runId: string; controller: AbortController; done?: Promise<void>; projectPath?: string }
+    { runId: string; controller: AbortController; done?: Promise<void>; projectPath?: string; writes?: boolean }
   >();
   /** Real paths of project folders being restored to a checkpoint; runs there cannot start. */
   private restoring = new Set<string>();
@@ -113,6 +117,8 @@ export class Orchestrator {
   private interrupting = new Map<string, string>();
   /** Plan mode: plans, their approval and sequential task execution. */
   readonly plans: Plans;
+  /** After-edit checks per project (docs/specs/project-hooks.md). */
+  readonly hookChecks: HookChecks;
   constructor(
     readonly store: Store,
     private readonly providers: ProviderRegistry,
@@ -121,7 +127,21 @@ export class Orchestrator {
     private readonly providerList: () => Promise<ProviderInfo[]> = () => providers.list(),
     /** Test hook: shorter delays or a fixed retry count. */
     private readonly retryOverrides?: Partial<RetryPolicy>,
+    /** Test hook: the after-edit check runner (production: bubblewrap). */
+    checkRunner?: typeof runCheck,
   ) {
+    this.hookChecks = new HookChecks({
+      runner: checkRunner,
+      saveEvent: (event) => {
+        this.store.addEvent(event);
+        this.emit({ type: 'event', event });
+      },
+      startFix: async (sessionId, sourceRunId, failures) => {
+        await this.start(this.requireSession(sessionId), fixLabel(failures), undefined, [], {
+          hookFix: { sourceRunId, prompt: fixPrompt(failures) },
+        });
+      },
+    });
     this.plans = new Plans(store, {
       start: (session, content, options) => this.start(session, content, undefined, [], options),
       isActive: (sessionId) => this.isActive(sessionId),
@@ -170,13 +190,13 @@ export class Orchestrator {
     if (this.shuttingDown) throw Object.assign(new Error('Orquestrador está encerrando'), { status: 503 });
     // `/compactar` alone is a built-in action, checked before saved commands: no user message,
     // just the summary card (docs/specs/compaction.md).
-    const compact = options.planTask ? undefined : compactCommand(content);
+    const compact = options.planTask || options.hookFix ? undefined : compactCommand(content);
     if (compact === 'invalid') throw Object.assign(new Error(COMPACT_INVALID), { status: 400 });
     if (compact === 'compact') {
       if (attachments.length) throw Object.assign(new Error('/compactar não aceita anexos'), { status: 400 });
       return this.compact(session.id);
     }
-    if (!options.planTask && planCommand(content) === '')
+    if (!options.planTask && !options.hookFix && planCommand(content) === '')
       throw Object.assign(new Error('Escreva o pedido depois de /plano'), { status: 400 });
     if (clientMessageId) {
       const existing = this.store.findClientMessage(session.id, clientMessageId);
@@ -254,15 +274,17 @@ export class Orchestrator {
       // `/name args` runs the saved command's template (the user message keeps the typed text)
       // and the command's mode applies to this run only. `/plano` wins over a command of the
       // same name. Detached conversations see only global and built-in commands.
-      const planFromCommand = options.planTask ? undefined : planCommand(content);
-      const expanded: ReturnType<typeof expandMessage> =
-        options.planTask || planFromCommand !== undefined
+      const planFromCommand = options.planTask || options.hookFix ? undefined : planCommand(content);
+      const expanded: ReturnType<typeof expandMessage> = options.hookFix
+        ? { prompt: options.hookFix.prompt }
+        : options.planTask || planFromCommand !== undefined
           ? { prompt: content }
           : expandMessage(this.store, content, session.projectId === null ? undefined : project);
       const prompt = expanded.prompt;
-      const planRequest = options.planTask
-        ? undefined
-        : (planFromCommand ?? (session.planFirst ? prompt.trim() : undefined));
+      const planRequest =
+        options.planTask || options.hookFix
+          ? undefined
+          : (planFromCommand ?? (session.planFirst ? prompt.trim() : undefined));
       const special: SpecialRun | undefined = options.planTask
         ? {
             ref: { kind: 'task', planId: options.planTask.planId, taskId: options.planTask.taskId },
@@ -292,6 +314,8 @@ export class Orchestrator {
             history,
             settings.memoryEnabled && session.projectId !== null,
           );
+      // A fix needs to edit the project, whatever the wording of the failure output.
+      if (options.hookFix) plan.tools = true;
       if (session.thinking && session.thinking !== 'auto') {
         plan.effort = session.thinking;
         this.validateCoordinatorThinking(session.providerId, session.model, session.thinking, catalog!);
@@ -331,6 +355,7 @@ export class Orchestrator {
         route: plan,
         startedAt: now,
         ...(special ? { plan: special.ref } : {}),
+        ...(options.hookFix ? { hookFix: { sourceRunId: options.hookFix.sourceRunId } } : {}),
       };
       session = {
         ...session,
@@ -344,11 +369,12 @@ export class Orchestrator {
       const discarded = this.store.createRun(user, assistant, run, session, clientMessageId, options.replaceFrom);
       if (options.planTask) this.plans.taskStarted(options.planTask.planId, options.planTask.taskId, runId);
       if (reserveProject) this.reservedProjectWrites.set(project.id, runId);
-      const active = { runId, controller, projectPath } as {
+      const active = { runId, controller, projectPath, writes: reserveProject } as {
         runId: string;
         controller: AbortController;
         done?: Promise<void>;
         projectPath?: string;
+        writes?: boolean;
       };
       this.active.set(session.id, active);
       this.starting.delete(session.id);
@@ -384,8 +410,9 @@ export class Orchestrator {
         special,
         // `@path` mentions come from what the user typed (or the task text), never from a
         // command template, and are read when the run starts (docs/specs/mentions.md).
-        parseMentions(content),
+        options.hookFix ? [] : parseMentions(content),
         context.summary,
+        session.projectId === null ? structuredClone(EMPTY_HOOKS) : this.store.getHooks(project.id),
       );
       reservation.result = { runId, messageId: userId };
       return reservation.result;
@@ -752,12 +779,15 @@ export class Orchestrator {
     special?: SpecialRun,
     mentions: string[] = [],
     summary?: string,
+    hooks: ProjectHooks = EMPTY_HOOKS,
   ) {
     let response = '',
       firstTokenAt: number | undefined;
     const started = Date.parse(run.startedAt);
     let memoryContext: string | undefined;
     try {
+      // Checks still running from an earlier run stop before this one may write (with a note).
+      if (mayWrite) await this.hookChecks.cancel(project.id, 'nova execução neste projeto');
       // The project is reserved for this run, so nothing else writes there until `after`.
       if (mayWrite) {
         run.checkpoint = await checkpointBefore(project.path, run.id, {
@@ -852,6 +882,7 @@ export class Orchestrator {
           memoryGuidance,
           attached,
           summary,
+          hooks.blockedCommands,
         );
         response = assistant.content;
         run.status = controller.signal.aborted ? 'cancelled' : assistant.status === 'failed' ? 'failed' : 'completed';
@@ -885,6 +916,7 @@ export class Orchestrator {
           sandbox: settings.sandbox,
           approvalMode: settings.approvalMode ?? 'auto-safe',
           memoryContext: boundedMemory,
+          ...(hooks.blockedCommands.length ? { blockedCommands: hooks.blockedCommands } : {}),
           ...(summary ? { summary } : {}),
           ...(attached.images.length ? { attachments: attached.images } : {}),
         },
@@ -931,6 +963,7 @@ export class Orchestrator {
               });
             else if (event.type === 'approval') {
               const a: Approval = { ...event.approval, runId: run.id, sessionId: session.id };
+              if (this.screenApproval(a, hooks.blockedCommands)) return;
               if (readOnlyPlan && a.kind === 'file') {
                 // Planning is read-only: a file change is refused without asking the user.
                 a.status = 'denied';
@@ -1050,6 +1083,8 @@ export class Orchestrator {
       this.active.delete(session.id);
       this.emit({ type: 'message', message: assistant });
       this.emit({ type: 'run', run });
+      // Before the queue drains: a run started from it cancels these checks instead of racing them.
+      if (session.projectId !== null && !this.shuttingDown) this.afterEditChecks(project, run);
       // Plan mode first: it may start the next task, which keeps the queue waiting.
       try {
         this.plans.runEnded(run, response);
@@ -1075,6 +1110,7 @@ export class Orchestrator {
     memoryGuidance = '',
     attached: { images: NonNullable<RunInput['attachments']>; text: string } = { images: [], text: '' },
     summary?: string,
+    blockedCommands: string[] = [],
   ) {
     const config = project.orchestration ?? { enabled: true, maxWorkers: 2, review: true };
     const catalog = await this.providerList();
@@ -1171,6 +1207,7 @@ export class Orchestrator {
         sandbox,
         approvalMode: settings.approvalMode ?? 'auto-safe',
         memoryContext: taskMemory,
+        ...(blockedCommands.length ? { blockedCommands } : {}),
         // The conversation summary goes where the conversation goes; review and synthesis
         // work from the bounded task summaries only.
         ...(summary && task.role !== 'reviewer' && task.role !== 'synthesis' ? { summary } : {}),
@@ -1211,6 +1248,7 @@ export class Orchestrator {
               effects.note(event.type === 'delta' ? 'text' : event.type);
             if (event.type === 'approval') {
               const owned: Approval = { ...event.approval, runId: run.id, sessionId: session.id };
+              if (this.screenApproval(owned, blockedCommands)) return;
               this.store.putApproval(owned);
               this.emit({ type: 'approval', approval: owned });
               this.publishEvent(session.id, run.id, 'approval', owned.title, { status: owned.status });
@@ -1766,6 +1804,10 @@ export class Orchestrator {
       throw new CheckpointError('Há uma execução em andamento neste projeto; aguarde ou cancele antes de desfazer');
     this.restoring.add(root);
     try {
+      // A check must not write while files are put back.
+      for (const project of this.store.listProjects())
+        if (this.hookChecks.running(project.id) && overlaps(realPath(project.path), root))
+          await this.hookChecks.cancel(project.id, 'alterações desfeitas');
       const result = await restoreCheckpoint(run.id, run.checkpoint);
       const latest = this.store.getRun(run.id) ?? run;
       latest.checkpoint = { ...run.checkpoint, restoredAt: new Date().toISOString() };
@@ -1775,6 +1817,72 @@ export class Orchestrator {
     } finally {
       this.restoring.delete(root);
     }
+  }
+  /**
+   * Project blocked commands (docs/specs/project-hooks.md): a request whose command matches is
+   * denied without asking, and recorded. Returns true when the approval was handled here.
+   * Only ever denies; it never approves anything.
+   */
+  private screenApproval(approval: Approval, patterns: string[]): boolean {
+    const command = approval.command;
+    const pattern = approval.blocked ?? (approval.status === 'pending' ? blockedBy(patterns, command) : undefined);
+    if (!pattern) return false;
+    const providerDenied = Boolean(approval.blocked);
+    approval.status = 'denied';
+    approval.blocked = pattern;
+    this.store.putApproval(approval);
+    this.emit({ type: 'approval', approval });
+    this.publishEvent(
+      approval.sessionId,
+      approval.runId,
+      'approval',
+      `Comando bloqueado pelas regras do projeto: ${normalizeCommand(command ?? approval.title).slice(0, 300)}`,
+      { status: 'blocked', error: `Padrão: ${pattern}` },
+    );
+    if (!providerDenied) void this.providers.approve(approval.id, 'deny').catch(() => undefined);
+    return true;
+  }
+  /** Starts the project's enabled after-edit checks when a run completed and changed files. */
+  private afterEditChecks(project: Project, run: Run) {
+    try {
+      const changed = (run.checkpoint?.files?.length ?? 0) + (run.checkpoint?.omitted ?? 0);
+      if (run.status !== 'completed' || !run.checkpoint?.available || !changed || run.checkpoint.restoredAt) return;
+      const hooks = this.store.getHooks(project.id);
+      const checks = hooks.afterEdit.filter((check) => check.enabled);
+      if (!checks.length) return;
+      // One automatic fix per user message: a fix run's own checks never start another.
+      void this.hookChecks.start(
+        project.id,
+        project.path,
+        'workspace-write',
+        run,
+        checks,
+        hooks.autoFix && !run.hookFix && !run.plan,
+      );
+    } catch {
+      /* Checks must never break the end of a run. */
+    }
+  }
+  /** "Testar" in the project settings: one check now; 409 while a run may write there. */
+  async testHook(projectId: string, index: number) {
+    if (this.shuttingDown) throw Object.assign(new Error('Orquestrador está encerrando'), { status: 503 });
+    const project = this.store.getProject(projectId);
+    if (!project) throw Object.assign(new Error('Projeto não encontrado'), { status: 404 });
+    const check = this.store.getHooks(projectId).afterEdit[index];
+    if (!check) throw Object.assign(new Error('Verificação não encontrada'), { status: 404 });
+    const path = realPath(project.path);
+    if (
+      this.writingProjects.has(projectId) ||
+      this.reservedProjectWrites.has(projectId) ||
+      [...this.active.values()].some((item) => item.writes && item.projectPath && overlaps(item.projectPath, path)) ||
+      [...this.restoring].some((item) => overlaps(item, path))
+    )
+      throw Object.assign(new Error('Há uma execução em andamento neste projeto; aguarde para testar'), {
+        status: 409,
+      });
+    if (this.hookChecks.running(projectId))
+      throw Object.assign(new Error('Já há verificações rodando neste projeto'), { status: 409 });
+    return this.hookChecks.test(projectId, project.path, 'workspace-write', check);
   }
   async cancel(sessionId: string) {
     const item = this.active.get(sessionId);
@@ -1798,6 +1906,14 @@ export class Orchestrator {
       throw Object.assign(new Error('Execução dona da aprovação não está ativa'), { status: 409 });
     if (this.deciding.has(approvalId))
       throw Object.assign(new Error('Aprovação já está sendo respondida'), { status: 409 });
+    // Rules saved while the request waited apply too: a blocked command is never approved.
+    const session = this.store.getSession(sessionId);
+    const rules = session?.projectId ? this.store.getHooks(session.projectId).blockedCommands : [];
+    const blocked = decision === 'approve' ? blockedBy(rules, approval.command) : undefined;
+    if (blocked) {
+      this.screenApproval(approval, rules);
+      throw Object.assign(new Error('Comando bloqueado pelas regras do projeto'), { status: 409 });
+    }
     this.deciding.add(approvalId);
     try {
       await this.providers.approve(approvalId, decision);
@@ -2212,6 +2328,7 @@ export class Orchestrator {
     await Promise.all([
       ...starting.map((item) => item.done),
       ...active.map((item) => item.done).filter((p): p is Promise<void> => Boolean(p)),
+      this.hookChecks.shutdown(),
     ]);
   }
 }

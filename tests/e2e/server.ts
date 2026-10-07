@@ -12,6 +12,9 @@
 // [falhar-tarefa] adds a third task whose run fails); task runs answer "Tarefa concluída".
 //   [eco]     → answers "Eco: <current request>" so tests can see what the agent received
 //               (saved commands: the expanded template, not the typed `/name`)
+//   [historico] → answers with the history it received (provider handoff flows)
+// Provider handoff: a second scripted provider, "Kiro (E2E)", and a fixed summary for the
+// handoff prompt (a conversation containing [resumo-falha] makes that call fail).
 import { createServer } from 'node:http';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -22,6 +25,7 @@ import { createBackend } from '../../server/index.js';
 import { Store } from '../../server/store.js';
 import { emitApproval } from '../../server/providers/common.js';
 import { PLAN_PROMPT_MARKER, TASK_PROMPT_MARKER } from '../../server/plan-markdown.js';
+import { HANDOFF_PROMPT_MARKER } from '../../server/provider-handoff.js';
 import { startFakeMemory } from './fake-memory.js';
 
 const port = Number(process.env.E2E_PORT || 4399);
@@ -41,6 +45,17 @@ const codex: ProviderInfo = {
   defaultModel: 'e2e-model',
   capabilities: { fast: true, tools: true, approvals: true, cancel: true, reasoning: true, images: true },
 };
+const kiro: ProviderInfo = {
+  ...codex,
+  id: 'kiro',
+  name: 'Kiro (E2E)',
+  detail: 'Segundo provedor simulado para testes E2E',
+  models: [{ id: 'kiro-e2e', name: 'Kiro E2E Model', isDefault: true }],
+  defaultModel: 'kiro-e2e',
+  capabilities: { ...codex.capabilities, reasoning: false },
+};
+export const E2E_HANDOFF_SUMMARY =
+  '**Objetivo**\nExportar o relatório.\n\n**Próximo passo**\nLigar o botão Exportar (resumo E2E).';
 const pending = new Map<string, (decision: 'approve' | 'deny') => void>();
 const flaky = new Map<string, number>();
 const sleep = (ms: number, signal: AbortSignal) =>
@@ -51,9 +66,15 @@ const sleep = (ms: number, signal: AbortSignal) =>
 
 const providers: ProviderRegistry = {
   async list() {
-    return [codex];
+    return [codex, kiro];
   },
   async run(input, emit, signal) {
+    if (input.prompt.startsWith(HANDOFF_PROMPT_MARKER)) {
+      await sleep(150, signal).catch(() => undefined);
+      if (input.prompt.includes('[resumo-falha]')) throw new Error('Kiro stream failed: The operation timed out.');
+      emit({ type: 'delta', text: E2E_HANDOFF_SUMMARY });
+      return { text: E2E_HANDOFF_SUMMARY, stopReason: 'completed' };
+    }
     if (input.prompt.startsWith(PLAN_PROMPT_MARKER)) {
       // Records what the planning run received, so the E2E can check it was read-only.
       const extra = input.prompt.includes('[falhar-tarefa]') ? '\n- [ ] Tarefa que falha' : '';
@@ -85,9 +106,18 @@ const providers: ProviderRegistry = {
     }
     const current = (input.prompt.split('Pedido atual:').at(-1) ?? input.prompt).split('\n\nMensagens recentes')[0];
     const marker =
-      ['[aprovar]', '[lento]', '[medio]', '[normal]', '[instavel]', '[quebra]', '[anexos]', '[escrever]', '[eco]'].find(
-        (m) => current.toLowerCase().includes(m),
-      ) ?? '';
+      [
+        '[aprovar]',
+        '[lento]',
+        '[medio]',
+        '[normal]',
+        '[instavel]',
+        '[quebra]',
+        '[anexos]',
+        '[escrever]',
+        '[eco]',
+        '[historico]',
+      ].find((m) => current.toLowerCase().includes(m)) ?? '';
     try {
       // Fails once with a timeout before any output, then answers: retried automatically.
       if (marker === '[instavel]') {
@@ -112,6 +142,11 @@ const providers: ProviderRegistry = {
       if (marker === '[eco]') {
         // Detached conversations run the coordinated fast path: the request follows "Pedido atual:".
         const text = `Eco: ${current.replace(/\s+/g, ' ').trim()}`;
+        emit({ type: 'delta', text });
+        return { text, stopReason: 'completed' };
+      }
+      if (marker === '[historico]') {
+        const text = `Agente ${input.providerId} recebeu: ${input.history.map((m) => m.content.replace(/\s+/g, ' ').trim()).join(' | ')}`;
         emit({ type: 'delta', text });
         return { text, stopReason: 'completed' };
       }

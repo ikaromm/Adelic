@@ -7,6 +7,7 @@ import { supportsEffort } from '../../shared/reasoning.js';
 import {
   ApprovalDecisionSchema,
   CreateSessionSchema,
+  HandoffSchema,
   PatchSessionSchema,
   QueueEditSchema,
   QueueMessageSchema,
@@ -199,6 +200,17 @@ export function sessionsRoutes({ store, orchestrator, providerList }: BackendCon
     if (projectId !== snapshot.projectId || providerChanged || modelChanged) delete next.nativeSessionId;
     store.putSession(next);
     res.json(next);
+  });
+  // "Continuar com outro agente": switch provider, optionally carrying a summary.
+  app.post('/api/sessions/:id/handoff', async (req, res) => {
+    if (!store.getSession(req.params.id)) return error(res, 404, 'Conversa não encontrada');
+    const parsed = parseBody(HandoffSchema, req.body, 'Passagem inválida');
+    if (!parsed.ok) return error(res, 400, parsed.message);
+    try {
+      res.status(202).json(await orchestrator.handoff(req.params.id, parsed.data));
+    } catch (e) {
+      error(res, errorStatus(e) || 500, message(e));
+    }
   });
   app.delete('/api/sessions/:id', (req, res) => {
     const s = store.getSession(req.params.id);

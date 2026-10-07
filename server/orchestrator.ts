@@ -23,7 +23,7 @@ import type {
   Thinking,
 } from '../shared/contracts.js';
 import { attachmentMeta, IMAGES_UNSUPPORTED, loadRunAttachments } from './attachments.js';
-import { routeMessage, selectHistory, titleFromMessage } from './router.js';
+import { routeMessage, titleFromMessage } from './router.js';
 import { memoryContextFor } from './memory.js';
 import { expandMessage } from './commands.js';
 import { Store } from './store.js';
@@ -50,6 +50,7 @@ import {
 import { CheckpointError, checkpointAfter, checkpointBefore, restoreCheckpoint } from './checkpoints.js';
 import { buildPlanningPrompt, planCommand } from './plan-markdown.js';
 import { Plans } from './plans.js';
+import { boundedHistory, handoffHistory, performHandoff, type HandoffRequest } from './provider-handoff.js';
 
 type Started = { runId: string; messageId: string };
 /** Internal start options: plan mode task runs (server/plans.ts). */
@@ -205,7 +206,8 @@ export class Orchestrator {
           status: 409,
         });
       const projectSnapshot = structuredClone(project),
-        history = this.store.listMessages(session.id),
+        // After a provider handoff: the summary and the messages after it (server/provider-handoff.ts).
+        history = handoffHistory(this.store.listMessages(session.id)),
         settings = startingSettings;
       // `/plano` and "Planejar antes" plan first; task runs carry their prompt. Otherwise
       // `/name args` runs the saved command's template (the user message keeps the typed text)
@@ -350,6 +352,52 @@ export class Orchestrator {
   isActive(sessionId: string) {
     return this.active.has(sessionId) || this.starting.has(sessionId);
   }
+  /**
+   * "Continuar com outro agente" (docs/specs/provider-handoff.md). Holds the run reservation
+   * while the summary is written, so messages, PATCH and other handoffs wait for 409, and
+   * cancelling the conversation aborts the summary call.
+   */
+  async handoff(sessionId: string, request: HandoffRequest) {
+    if (this.shuttingDown) throw Object.assign(new Error('Orquestrador está encerrando'), { status: 503 });
+    const session = this.requireSession(sessionId);
+    if (this.isActive(sessionId) || session.activeRunId)
+      throw Object.assign(new Error('Não é possível trocar de agente durante uma execução'), { status: 409 });
+    if (this.plans.list(sessionId).some((plan) => plan.status === 'executing'))
+      throw Object.assign(new Error('Há um plano em execução nesta conversa; pare-o antes de trocar de agente'), {
+        status: 409,
+      });
+    const controller = new AbortController();
+    let finish!: () => void;
+    const done = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const reservation: StartingRun = { controller, done, finish };
+    this.starting.set(sessionId, reservation);
+    try {
+      const cwd =
+        session.projectId === null
+          ? this.detachedProject(session.id).path
+          : this.store.getProject(session.projectId)?.path;
+      if (!cwd) throw Object.assign(new Error('Projeto não encontrado'), { status: 404 });
+      return await performHandoff(
+        {
+          store: this.store,
+          providers: this.providers,
+          providerList: this.providerList,
+          emit: (event) => this.emit(event),
+          cwd,
+          signal: controller.signal,
+        },
+        session,
+        request,
+      );
+    } finally {
+      if (this.starting.get(sessionId) === reservation) this.starting.delete(sessionId);
+      reservation.finish();
+      // Messages queued meanwhile start now, on the new agent.
+      if (!this.shuttingDown && this.store.getSession(sessionId)) void this.drain(sessionId);
+    }
+  }
   private detachedProject(sessionId: string): Project {
     const path = join(this.store.dataDir, 'conversations', sessionId);
     mkdirSync(path, { recursive: true });
@@ -479,7 +527,7 @@ export class Orchestrator {
           model: session.model,
           cwd: project.path,
           prompt,
-          history: selectHistory(history, plan.contextBudget),
+          history: boundedHistory(history, plan.contextBudget),
           plan,
           sandbox: settings.sandbox,
           approvalMode: settings.approvalMode ?? 'auto-safe',
@@ -888,7 +936,7 @@ export class Orchestrator {
           worker.model,
           task,
           prompt,
-          selectHistory(history, 1500),
+          boundedHistory(history, 1500),
           route.tools,
           settings.sandbox,
           memoryContext,
@@ -931,7 +979,7 @@ export class Orchestrator {
         worker.model,
         task,
         prompt,
-        selectHistory(history, 2500),
+        boundedHistory(history, 2500),
         true,
         settings.sandbox,
         undefined,
@@ -974,7 +1022,7 @@ export class Orchestrator {
         worker.model,
         task,
         prompt,
-        selectHistory(history, 2500),
+        boundedHistory(history, 2500),
         false,
         'read-only',
         memoryContext,

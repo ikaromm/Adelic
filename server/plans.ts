@@ -45,6 +45,7 @@ export class Plans {
   }
   private save(plan: Plan) {
     plan.updatedAt = new Date().toISOString();
+    plan.revision = (this.store.getPlan(plan.id)?.revision ?? plan.revision ?? 0) + 1;
     this.store.putPlan(plan);
     this.deps.emit({ type: 'plan', plan });
     return plan;
@@ -91,7 +92,10 @@ export class Plans {
     delete plan.error;
     this.save(plan);
     try {
-      return { plan: this.store.getPlan(plan.id)!, started: await this.startNext(plan, overrideLimit) };
+      const started = await this.startNext(plan, overrideLimit);
+      // Read after the start: taskStarted() has marked the task running by now, and the response
+      // must not carry the earlier "pending" copy (it would undo the newer stream event).
+      return { plan: this.store.getPlan(plan.id)!, started };
     } catch (error) {
       const latest = this.store.getPlan(plan.id) ?? plan;
       latest.status = previous === 'draft' ? 'draft' : 'approved';

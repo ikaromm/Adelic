@@ -50,7 +50,17 @@ const nextChangelog = changelog.replace(
 );
 const releaseDoc = join(root, 'docs/releases', `v${version}.md`);
 if (existsSync(releaseDoc)) fail(`${releaseDoc} já existe`);
-const doc = `# Adelic v${version}
+// Hand-written notes (for example bilingual ones) win over the generated text: the draft
+// docs/releases/vX.Y.Z-draft.md becomes the release notes and is removed from the tree.
+const draftDoc = join(root, 'docs/releases', `v${version}-draft.md`);
+const draft = existsSync(draftDoc)
+  ? readFileSync(draftDoc, 'utf8')
+      .replace(/ \(rascunho \/ draft\)/g, '')
+      .replace(/\(rascunho\)|\(draft\)/g, '')
+  : undefined;
+const doc =
+  draft ??
+  `# Adelic v${version}
 
 ${today} — Linux x86_64, aplicativo local em 127.0.0.1.
 
@@ -65,12 +75,13 @@ console.log(`release: ${pkg.version} → ${version}`);
 console.log(
   `  CHANGELOG: "${version} — ${today}" com ${notes.split('\n').filter((l) => l.startsWith('- ')).length} itens`,
 );
-console.log(`  notas: docs/releases/v${version}.md`);
+console.log(`  notas: docs/releases/v${version}.md${draft ? ' (do rascunho escrito à mão)' : ''}`);
 if (dryRun) process.exit(0);
 
 execFileSync('npm', ['version', version, '--no-git-tag-version'], { cwd: root, stdio: 'ignore' });
 writeFileSync(changelogPath, nextChangelog);
 writeFileSync(releaseDoc, doc);
+if (draft) execFileSync('git', ['rm', '-q', draftDoc], { cwd: root });
 git('add', 'package.json', 'package-lock.json', 'CHANGELOG.md', releaseDoc);
 git('commit', '-m', `release: v${version}`);
 git('tag', '-a', `v${version}`, '-m', `Adelic v${version}`);

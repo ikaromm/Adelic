@@ -12,9 +12,26 @@ const SCOPES: Record<string, MessageKey> = {
   'a memória': 'errorBoundary.scope.memory',
   'as configurações': 'errorBoundary.scope.settings',
 };
-/** What failed, in `locale` ("a memória" → en "the memory"). */
-export const errorScopeName = (scope: string, locale: Locale = getLocale()) =>
-  Object.hasOwn(SCOPES, scope) ? translate(SCOPES[scope], undefined, locale) : scope;
+/** The same scopes as App.tsx passes them, already translated (`t('app.scope.*')`) in either locale. */
+const APP_SCOPES: Record<string, MessageKey> = {
+  conversation: 'errorBoundary.scope.conversation',
+  terminal: 'errorBoundary.scope.terminal',
+  git: 'errorBoundary.scope.git',
+  activity: 'errorBoundary.scope.activity',
+  automations: 'errorBoundary.scope.automations',
+  memory: 'errorBoundary.scope.memory',
+  settings: 'errorBoundary.scope.settings',
+};
+/** What failed, in `locale` ("a memória" or "the memory" → the current language). */
+export const errorScopeName = (scope: string, locale: Locale = getLocale()) => {
+  if (Object.hasOwn(SCOPES, scope)) return translate(SCOPES[scope], undefined, locale);
+  // App.tsx passes t('app.scope.<x>') in the language active when it rendered.
+  for (const [name, key] of Object.entries(APP_SCOPES))
+    for (const lang of ['pt-BR', 'en'] as const)
+      if (translate(`app.scope.${name}` as MessageKey, undefined, lang) === scope)
+        return translate(key, undefined, locale);
+  return scope;
+};
 
 function Fallback({
   scope,

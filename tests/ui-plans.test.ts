@@ -29,6 +29,15 @@ describe('plan card state', () => {
     expect(upsertPlan([first], plan({ id: 'q' }), 's').map((p) => p.id)).toEqual(['p', 'q']);
   });
 
+  it('orders copies saved in the same millisecond by revision (the approve race)', () => {
+    const at = '2026-10-06T10:00:02.000Z';
+    const running = plan({ status: 'executing', revision: 3, updatedAt: at });
+    const staleExecuting = plan({ status: 'executing', revision: 2, updatedAt: at });
+    // The running-task event arrived first; the approve response (older revision) must not undo it.
+    expect(upsertPlan([running], staleExecuting, 's')).toEqual([running]);
+    expect(upsertPlan([staleExecuting], running, 's')).toEqual([running]);
+  });
+
   it('counts done and skipped tasks as finished', () => {
     expect(planProgress(plan())).toBe('');
     const tasks: Plan['tasks'] = [

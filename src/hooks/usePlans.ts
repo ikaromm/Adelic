@@ -8,8 +8,12 @@ export function upsertPlan(plans: Plan[], next: Plan, sessionId: string) {
   if (next.sessionId !== sessionId) return plans;
   const index = plans.findIndex((plan) => plan.id === next.id);
   if (index < 0) return [...plans, next];
-  // A late response must not undo a newer stream event.
-  if (plans[index].updatedAt > next.updatedAt) return plans;
+  // A late response must not undo a newer stream event. Saves in the same millisecond tie on
+  // `updatedAt`, so `revision` (bumped on every save) decides when both carry it.
+  const current = plans[index];
+  if (current.revision !== undefined && next.revision !== undefined) {
+    if (current.revision > next.revision) return plans;
+  } else if (current.updatedAt > next.updatedAt) return plans;
   return plans.map((plan, i) => (i === index ? next : plan));
 }
 

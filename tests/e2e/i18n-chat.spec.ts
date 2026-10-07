@@ -141,6 +141,11 @@ test('approval card and message queue', async ({ page }) => {
     timeout: 10_000,
   });
   await expect(queue).toBeHidden();
+  // Activity rows the server writes with a key (shared/event-text.ts) show in English too.
+  const activity = conversation(page).getByRole('region', { name: 'Activity for this run' }).first();
+  await activity.locator('summary').first().click();
+  await expect(activity.getByText('Approved', { exact: true })).toBeVisible();
+  await expectNoPortuguese(activity.locator('.activity-event'), ['Aprovado', 'Negado']);
 });
 
 test('command palette', async ({ page }) => {

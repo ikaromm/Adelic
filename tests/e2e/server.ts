@@ -78,6 +78,8 @@ const kiro: ProviderInfo = {
 export const E2E_HANDOFF_SUMMARY =
   '**Objetivo**\nExportar o relatório.\n\n**Próximo passo**\nLigar o botão Exportar (resumo E2E).';
 const pending = new Map<string, (decision: 'approve' | 'deny') => void>();
+let holdPlanTasks = false;
+const heldPlanTasks: (() => void)[] = [];
 const flaky = new Map<string, number>();
 const sleep = (ms: number, signal: AbortSignal) =>
   new Promise<void>((done, fail) => {
@@ -117,7 +119,14 @@ const providers: ProviderRegistry = {
     if (input.prompt.startsWith(TASK_PROMPT_MARKER)) {
       const current = /Tarefa atual: (.*)/.exec(input.prompt)?.[1] ?? '';
       try {
-        await sleep(400, signal);
+        // A test can hold task runs (POST /e2e/plan-tasks {hold:true}) to look at the running
+        // state, then release them; otherwise each task takes 400 ms.
+        if (holdPlanTasks)
+          await new Promise<void>((resolve, reject) => {
+            heldPlanTasks.push(resolve);
+            signal.addEventListener('abort', () => reject(new Error('cancelled')), { once: true });
+          });
+        else await sleep(400, signal);
       } catch {
         return { text: '', stopReason: 'cancelled' };
       }
@@ -354,6 +363,12 @@ const { app } = createBackend(
   updater.service,
 );
 app.post('/e2e/update/reset', (_req, res) => res.json(updater.reset()));
+app.post('/e2e/plan-tasks', (req, res) => {
+  holdPlanTasks = req.body?.hold === true;
+  // Releasing lets every held task finish now.
+  if (!holdPlanTasks) for (const resolve of heldPlanTasks.splice(0)) resolve();
+  res.json({ hold: holdPlanTasks, held: heldPlanTasks.length });
+});
 app.get('/e2e/voice', (req, res) => {
   const mode = String(req.query.mode);
   if (mode === 'local' || mode === 'remote' || mode === 'missing') voiceMode = mode;

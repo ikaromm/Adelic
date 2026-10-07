@@ -44,9 +44,16 @@ test('"Planejar antes" plans read-only, then approving runs every task in order'
   await expect(tasks(page)).toHaveCount(2);
   await expect(tasks(page).first().getByRole('img', { name: 'Pendente' })).toBeVisible();
 
-  await card(page).getByRole('button', { name: 'Aprovar e executar' }).click();
-  await expect(card(page).getByText('Executando')).toBeVisible();
-  await expect(tasks(page).first().getByRole('img', { name: 'Em execução' })).toBeVisible();
+  // Hold the task runs so the running state stays on screen until the test has seen it
+  // (a fixed 400 ms task was racing the assertion on loaded machines).
+  await page.request.post('/e2e/plan-tasks', { data: { hold: true } });
+  try {
+    await card(page).getByRole('button', { name: 'Aprovar e executar' }).click();
+    await expect(card(page).getByText('Executando')).toBeVisible();
+    await expect(tasks(page).first().getByRole('img', { name: 'Em execução' })).toBeVisible();
+  } finally {
+    await page.request.post('/e2e/plan-tasks', { data: { hold: false } });
+  }
   await expect(card(page).getByText('Concluído', { exact: true })).toBeVisible({ timeout: 10_000 });
   await expect(tasks(page).nth(0).getByRole('img', { name: 'Concluída' })).toBeVisible();
   await expect(tasks(page).nth(1).getByRole('img', { name: 'Concluída' })).toBeVisible();

@@ -34,6 +34,7 @@ import { catalogs, useI18n } from '../i18n';
 import { COMPACTING_TEXT } from '../../shared/compaction';
 import { MessageAttachments } from './ComposerAttachments';
 import { RunChanges } from './RunChanges';
+import { eventText } from '../i18n/eventText';
 import { mentionSegments } from '../../shared/mentions';
 
 /** User text with `@file` mentions shown as chips; the text itself is unchanged. */
@@ -195,7 +196,7 @@ export function RunActivityPanel({
   /** A run is active in this conversation: undo is disabled meanwhile. */
   busy?: boolean;
 }) {
-  const { t, fmt } = useI18n();
+  const { t, fmt, locale } = useI18n();
   const activity = activityForRun(runId, tasks, events);
   const runStatus = run?.status;
   const running = runStatus === 'running' || (!runStatus && active);
@@ -271,7 +272,7 @@ export function RunActivityPanel({
           <span className="run-event-icon" aria-hidden="true">
             <ShieldX size={12} />
           </span>
-          <span>{event.text}</span>
+          <span>{eventText(event, locale)}</span>
           <time>{timeLabel(event.createdAt)}</time>
         </div>
       ))}
@@ -358,21 +359,21 @@ export function RunActivityPanel({
             {activity.fallbacks.map((event) => (
               <div className="activity-event fallback" key={event.id} title={event.error}>
                 <ArrowLeftRight size={13} aria-hidden="true" />
-                <span>{event.text}</span>
+                <span>{eventText(event, locale)}</span>
                 <time>{timeLabel(event.createdAt)}</time>
               </div>
             ))}
             {activity.retries.map((event) => (
               <div className="activity-event retry" key={event.id} title={event.error}>
                 <RotateCcw size={13} aria-hidden="true" />
-                <span>{event.text}</span>
+                <span>{eventText(event, locale)}</span>
                 <time>{timeLabel(event.createdAt)}</time>
               </div>
             ))}
             {activity.events.map((event) => (
               <div className="activity-event" key={event.id}>
                 <Activity size={13} aria-hidden="true" />
-                <span>{event.text}</span>
+                <span>{eventText(event, locale)}</span>
                 <time>{timeLabel(event.createdAt)}</time>
               </div>
             ))}
@@ -467,7 +468,7 @@ export function RetryNotice({
  * collapsed activity.
  */
 export function RunChecks({ checks }: { checks: RunEvent[] }) {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   return (
     <div className="run-checks" role="group" aria-label={t('chat.checks.label', { summary: checksSummary(checks) })}>
       {checks.map((event) => {
@@ -494,7 +495,7 @@ export function RunChecks({ checks }: { checks: RunEvent[] }) {
               <span className="run-check-icon" aria-hidden="true">
                 {icon}
               </span>
-              <span className="run-check-title">{event.text}</span>
+              <span className="run-check-title">{eventText(event, locale)}</span>
               <ChevronDown className="activity-chevron" size={13} aria-hidden="true" />
             </summary>
             <pre aria-label={t('chat.checks.output', { name: check.name })}>
@@ -509,12 +510,13 @@ export function RunChecks({ checks }: { checks: RunEvent[] }) {
 }
 
 export function RunEventRow({ event }: { event: SessionDetail['events'][number] }) {
+  const { locale } = useI18n();
   return (
     <div className="run-event error">
       <span className="run-event-icon" aria-hidden="true">
         <X size={12} />
       </span>
-      <span>{event.text}</span>
+      <span>{eventText(event, locale)}</span>
       <time>{timeLabel(event.createdAt)}</time>
     </div>
   );

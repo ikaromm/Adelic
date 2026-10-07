@@ -58,4 +58,10 @@ describe('ErrorBoundary scope names', () => {
     ]);
     expect(errorScopeName('outra coisa', 'en')).toBe('outra coisa');
   });
+  it('recognises the names App.tsx passes already translated, in either language', () => {
+    expect(errorScopeName('the conversation', 'en')).toBe('the conversation');
+    expect(errorScopeName('the conversation', 'pt-BR')).toBe('a conversa');
+    expect(errorScopeName('the memory', 'pt-BR')).toBe('a memória');
+    expect(errorScopeName('a memória', 'en')).toBe('the memory');
+  });
 });

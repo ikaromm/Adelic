@@ -356,6 +356,8 @@ export interface PlanTask {
 export interface Plan {
   id: string;
   sessionId: string;
+  /** Bumped on every save; orders stream events and responses that share an `updatedAt`. */
+  revision?: number;
   /** The planning run that produced it. */
   runId: string;
   title: string;

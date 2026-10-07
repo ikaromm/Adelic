@@ -62,6 +62,8 @@ import { ActivityPage } from './components/ActivityPage';
 import { ConversationSearch } from './components/ConversationSearch';
 import { ProjectForm, type NewProject } from './components/ProjectForm';
 import { MessageCard, RetryNotice, RunActivityPanel, RunEventRow } from './components/Chat';
+import { BranchOrigin, MessageEditActions, MessageEditor } from './components/EditBranch';
+import { useEditBranch } from './hooks/useEditBranch';
 import { SettingsPage } from './components/SettingsPage';
 import { SIDEBAR_LIMIT, SessionItem, SidebarNav, UpdateNotice, type Page } from './components/Sidebar';
 
@@ -448,6 +450,30 @@ export default function App() {
   // "Tentar de novo" is offered only on the latest answer, and only if it failed.
   const lastAssistant = [...messages].reverse().find((m) => m.role === 'assistant');
   const lastFailedMessageId = lastAssistant?.status === 'failed' ? lastAssistant.id : undefined;
+
+  const editBranch = useEditBranch({
+    session,
+    messages,
+    plans: plans.plans,
+    busy: busy || pendingSendForSession,
+    onError: setNotice,
+    onEdited: (sessionId, keep, started) => {
+      setStream(null);
+      setDetail((current) =>
+        current?.session.id === sessionId
+          ? { ...current, session: { ...current.session, activeRunId: started.runId }, messages: keep }
+          : current,
+      );
+      void refreshDetail(sessionId).catch(() => undefined);
+    },
+    onBranched: (created) => {
+      invalidateBootstrapRefreshes();
+      setData((current) => (current ? { ...current, sessions: [created, ...current.sessions] } : current));
+      selectProject(created.projectId || '');
+      selectSession(created.id);
+      setPage('chat');
+    },
+  });
 
   const composerRef = useAutosize([composer, selectedSession, page, session?.activeRunId]);
   const attachments = useComposerAttachments(session?.id, setNotice);
@@ -1144,6 +1170,7 @@ export default function App() {
                     /
                   </span>
                   <strong title={session.title || 'Nova conversa'}>{session.title || 'Nova conversa'}</strong>
+                  <BranchOrigin session={session} sessions={data?.sessions ?? []} onOpen={selectConversation} />
                 </>
               )}
             </div>
@@ -1274,6 +1301,27 @@ export default function App() {
                                 />
                               ) : undefined;
                             })()}
+                            actions={
+                              message.id.startsWith('local-') ? undefined : (
+                                <MessageEditActions
+                                  message={message}
+                                  disabledReason={editBranch.disabledReason}
+                                  onEdit={() => editBranch.startEditing(message.id)}
+                                  onBranch={() => void editBranch.branch(message)}
+                                />
+                              )
+                            }
+                            editor={
+                              editBranch.editingId === message.id ? (
+                                <MessageEditor
+                                  message={message}
+                                  laterCount={editBranch.laterCount(message.id)}
+                                  disabledReason={editBranch.disabledReason}
+                                  onCancel={editBranch.cancelEditing}
+                                  onSave={(content, kept) => editBranch.save(message, content, kept)}
+                                />
+                              ) : undefined
+                            }
                           />
                           {message.role === 'assistant' &&
                             message.status === 'failed' &&

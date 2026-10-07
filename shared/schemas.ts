@@ -110,6 +110,12 @@ export const SendMessageSchema = z.object({
     `attachmentIds inválido (até ${MAX_ATTACHMENTS_PER_MESSAGE} anexos, sem repetição)`,
   ),
 });
+/** Edit and resend a user message (docs/specs/edit-branch.md); omitted attachmentIds keep the message's own. */
+export const EditMessageSchema = SendMessageSchema;
+/** "Ramificar daqui": copy the conversation up to and including `messageId`. */
+export const BranchSessionSchema = z.object({
+  messageId: required(text(128), 'messageId obrigatório'),
+});
 /** Upload: file content in base64 (the route raises the JSON limit only for itself). */
 export const UploadAttachmentSchema = z.object({
   name: required(text(200), 'name obrigatório (até 200 caracteres)'),

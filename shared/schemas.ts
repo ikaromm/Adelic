@@ -8,6 +8,7 @@ import {
   COMMAND_TEMPLATE_MAX,
   commandModes,
 } from './commands.js';
+import { MENTION_PATH_MAX } from './mentions.js';
 
 // Request schemas shared by the server routes (and usable by the UI). Each field keeps
 // the exact error message the API returned before zod, so clients see no change.
@@ -197,6 +198,22 @@ export const PatchCommandSchema = z.object({
   description: optional(commandDescription, commandMessages.description),
   template: optional(commandTemplate, commandMessages.template),
   mode: optional(z.union([z.null(), z.enum(commandModes)]), commandMessages.mode),
+});
+
+/** Query of GET /api/projects/:id/files (the file autocomplete for `@` mentions). */
+export const ProjectFilesQuerySchema = z.object({
+  query: optional(
+    z.string().max(MENTION_PATH_MAX),
+    `query deve ser um texto de até ${MENTION_PATH_MAX} caracteres`,
+  ).transform((value) => value ?? ''),
+  limit: optional(
+    z
+      .string()
+      .regex(/^\d{1,3}$/)
+      .transform(Number)
+      .refine((n) => n >= 1 && n <= 200),
+    'limit deve ser um inteiro de 1 a 200',
+  ).transform((value) => value ?? 50),
 });
 
 export type ParseResult<T> = { ok: true; data: T } | { ok: false; message: string };

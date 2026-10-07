@@ -43,10 +43,15 @@ function fenceFor(content: string) {
   return '`'.repeat(longest + 1);
 }
 
+/** `[label]` followed by `content` in a fence it cannot close; used for attachments and mentions. */
+export function inlineTextBlock(label: string, content: string) {
+  const fence = fenceFor(content);
+  return `[${label}]\n${fence}\n${content}\n${fence}`;
+}
+
 /** Delimited block that inlines a text attachment into the prompt. */
 export function inlineTextAttachment(name: string, content: string) {
-  const fence = fenceFor(content);
-  return `[Arquivo anexado: ${name}]\n${fence}\n${content}\n${fence}`;
+  return inlineTextBlock(`Arquivo anexado: ${name}`, content);
 }
 
 export interface RunAttachments {

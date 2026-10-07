@@ -62,6 +62,8 @@ import { PlanCard } from './components/PlanCard';
 import { projectOrchestration } from '../shared/contracts';
 import { ActivityPage } from './components/ActivityPage';
 import { ConversationSearch } from './components/ConversationSearch';
+import { CommandPalette } from './components/CommandPalette';
+import { downloadExport, useCommandPalette } from './hooks/useCommandPalette';
 import { ProjectForm, type NewProject } from './components/ProjectForm';
 import { MessageCard, RetryNotice, RunActivityPanel, RunEventRow } from './components/Chat';
 import { retryAlternatives } from '../shared/model-fallback';
@@ -473,10 +475,67 @@ export default function App() {
     element.focus();
   }, [selectedSession, page, currentDetail?.session.id, composerRef]);
 
+  const palette = useCommandPalette({
+    projectId: session?.projectId,
+    state: {
+      page,
+      session,
+      running: busy || Boolean(session?.activeRunId),
+      sessions: data?.sessions || [],
+      projects: data?.projects || [],
+      providers: data?.providers || [],
+      sidebarCollapsed,
+      isMac: newConversationShortcut().startsWith('⌘'),
+    },
+    callbacks: {
+      newConversation: () => void newConversation(),
+      search: () => setSearchOpen(true),
+      goTo: (next) => goTo(next),
+      toggleSidebar: () =>
+        window.matchMedia?.('(max-width: 820px)').matches
+          ? setSidebarOpen((open) => !open)
+          : setSidebarCollapsed((collapsed) => !collapsed),
+      exportConversation: downloadExport,
+      openConversation: (id) => openConversation(id),
+      openProject: (id) => {
+        selectProject(id);
+        selectSession(latestSession(id)?.id || '');
+        setPage('chat');
+        setSidebarOpen(false);
+      },
+      setModel: (providerId, model) =>
+        void changeSession(
+          providerId === session?.providerId ? { model: model || null } : { providerId, model: model || null },
+        ),
+      setMode: (mode) => void changeSession({ mode }),
+      insertCommand: (name) => {
+        if (!session) return;
+        const value = `/${name} `;
+        setDrafts((current) => ({ ...current, [session.id]: value }));
+        setPage('chat');
+        setSidebarOpen(false);
+        // After the draft and page render: caret at the end, ready for the arguments.
+        window.setTimeout(() => {
+          const element = composerRef.current;
+          if (!element || element.disabled) return;
+          element.focus();
+          element.setSelectionRange(value.length, value.length);
+        });
+      },
+    },
+  });
+
   useGlobalShortcuts({
     newConversation: () => void newConversation(),
     search: () => setSearchOpen(true),
+    palette: () => {
+      // One dialog at a time: the palette replaces search and help.
+      setSearchOpen(false);
+      setHelpOpen(false);
+      palette.toggle();
+    },
     dismiss: () => {
+      if (palette.open) palette.close();
       setSearchOpen(false);
       setProjectForm(false);
       setHelpOpen(false);
@@ -1757,6 +1816,14 @@ export default function App() {
           }}
         />
       )}
+      {palette.open && (
+        <CommandPalette
+          actions={palette.actions}
+          recents={palette.recents}
+          onRun={palette.run}
+          onClose={palette.close}
+        />
+      )}
       {helpOpen && (
         <div
           className="modal-backdrop"
@@ -1836,6 +1903,12 @@ export default function App() {
                 <dt>Nova conversa</dt>
                 <dd>
                   <kbd>{shortcut}</kbd>
+                </dd>
+              </div>
+              <div>
+                <dt>Paleta de comandos</dt>
+                <dd>
+                  <kbd>{shortcut.startsWith('⌘') ? '⌘P' : 'Ctrl P'}</kbd>
                 </dd>
               </div>
               <div>

@@ -2021,3 +2021,126 @@ label.setting-row > input {
     flex: 1 1 auto;
   }
 }
+
+/* Command palette (Ctrl/Cmd+P). */
+.palette-backdrop {
+  align-items: start;
+  padding-top: min(12vh, 96px);
+}
+.palette-card {
+  display: flex;
+  width: min(620px, calc(100vw - 32px));
+  max-height: min(70dvh, 560px);
+  flex-direction: column;
+  overflow: hidden;
+  padding: 10px;
+}
+.modal-card > .palette-field {
+  flex: none;
+  margin: 0;
+}
+.palette-list {
+  min-height: 0;
+  flex: 1;
+  margin-top: 8px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.palette-group + .palette-group {
+  margin-top: 6px;
+}
+.palette-group-title {
+  padding: 8px 10px 4px;
+  color: var(--text-muted);
+  font-size: var(--text-2xs);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.palette-option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: var(--control-h-lg);
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.palette-option.active {
+  background: var(--row-selected);
+  color: var(--text);
+}
+.palette-option.disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+.palette-option-icon {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  color: var(--text-muted);
+}
+.palette-option.active .palette-option-icon {
+  color: var(--accent);
+}
+.palette-option-text {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+}
+.palette-option-label,
+.palette-option-detail {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.palette-option-label {
+  color: inherit;
+  font-size: var(--text-md);
+}
+.palette-option-detail {
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+}
+.palette-option-current {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  color: var(--accent);
+}
+.palette-option-keys {
+  display: inline-flex;
+  flex: none;
+  gap: 3px;
+}
+.palette-empty {
+  padding: 16px 10px;
+}
+.palette-hint {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin: 8px 0 0;
+  padding: 8px 10px 2px;
+  border-top: 1px solid var(--border-soft);
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+}
+.palette-hint kbd + kbd {
+  margin-left: 3px;
+}
+@media (max-width: 480px) {
+  .palette-backdrop {
+    padding: 12px 8px;
+  }
+  .palette-card {
+    width: 100%;
+    max-height: calc(100dvh - 24px);
+  }
+  .palette-option-keys {
+    display: none;
+  }
+}

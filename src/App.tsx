@@ -62,6 +62,7 @@ import { ActivityPage } from './components/ActivityPage';
 import { ConversationSearch } from './components/ConversationSearch';
 import { ProjectForm, type NewProject } from './components/ProjectForm';
 import { MessageCard, RetryNotice, RunActivityPanel, RunEventRow } from './components/Chat';
+import { retryAlternatives } from '../shared/model-fallback';
 import { SettingsPage } from './components/SettingsPage';
 import { SIDEBAR_LIMIT, SessionItem, SidebarNav, UpdateNotice, type Page } from './components/Sidebar';
 
@@ -682,6 +683,31 @@ export default function App() {
     }
   }
 
+  /** "Tentar com outro modelo": the server switches the conversation and starts the new run. */
+  async function retryWithModel(runId: string, target: { providerId: string; model: string }) {
+    if (!session || busy || session.activeRunId) return;
+    const sessionId = session.id;
+    setBusy(true);
+    setNotice('');
+    conversationScroll.stick();
+    try {
+      const started = await api.retryRun(runId, target);
+      invalidateBootstrapRefreshes();
+      const updated = { ...started.session, activeRunId: started.session.activeRunId ?? started.runId };
+      setDetail((current) => (current?.session.id === sessionId ? { ...current, session: updated } : current));
+      setData((current) =>
+        current
+          ? { ...current, sessions: current.sessions.map((item) => (item.id === sessionId ? updated : item)) }
+          : current,
+      );
+      await refreshDetail(sessionId);
+    } catch (error) {
+      if (selectedSessionRef.current === sessionId) setNotice((error as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function changeSession(
     patch: Partial<Pick<Session, 'providerId' | 'mode' | 'projectId' | 'thinking' | 'planFirst'>> & {
       model?: string | null;
@@ -1285,6 +1311,11 @@ export default function App() {
                                   const prompt = messages.find((m) => m.role === 'user' && m.runId === message.runId);
                                   if (prompt) void sendMessage(prompt.content, prompt.attachments ?? []);
                                 }}
+                                alternatives={retryAlternatives(
+                                  data.providers,
+                                  currentDetail?.runs.find((run) => run.id === message.runId),
+                                )}
+                                onSwitch={(target) => message.runId && void retryWithModel(message.runId, target)}
                               />
                             )}
                           {message.role === 'user' && message.runId && (
@@ -1664,6 +1695,7 @@ export default function App() {
                 project && void changeProjectMemoryScope(project.id, workspace, memoryProject)
               }
               onSetting={updateSetting}
+              onModelFallback={(modelFallback) => void enqueueSettingsPatch({ modelFallback })}
               onSkill={async (id, enabled) => {
                 try {
                   const result = await api.skill(id, enabled);

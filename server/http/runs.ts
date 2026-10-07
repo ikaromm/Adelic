@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { CheckpointError, checkpointDiff } from '../checkpoints.js';
-import { RestoreRunSchema, parseBody, text } from '../../shared/schemas.js';
+import { RestoreRunSchema, RetryRunSchema, parseBody, text } from '../../shared/schemas.js';
 import { error, errorStatus, message } from './common.js';
 import type { BackendContext } from './context.js';
 
@@ -41,6 +41,17 @@ export function runsRoutes({ store, orchestrator }: BackendContext) {
       const status = e instanceof CheckpointError ? e.status : errorStatus(e) || 500;
       const conflicts = e instanceof CheckpointError ? e.conflicts : undefined;
       res.status(status).json({ error: message(e), ...(conflicts ? { conflicts } : {}) });
+    }
+  });
+  // "Tentar de novo" and "Tentar com outro modelo": the same request as a new run, optionally
+  // after switching the conversation to another provider/model (validated against the catalog).
+  app.post('/api/runs/:id/retry', async (req, res) => {
+    const parsed = parseBody(RetryRunSchema, req.body, 'Pedido inválido');
+    if (!parsed.ok) return error(res, 400, parsed.message);
+    try {
+      res.status(202).json(await orchestrator.retryRun(req.params.id, parsed.data));
+    } catch (e) {
+      error(res, errorStatus(e) || 500, message(e));
     }
   });
   return app;

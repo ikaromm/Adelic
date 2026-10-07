@@ -8,8 +8,14 @@
 
 export type FailureKind =
   | 'transient' // timeouts, dropped streams, process crashes, 5xx, network resets
-  | 'capacity' // rate limits, overloaded / at-capacity models
+  | 'overloaded' // the model is at capacity / under high load (503, 529, "overloaded")
+  | 'rate_limit' // this account hit a request limit (429, "rate limit", per-minute quotas)
   | 'permanent'; // auth, invalid input, policy blocks, missing binary, unsupported features
+
+/** Capacity failures: waiting helps, and so does another model (docs/specs/retries.md). */
+export const isCapacityKind = (kind: string | undefined) =>
+  // 'capacity' is the single kind runs recorded before overloaded and rate_limit were split.
+  kind === 'overloaded' || kind === 'rate_limit' || kind === 'capacity';
 
 export interface Classified {
   kind: FailureKind;
@@ -23,7 +29,8 @@ const PERMANENT: [RegExp, string][] = [
     /\b(unauthori[sz]ed|401|403|forbidden|not logged in|login required|invalid api key|authentication)\b/i,
     'autenticação',
   ],
-  [/\b(quota exceeded|insufficient[_ ]quota|billing|payment required|402)\b/i, 'cota ou cobrança'],
+  // Billing quotas are permanent; per-minute quotas ("quota exceeded for ... per minute") are rate limits.
+  [/\b(insufficient[_ ]quota|billing|payment required|402)\b/i, 'cota ou cobrança'],
   [/\b(context length|context window|too many tokens|maximum context|prompt is too long)\b/i, 'contexto grande demais'],
   [
     /(bloquead|não disponibiliza|não oferece|incompatível|não encontrado|not found|not installed|ENOENT)/i,
@@ -32,9 +39,19 @@ const PERMANENT: [RegExp, string][] = [
   [/\b(invalid|malformed|bad request|400|unsupported|not supported)\b/i, 'pedido inválido'],
   [/(shutting down|cancelad|cancelled|canceled|aborted)/i, 'cancelado'],
 ];
-const CAPACITY: [RegExp, string][] = [
-  [/\b(at capacity|overloaded|capacity|server is busy|try again later)\b/i, 'modelo sobrecarregado'],
-  [/\b(rate[ -]?limit|too many requests|429|throttl)/i, 'limite de requisições'],
+// Rate limits first: "429 Too Many Requests, try again later" is a rate limit, not overload.
+// No trailing \b on words that providers glue to `_error` (`rate_limit_error`, `overloaded_error`).
+const CAPACITY: [RegExp, FailureKind, string][] = [
+  [
+    /(\brate[ _-]?limit|\btoo many requests|\b429\b|\bthrottl|\bquota\b|\bresource[_ ]exhausted)/i,
+    'rate_limit',
+    'limite de requisições',
+  ],
+  [
+    /(\boverloaded|\bcapacity\b|\bhigh (load|demand)\b|\bserver is busy\b|\b(503|529)\b|\bservice unavailable\b|\btry again later\b)/i,
+    'overloaded',
+    'modelo sobrecarregado',
+  ],
 ];
 const TRANSIENT: [RegExp, string][] = [
   [/(timed? ?out|timeout|deadline exceeded|ETIMEDOUT)/i, 'tempo esgotado'],
@@ -57,7 +74,7 @@ export function classifyFailure(error: unknown): Classified {
   const text =
     error instanceof Error ? `${error.message} ${String((error as { cause?: unknown }).cause ?? '')}` : String(error);
   for (const [pattern, reason] of PERMANENT) if (pattern.test(text)) return { kind: 'permanent', reason };
-  for (const [pattern, reason] of CAPACITY) if (pattern.test(text)) return { kind: 'capacity', reason };
+  for (const [pattern, kind, reason] of CAPACITY) if (pattern.test(text)) return { kind, reason };
   for (const [pattern, reason] of TRANSIENT) if (pattern.test(text)) return { kind: 'transient', reason };
   return { kind: 'permanent', reason: 'erro não reconhecido' };
 }
@@ -72,7 +89,7 @@ export const DEFAULT_RETRY: RetryPolicy = { retries: 2, baseDelayMs: 2000, maxDe
 
 /** Exponential backoff with jitter; capacity errors wait longer than transient ones. */
 export function retryDelay(attempt: number, kind: FailureKind, policy: RetryPolicy, random = Math.random) {
-  const base = policy.baseDelayMs * (kind === 'capacity' ? 3 : 1);
+  const base = policy.baseDelayMs * (isCapacityKind(kind) ? 3 : 1);
   const exponential = Math.min(policy.maxDelayMs, base * 2 ** (attempt - 1));
   return Math.round(exponential * (0.75 + random() * 0.5));
 }
@@ -105,6 +122,18 @@ export class EffectTracker {
 }
 
 export class RetryAbortedError extends Error {}
+
+/** Attached by withRetry to the error it finally throws (`error.retry`). */
+export interface RetryInfo {
+  kind: FailureKind;
+  reason: string;
+  attempts: number;
+  why?: string;
+  retryable: boolean;
+  exhausted: boolean;
+  hadEffects: boolean;
+}
+export const retryInfo = (error: unknown) => (error as { retry?: RetryInfo } | null)?.retry;
 
 /**
  * Runs `attempt` until it succeeds, the error is not retryable, the run had effects,
@@ -146,7 +175,10 @@ export async function withRetry<T>(
             attempts: n,
             why,
             retryable: kind !== 'permanent',
-          };
+            // For the model fallback: it only follows an exhausted, effect-free attempt.
+            exhausted,
+            hadEffects: effects.any,
+          } satisfies RetryInfo;
         }
         throw error;
       }

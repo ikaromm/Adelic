@@ -1,4 +1,4 @@
-import { Bot, Brain, Code2, Command, Layers3, Shield } from 'lucide-react';
+import { ArrowUp, Bot, Brain, Code2, Command, Layers3, Shield, X } from 'lucide-react';
 import { type FormEvent, useState } from 'react';
 import type {
   Bootstrap,
@@ -7,7 +7,11 @@ import type {
   OrchestrationConfig,
   Project,
   ProjectCoordination,
+  ProviderInfo,
+  Settings,
 } from '../../shared/contracts';
+import { MODEL_FALLBACK_MAX } from '../../shared/schemas';
+import { modelLabel } from '../../shared/model-fallback';
 import { integrationName } from '../labels';
 import { notificationPermission, notificationsEnabled } from '../hooks/useRunNotifications';
 import { CommandsCard } from './CommandsCard';
@@ -32,6 +36,7 @@ export function SettingsPage({
   onProjectMemoryScope,
   onSetting,
   onSkill,
+  onModelFallback,
   notice,
 }: {
   data: Bootstrap;
@@ -63,6 +68,7 @@ export function SettingsPage({
     value: string | boolean,
   ) => void;
   onSkill: (id: string, enabled: boolean) => void;
+  onModelFallback: (value: NonNullable<Settings['modelFallback']>) => void;
   notice: string;
 }) {
   const [memoryWorkspace, setMemoryWorkspace] = useState(project?.memoryWorkspace || '');
@@ -195,6 +201,11 @@ export function SettingsPage({
                 <span />
               </button>
             </div>
+            <ModelFallbackSetting
+              providers={data.providers}
+              value={data.settings.modelFallback ?? { enabled: false, models: [] }}
+              onChange={onModelFallback}
+            />
             <NotificationSetting
               enabled={notificationsEnabled(data.settings)}
               onChange={(enabled) => onSetting('notifications', enabled)}
@@ -448,6 +459,109 @@ function NotificationSetting({ enabled, onChange }: { enabled: boolean; onChange
       {problem && (
         <div className="inline-notice" role="status">
           {problem}
+        </div>
+      )}
+    </>
+  );
+}
+
+type FallbackModel = NonNullable<Settings['modelFallback']>['models'][number];
+const fallbackKey = (item: FallbackModel) => `${item.providerId}\u0000${item.model}`;
+
+/**
+ * "Trocar de modelo se o atual estiver sobrecarregado": opt-in, with up to three models tried in
+ * order after the automatic retries (docs/specs/retries.md). Only catalog models can be picked.
+ */
+function ModelFallbackSetting({
+  providers,
+  value,
+  onChange,
+}: {
+  providers: ProviderInfo[];
+  value: NonNullable<Settings['modelFallback']>;
+  onChange: (value: NonNullable<Settings['modelFallback']>) => void;
+}) {
+  const chosen = new Set(value.models.map(fallbackKey));
+  const options = providers.flatMap((provider) =>
+    provider.models.map((model) => ({
+      item: { providerId: provider.id, model: model.id },
+      label: `${provider.name} · ${model.name}${provider.available ? '' : ' (indisponível)'}`,
+    })),
+  );
+  const setModels = (models: FallbackModel[]) => onChange({ ...value, models });
+  return (
+    <>
+      <div className="setting-row">
+        <div>
+          <strong>Trocar de modelo se o atual estiver sobrecarregado</strong>
+          <span>
+            Depois das novas tentativas, usa os modelos abaixo, em ordem, só naquela resposta. A conversa mantém o
+            modelo escolhido.
+          </span>
+        </div>
+        <button
+          className={`toggle ${value.enabled ? 'on' : ''}`}
+          role="switch"
+          aria-checked={value.enabled}
+          aria-label="Trocar de modelo se o atual estiver sobrecarregado"
+          onClick={() => onChange({ ...value, enabled: !value.enabled })}
+        >
+          <span />
+        </button>
+      </div>
+      {value.enabled && (
+        <div className="fallback-models">
+          {value.models.length === 0 && (
+            <p className="muted-empty">Escolha pelo menos um modelo; sem modelos, nada é trocado.</p>
+          )}
+          <ol aria-label="Modelos alternativos, em ordem">
+            {value.models.map((item, index) => (
+              <li key={fallbackKey(item)}>
+                <span className="fallback-order">{index + 1}</span>
+                <span className="fallback-name">{modelLabel(providers, item)}</span>
+                <button
+                  type="button"
+                  className="icon-button"
+                  aria-label={`Subir ${modelLabel(providers, item)}`}
+                  disabled={index === 0}
+                  onClick={() => {
+                    const next = [...value.models];
+                    [next[index - 1], next[index]] = [next[index], next[index - 1]];
+                    setModels(next);
+                  }}
+                >
+                  <ArrowUp size={14} />
+                </button>
+                <button
+                  type="button"
+                  className="icon-button"
+                  aria-label={`Remover ${modelLabel(providers, item)}`}
+                  onClick={() => setModels(value.models.filter((_, i) => i !== index))}
+                >
+                  <X size={14} />
+                </button>
+              </li>
+            ))}
+          </ol>
+          {value.models.length < MODEL_FALLBACK_MAX && (
+            <select
+              aria-label="Adicionar modelo alternativo"
+              value=""
+              onChange={(event) => {
+                const option = options.find((o) => fallbackKey(o.item) === event.target.value);
+                if (option) setModels([...value.models, option.item]);
+              }}
+            >
+              <option value="">Adicionar modelo…</option>
+              {options
+                .filter((option) => !chosen.has(fallbackKey(option.item)))
+                .map((option) => (
+                  <option key={fallbackKey(option.item)} value={fallbackKey(option.item)}>
+                    {option.label}
+                  </option>
+                ))}
+            </select>
+          )}
         </div>
       )}
     </>

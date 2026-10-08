@@ -96,9 +96,12 @@ test('discards an unapplied copy and keeps its branch unless asked', async ({ pa
   const input = await projectConversation(page, request);
   const panel = page.getByRole('region', { name: 'Cópia isolada' });
   await panel.getByRole('switch', { name: 'Trabalhar em uma cópia isolada (worktree)' }).click();
+  await expect(panel.locator('.worktree-branch')).toContainText('adelic/');
   await input.fill('[escrever] 2');
   await input.press('Enter');
+  await expect(page.locator('.markdown-content', { hasText: 'Arquivos alterados.' }).last()).toBeVisible();
   await expect(panel).toContainText('2 arquivos alterados');
+  expect(git(repo, 'status', '--porcelain')).toBe('');
   // A commit of its own in the copy: the branch now holds work that is not in the project.
   const sessions = (await (await request.get('/api/bootstrap')).json()) as {
     sessions: { worktree?: { path: string } }[];

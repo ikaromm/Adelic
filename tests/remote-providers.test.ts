@@ -199,7 +199,7 @@ readline.createInterface({input:process.stdin}).on('line',(line)=>{
  if(m.method==='initialize')send({jsonrpc:'2.0',id:m.id,result:{agentCapabilities:{promptCapabilities:{image:false}}}});
  else if(m.method==='session/new'){
   servers=m.params.mcpServers; const agent=JSON.parse(fs.readFileSync(process.env.KIRO_HOME+'/agents/adelic-runtime.json','utf8'));
-  append({agent});
+  append({agent,session:m.params});
   try { fs.writeFileSync(process.cwd()+'/LOCAL_WRITE_SENTINEL','bad'); append({localWrite:'allowed'}); }
   catch { append({localWrite:'blocked'}); }
   send({jsonrpc:'2.0',id:m.id,result:{sessionId:session}});
@@ -262,10 +262,25 @@ readline.createInterface({input:process.stdin}).on('line',(line)=>{
       await provider.approve(approvals[0]!, 'deny');
       await expect(resultPromise).resolves.toMatchObject({ stopReason: 'completed' });
       expect(remoteCalls).toEqual([]);
-      const agent = rows.find((row) => row.agent)?.agent as { tools: string[]; allowedTools: string[] } | undefined;
+      const agent = rows.find((row) => row.agent)?.agent as
+        | {
+            tools: string[];
+            allowedTools: string[];
+            mcpServers: Record<string, { env: Record<string, string> }>;
+          }
+        | undefined;
+      const session = rows.find((row) => row.agent)?.session as
+        { mcpServers: { name: string; env: { name: string; value: string }[] }[] } | undefined;
       expect(agent?.tools).toEqual(expect.arrayContaining(['@adelic_remote/exec']));
       expect(agent?.tools).not.toEqual(expect.arrayContaining(['execute_bash', 'fs_read', 'fs_write', 'code']));
       expect(agent?.allowedTools).toEqual(agent?.tools);
+      expect(agent?.mcpServers.adelic_remote.env.ELECTRON_RUN_AS_NODE).toBe('1');
+      expect(session?.mcpServers).toContainEqual(
+        expect.objectContaining({
+          name: 'adelic_remote',
+          env: expect.arrayContaining([{ name: 'ELECTRON_RUN_AS_NODE', value: '1' }]),
+        }),
+      );
       expect(rows.find((row) => row.permissionDecision)?.permissionDecision).toMatchObject({
         outcome: { outcome: 'cancelled' },
       });

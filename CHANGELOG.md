@@ -2,7 +2,8 @@
 
 ## Não publicado
 
-_Nada ainda._
+- Correção: a ponte MCP remota do Kiro passa a iniciar o Electron em modo Node no AppImage, mantendo autenticação e aprovações no computador local. Codex e Kiro foram validados com ferramentas SSH no backend desktop real.
+- O laboratório Docker inicializa o Git antes de transferir o projeto ao usuário compartilhado. Testes de integração aguardam a preparação da worktree e a captura da telemetria simulada.
 
 ## 0.5.1 — 2026-10-08
 

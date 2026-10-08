@@ -57,7 +57,7 @@ RUN apk add --no-cache openssh python3 git bash procps \\
   && passwd -u shared \\
   && ssh-keygen -A \\
   && mkdir -p /home/shared/.ssh /home/shared/.codex /workspace \\
-  && chown shared:shared /workspace /home/shared/.ssh /home/shared/.codex \\
+  && chown shared:shared /home/shared/.ssh /home/shared/.codex \\
   && chmod 700 /home/shared/.ssh /home/shared/.codex \\
   && printf '# Deliberate fixture: the runner must use a temporary HOME.\\n' > /home/shared/.codex/config.toml \\
   && git -C /workspace init -q \\
@@ -65,7 +65,8 @@ RUN apk add --no-cache openssh python3 git bash procps \\
   && git -C /workspace config user.email 'adelic-lab@example.invalid' \\
   && printf 'SSH runner fixture\\n' > /workspace/README.md \\
   && git -C /workspace add README.md \\
-  && git -C /workspace commit -qm 'create SSH fixture'
+  && git -C /workspace commit -qm 'create SSH fixture' \\
+  && chown -R shared:shared /workspace
 COPY id_ed25519.pub /home/shared/.ssh/authorized_keys
 RUN chown shared:shared /home/shared/.ssh/authorized_keys \\
   && chmod 600 /home/shared/.ssh/authorized_keys \\

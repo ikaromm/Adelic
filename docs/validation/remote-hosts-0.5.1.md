@@ -20,6 +20,8 @@ Os testes automatizados reproduzem respostas inválidas, caminhos/symlinks fora 
 
 Essas evidências demonstram ausência de credenciais e de um endpoint de inferência entregue pelo transporte. Não demonstram isolamento contra um uid compartilhado: esse usuário pode adulterar arquivos, processos e resultados, induzir instruções maliciosas no contexto e escapar da limpeza de descendentes antes de ser observado. Aprovações e conteúdo remoto continuam precisando de avaliação local. A inferência dos provedores continua usando seus serviços configurados; dados remotos lidos podem ser enviados a esses serviços.
 
+Os turnos reais acima foram executados pelo servidor web local (`npm run dev`). O smoke do AppImage não inclui runtimes autenticados. A validação posterior do backend Electron encontrou uma incompatibilidade da ponte Kiro, corrigida na 0.5.2; veja [validação desktop](remote-hosts-0.5.2.md).
+
 ## Interface e compatibilidade
 
 A interface real foi inspecionada no preview T3 até o host de automação ficar indisponível com erro explícito. A continuação usou Chromium/Playwright local: nome do host e caminho confirmados, tela de 1280×800 e 390×844 sem overflow horizontal. O fluxo automatizado cobre confirmação de fingerprint, navegação em subpasta, seleção de diretório e restrições de recursos remotos.

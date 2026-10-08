@@ -578,7 +578,11 @@ export class KiroProvider {
           adelic_remote: {
             command: globalThis.process.execPath,
             args: [bridgePath],
-            env: { ADELIC_REMOTE_SOCKET: remoteSocket, ADELIC_REMOTE_TOOLS: JSON.stringify(remoteMcpTools) },
+            env: {
+              ADELIC_REMOTE_SOCKET: remoteSocket,
+              ADELIC_REMOTE_TOOLS: JSON.stringify(remoteMcpTools),
+              ELECTRON_RUN_AS_NODE: '1',
+            },
           },
         }
       : {};
@@ -681,6 +685,7 @@ export class KiroProvider {
                 env: [
                   { name: 'ADELIC_REMOTE_SOCKET', value: remoteSocket },
                   { name: 'ADELIC_REMOTE_TOOLS', value: JSON.stringify(remoteMcpTools) },
+                  { name: 'ELECTRON_RUN_AS_NODE', value: '1' },
                 ],
               },
             ]

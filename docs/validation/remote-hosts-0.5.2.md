@@ -9,3 +9,5 @@ O backend desktop real (Electron, Node 24.21.0) foi iniciado com dados operacion
 Codex 0.160 (`gpt-6-luna`, high) e Kiro 2.23 (`claude-sonnet-4.6`) concluíram turnos reais pelo backend Electron: quatro aprovações locais por provedor, listagem, comando `printf`, escrita e leitura. Os dois arquivos foram confirmados no container com conteúdo `login ficou local`. Não havia `auth.json` nem `credentials.json` na home remota.
 
 A revisão independente do diff não encontrou bloqueadores. O ajuste do laboratório evita a recusa de propriedade do Git: inicialização como root, seguida da transferência de `/workspace` ao uid compartilhado. As limitações de uid compartilhado descritas na validação 0.5.1 permanecem.
+
+O mesmo cenário foi repetido no AppImage 0.5.2 gerado: Codex e Kiro concluíram as quatro operações e aprovações por provedor. O smoke de instalação também confirmou DOM, instância única, preservação de histórico e encerramento do backend fora do checkout. Typecheck, lint, formato, 1303 testes unitários e build passaram; os nove avisos de lint preexistentes permanecem.

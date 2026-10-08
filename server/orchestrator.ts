@@ -269,6 +269,9 @@ export class Orchestrator {
   ): Promise<{ runId: string; messageId: string }> {
     if (this.shuttingDown) throw httpError(503, 'orchestrator.shuttingDown');
     this.assertNotUpdating();
+    const currentSession = this.store.getSession(session.id);
+    if (!currentSession) throw httpError(404, 'common.sessionNotFound');
+    if (currentSession.archivedAt) throw httpError(409, 'sessions.archived');
     // `/compactar` alone is a built-in action, checked before saved commands: no user message,
     // just the summary card (docs/specs/compaction.md).
     const compact = options.planTask || options.hookFix ? undefined : compactCommand(content);
@@ -294,6 +297,7 @@ export class Orchestrator {
       throw httpError(409, 'orchestrator.alreadyActive');
     }
     session = this.store.getSession(session.id) ?? session;
+    if (session.archivedAt) throw httpError(409, 'sessions.archived');
     // Usage limits: refused before the run exists and before any provider call.
     if (!options.overrideLimit) assertWithinLimits(this.store, session.projectId);
     if (!this.store.getSession(session.id)) throw httpError(404, 'common.sessionNotFound');
@@ -594,7 +598,7 @@ export class Orchestrator {
     overrideLimit = false,
     manualApproval = false,
   ): Promise<Started> {
-    const session = this.requireSession(sessionId);
+    const session = this.requireWritableSession(sessionId);
     if (clientMessageId) {
       const existing = this.store.findClientMessage(sessionId, clientMessageId);
       if (existing) return Promise.resolve(this.startedResult(sessionId, existing));
@@ -631,7 +635,7 @@ export class Orchestrator {
   async compact(sessionId: string, options: { overrideLimit?: boolean } = {}): Promise<Started> {
     if (this.shuttingDown) throw httpError(503, 'orchestrator.shuttingDown');
     this.assertNotUpdating();
-    const session = this.requireSession(sessionId);
+    const session = this.requireWritableSession(sessionId);
     if (this.isActive(sessionId) || session.activeRunId) throw httpError(409, 'orchestrator.runInProgress');
     if (this.store.listPlans(sessionId).some((p) => p.status === 'executing'))
       throw httpError(409, 'orchestrator.planRunning');
@@ -875,7 +879,7 @@ export class Orchestrator {
   async handoff(sessionId: string, request: HandoffRequest, options: { overrideLimit?: boolean } = {}) {
     if (this.shuttingDown) throw httpError(503, 'orchestrator.shuttingDown');
     this.assertNotUpdating();
-    const session = this.requireSession(sessionId);
+    const session = this.requireWritableSession(sessionId);
     if (this.isActive(sessionId) || session.activeRunId) throw httpError(409, 'orchestrator.handoffDuringRun');
     if (this.plans.list(sessionId).some((plan) => plan.status === 'executing'))
       throw httpError(409, 'orchestrator.handoffDuringPlan');
@@ -2528,6 +2532,11 @@ export class Orchestrator {
     if (!session) throw httpError(404, 'common.sessionNotFound');
     return session;
   }
+  private requireWritableSession(sessionId: string) {
+    const session = this.requireSession(sessionId);
+    if (session.archivedAt) throw httpError(409, 'sessions.archived');
+    return session;
+  }
   /** A pause only means something while items wait; an empty queue never stays paused. */
   private clearPauseIfEmpty(sessionId: string) {
     const queue = this.store.getQueue(sessionId);
@@ -2547,7 +2556,7 @@ export class Orchestrator {
     /** Sent from an internet session: the run starts under manual approval, now or later. */
     manualApproval = false,
   ) {
-    this.requireSession(sessionId);
+    this.requireWritableSession(sessionId);
     // A retried request whose item already left the queue and started.
     const startedRun = clientId ? this.store.findClientMessage(sessionId, clientId) : undefined;
     if (startedRun) return { item: undefined, started: this.startedResult(sessionId, startedRun) };
@@ -2565,14 +2574,14 @@ export class Orchestrator {
     return { item, started: started && started.itemId === item.id ? started.result : undefined };
   }
   editQueued(sessionId: string, itemId: string, content: string) {
-    this.requireSession(sessionId);
+    this.requireWritableSession(sessionId);
     const item = this.store.updateQueued(sessionId, itemId, content);
     if (!item) throw httpError(404, 'orchestrator.queueItemGone');
     this.emitQueue(sessionId);
     return item;
   }
   removeQueued(sessionId: string, itemId: string) {
-    this.requireSession(sessionId);
+    this.requireWritableSession(sessionId);
     if (!this.store.removeQueued(sessionId, itemId)) throw httpError(404, 'orchestrator.queueItemGone');
     this.limitOverrides.delete(itemId);
     this.clearPauseIfEmpty(sessionId);
@@ -2583,7 +2592,7 @@ export class Orchestrator {
    * `overrideLimit` ("Continuar mesmo assim"), that next item alone may pass the usage limits.
    */
   async resumeQueue(sessionId: string, overrideLimit = false) {
-    this.requireSession(sessionId);
+    this.requireWritableSession(sessionId);
     this.store.setQueuePause(sessionId, null);
     this.emitQueue(sessionId);
     const next = overrideLimit ? this.store.listQueue(sessionId)[0]?.id : undefined;
@@ -2600,7 +2609,7 @@ export class Orchestrator {
     overrideLimit = false,
     manualApproval = false,
   ) {
-    this.requireSession(sessionId);
+    this.requireWritableSession(sessionId);
     let itemId: string;
     if ('itemId' in input) {
       if (!this.store.listQueue(sessionId).some((i) => i.id === input.itemId))
@@ -2643,7 +2652,7 @@ export class Orchestrator {
    * removes it from the queue; the run keeps going. Fails with 409 when nothing can steer.
    */
   async steerQueued(sessionId: string, itemId: string) {
-    this.requireSession(sessionId);
+    this.requireWritableSession(sessionId);
     const item = this.store.listQueue(sessionId).find((i) => i.id === itemId);
     if (!item) throw httpError(404, 'orchestrator.queueItemGone');
     if (item.attachments?.length) throw httpError(409, 'orchestrator.steerAttachments');
@@ -2709,7 +2718,7 @@ export class Orchestrator {
     const work = (async () => {
       if (this.shuttingDown || this.isActive(sessionId)) return undefined;
       const session = this.store.getSession(sessionId);
-      if (!session || session.activeRunId) return undefined;
+      if (!session || session.activeRunId || session.archivedAt) return undefined;
       if (!itemId && this.store.getQueue(sessionId).paused) return undefined;
       const item: QueuedMessage | undefined = this.store.takeQueued(sessionId, itemId);
       if (!item) return undefined;

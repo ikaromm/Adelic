@@ -22,9 +22,12 @@ import {
   ListPlus,
   ClipboardList,
   ArrowRightLeft,
+  CornerDownRight,
   SquareTerminal,
   GitBranch,
   Lock,
+  Archive,
+  ArchiveRestore,
 } from 'lucide-react';
 import type {
   AttachmentMeta,
@@ -35,6 +38,7 @@ import type {
   HandoffSummaryMode,
   Message,
   OrchestrationConfig,
+  ProjectFolder,
   ProjectCoordination,
   Session,
   SessionDetail,
@@ -93,11 +97,13 @@ import type { ApiError, SpendLimitsPatch } from './api';
 import { SIDEBAR_LIMIT, SessionItem, SidebarNav, UpdateNotice, type Page } from './components/Sidebar';
 import { ToolsPanel, type ToolsTab } from './components/ToolsPanel';
 import { WorktreePanel } from './components/WorktreePanel';
+import { ProjectFolders } from './components/ProjectFolders';
+import { SessionFolderMenu } from './components/SessionFolderMenu';
 import { uuid } from './uuid';
 import { setLanguagePreference, t as translate, useI18n, type LanguagePreference } from './i18n';
 import { useAccessKind } from './RemoteGate';
 
-type LocalStream = { runId: string; messageId: string; content: string };
+type LocalStream = { runId: string; messageId: string; content: string; updatedAt?: number };
 
 function providerForRemoteProject(preferred: string, providers: Bootstrap['providers']) {
   const supported = providers.filter((provider) => provider.id === 'codex' || provider.id === 'kiro');
@@ -129,6 +135,7 @@ export default function App() {
   // Bumped by `automations` stream events so the Automações page reloads its list.
   const [automationsVersion, setAutomationsVersion] = useState(0);
   const [stream, setStream] = useState<LocalStream | null>(null);
+  const [eventsConnected, setEventsConnected] = useState(true);
   const [notice, setNotice] = useState('');
   const [busy, setBusy] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -158,6 +165,7 @@ export default function App() {
   const [usageWarningHidden, setUsageWarningHidden] = useState('');
   const focusComposerRef = useRef(false);
   const [expandedLists, setExpandedLists] = useState<Record<string, boolean>>({});
+  const [showArchivedLists, setShowArchivedLists] = useState<Record<string, boolean>>({});
   const now = useNow(60_000);
   const activeRunIdRef = useRef<string | undefined>(undefined);
   const bootstrapRequestRef = useRef(0);
@@ -361,6 +369,7 @@ export default function App() {
 
   useEffect(() => {
     const events = new EventSource(eventsUrl('/api/events'));
+    events.onopen = () => setEventsConnected(true);
     const reconcile = () => {
       void refreshBootstrap().catch((error: Error) => setNotice(error.message));
       if (selectedSession) void refreshDetail(selectedSession).catch(() => undefined);
@@ -488,8 +497,8 @@ export default function App() {
         if (event.runId !== activeRunIdRef.current) return;
         setStream((current) =>
           current?.messageId === event.messageId
-            ? { ...current, content: current.content + event.text }
-            : { runId: event.runId, messageId: event.messageId, content: event.text },
+            ? { ...current, content: current.content + event.text, updatedAt: Date.now() }
+            : { runId: event.runId, messageId: event.messageId, content: event.text, updatedAt: Date.now() },
         );
       }
       if (
@@ -500,6 +509,7 @@ export default function App() {
       }
     };
     events.onerror = () => {
+      setEventsConnected(false);
       /* EventSource reconnects; the server sends a fresh snapshot signal. */
     };
     return () => events.close();
@@ -562,10 +572,17 @@ export default function App() {
     .map((w) => `${w.kind}:${w.used >= w.limit ? 'reached' : 'warn'}`)
     .join(',');
   const projectSessions = useMemo(
-    () => data?.sessions.filter((s) => s.projectId === selectedProject) || [],
+    () => data?.sessions.filter((s) => s.projectId === selectedProject && !s.archivedAt) || [],
     [data?.sessions, selectedProject],
   );
-  const detachedSessions = useMemo(() => data?.sessions.filter((s) => s.projectId === null) || [], [data?.sessions]);
+  const detachedSessions = useMemo(
+    () => data?.sessions.filter((s) => s.projectId === null && !s.archivedAt) || [],
+    [data?.sessions],
+  );
+  const archivedDetachedSessions = useMemo(
+    () => data?.sessions.filter((s) => s.projectId === null && Boolean(s.archivedAt)) || [],
+    [data?.sessions],
+  );
   const conversationProject = data?.projects.find((item) => item.id === session?.projectId);
   const cwdProject = page === 'chat' && session ? conversationProject : project;
   const cwdHost = cwdProject?.remote ? remoteHosts.find((host) => host.id === cwdProject.remote?.hostId) : undefined;
@@ -825,7 +842,7 @@ export default function App() {
   /** `explicit` resends given attachments (retry, suggestions) instead of the composer's. */
   async function sendMessage(value = composer, explicit?: AttachmentMeta[], overrideLimit = false) {
     const content = value.trim();
-    if (!content || !session || busy || session.activeRunId || settingsPendingRef.current) return;
+    if (!content || !session || session.archivedAt || busy || session.activeRunId || settingsPendingRef.current) return;
     if (!explicit && attachments.uploading) return setNotice(t('app.waitUploads'));
     // `/compactar` alone is an action, not a turn: no bubble, just the summary card.
     if (compactCommand(content) === 'compact' && !(explicit ?? attachments.ready).length) {
@@ -978,7 +995,7 @@ export default function App() {
   /** Enter while the agent works: the message waits on the server and starts on its own. */
   async function queueMessage() {
     const content = composer.trim();
-    if (!content || !session) return;
+    if (!content || !session || session.archivedAt) return;
     if (attachments.uploading) return setNotice(t('app.waitUploads'));
     const sessionId = session.id;
     setDrafts((current) => ({ ...current, [sessionId]: '' }));
@@ -993,6 +1010,35 @@ export default function App() {
         ...current,
         [sessionId]: current[sessionId] ? `${content}\n${current[sessionId]}` : content,
       }));
+  }
+
+  /** Add the draft to the queue, then deliver it to runtimes that accept in-turn steering. */
+  async function steerComposer() {
+    const content = composer.trim();
+    if (
+      !content ||
+      !session ||
+      session.archivedAt ||
+      !session.activeRunId ||
+      !provider?.capabilities.steer ||
+      attachments.uploading
+    )
+      return;
+    const sessionId = session.id;
+    setDrafts((current) => ({ ...current, [sessionId]: '' }));
+    setNotice('');
+    const result = await messageQueue.add(content);
+    if (!result) {
+      setDrafts((current) => ({
+        ...current,
+        [sessionId]: current[sessionId] ? `${content}\n${current[sessionId]}` : content,
+      }));
+      return;
+    }
+    attachments.clear(sessionId);
+    // The queue insertion is bound to the captured session, but the hook's next call targets
+    // whichever conversation is selected then. Leave the item queued if navigation changed.
+    if (result.item && selectedSessionRef.current === sessionId) await messageQueue.steer(result.item.id);
   }
 
   async function cancelPendingSend(sessionId: string) {
@@ -1039,7 +1085,7 @@ export default function App() {
   }
 
   async function changeSession(
-    patch: Partial<Pick<Session, 'providerId' | 'mode' | 'projectId' | 'thinking' | 'planFirst'>> & {
+    patch: Partial<Pick<Session, 'providerId' | 'mode' | 'projectId' | 'folderId' | 'thinking' | 'planFirst'>> & {
       model?: string | null;
       approvalMode?: ApprovalMode | null;
     },
@@ -1104,11 +1150,67 @@ export default function App() {
 
   function applySession(updated: Session) {
     setDetail((current) =>
-      current?.session.id === updated.id ? { ...current, session: { ...current.session, ...updated } } : current,
+      current?.session.id === updated.id
+        ? { ...current, session: { ...updated, activeRunId: updated.activeRunId ?? current.session.activeRunId } }
+        : current,
     );
     setData((current) =>
-      current ? { ...current, sessions: current.sessions.map((s) => (s.id === updated.id ? updated : s)) } : current,
+      current
+        ? {
+            ...current,
+            sessions: current.sessions.map((s) =>
+              s.id === updated.id ? { ...updated, activeRunId: updated.activeRunId ?? s.activeRunId } : s,
+            ),
+          }
+        : current,
     );
+  }
+
+  async function setConversationArchived(archived: boolean) {
+    if (!session || busy || session.activeRunId || Boolean(session.archivedAt) === archived) return;
+    setBusy(true);
+    setNotice('');
+    try {
+      const updated = await api.updateSession(session.id, { archived });
+      invalidateBootstrapRefreshes();
+      applySession(updated);
+    } catch (error) {
+      setNotice((error as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function createProjectFolder(projectId: string, name: string, parentId: string | null): Promise<ProjectFolder> {
+    try {
+      const folder = await api.createProjectFolder(projectId, { name, parentId });
+      setData((current) =>
+        current ? { ...current, projectFolders: [...(current.projectFolders || []), folder] } : current,
+      );
+      setNotice('');
+      return folder;
+    } catch (error) {
+      setNotice((error as Error).message);
+      throw error;
+    }
+  }
+
+  async function renameProjectFolder(id: string, name: string) {
+    try {
+      const folder = await api.renameProjectFolder(id, { name });
+      setData((current) =>
+        current
+          ? {
+              ...current,
+              projectFolders: (current.projectFolders || []).map((item) => (item.id === id ? folder : item)),
+            }
+          : current,
+      );
+      setNotice('');
+    } catch (error) {
+      setNotice((error as Error).message);
+      throw error;
+    }
   }
 
   /** Opens the handoff dialog; `target` comes from the model menu (a different provider). */
@@ -1423,7 +1525,7 @@ export default function App() {
   );
   const latestSession = (projectId: string) =>
     sidebarSessions(
-      (data?.sessions || []).filter((item) => item.projectId === projectId),
+      (data?.sessions || []).filter((item) => item.projectId === projectId && !item.archivedAt),
       1,
       false,
       '',
@@ -1534,6 +1636,9 @@ export default function App() {
             run={currentDetail?.runs.find((run) => run.id === message.runId)}
             tasks={activityTasks}
             events={activityEvents}
+            approvals={currentDetail?.approvals.filter((approval) => approval.runId === message.runId) || []}
+            streamUpdatedAt={stream?.runId === message.runId ? stream.updatedAt : undefined}
+            eventsConnected={eventsConnected}
             providers={data.providers}
             active={session.activeRunId === message.runId}
             taskOutputs={taskOutputs.outputs}
@@ -1618,6 +1723,33 @@ export default function App() {
                 </button>
               )}
               {detachedSessions.length === 0 && <p className="sidebar-empty">{t('sidebar.detachedEmpty')}</p>}
+              {archivedDetachedSessions.length > 0 && (
+                <>
+                  <button
+                    type="button"
+                    className="sidebar-archive-toggle"
+                    aria-expanded={Boolean(showArchivedLists.detached)}
+                    onClick={() => setShowArchivedLists((current) => ({ ...current, detached: !current.detached }))}
+                  >
+                    <Archive size={13} aria-hidden="true" />
+                    {showArchivedLists.detached
+                      ? t('sidebar.hideArchived')
+                      : t('sidebar.showArchived', { count: archivedDetachedSessions.length })}
+                  </button>
+                  {showArchivedLists.detached &&
+                    [...archivedDetachedSessions]
+                      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+                      .map((itemSession) => (
+                        <SessionItem
+                          key={itemSession.id}
+                          session={itemSession}
+                          selected={itemSession.id === selectedSession}
+                          now={now}
+                          onSelect={() => openConversation(itemSession.id)}
+                        />
+                      ))}
+                </>
+              )}
             </div>
           </section>
           <section className="sidebar-section sidebar-projects" aria-labelledby="sidebar-projects-title">
@@ -1637,6 +1769,9 @@ export default function App() {
             <div className="project-list">
               {data?.projects.map((item) => {
                 const expanded = item.id === selectedProject;
+                const archivedSessionsForProject = (data?.sessions || []).filter(
+                  (session) => session.projectId === item.id && Boolean(session.archivedAt),
+                );
                 return (
                   <div key={item.id} className="project-group">
                     <div className={`project-row ${expanded ? 'selected' : ''}`}>
@@ -1677,17 +1812,17 @@ export default function App() {
                         <Plus size={14} />
                       </button>
                     </div>
-                    {expanded && projectSessions.length > 0 && (
+                    {expanded && (
                       <div className="session-list">
-                        {projectList.items.map((itemSession) => (
-                          <SessionItem
-                            key={itemSession.id}
-                            session={itemSession}
-                            selected={itemSession.id === selectedSession}
-                            now={now}
-                            onSelect={() => openConversation(itemSession.id)}
-                          />
-                        ))}
+                        <ProjectFolders
+                          folders={(data?.projectFolders || []).filter((folder) => folder.projectId === item.id)}
+                          sessions={projectList.items}
+                          selectedSession={selectedSession}
+                          now={now}
+                          onSelect={openConversation}
+                          onCreate={(name, parentId) => createProjectFolder(item.id, name, parentId)}
+                          onRename={renameProjectFolder}
+                        />
                         {projectList.hidden > 0 && (
                           <button type="button" className="sidebar-more" onClick={() => toggleList(item.id, true)}>
                             {t('sidebar.showMore', { count: projectList.hidden })}
@@ -1697,6 +1832,35 @@ export default function App() {
                           <button type="button" className="sidebar-more" onClick={() => toggleList(item.id, false)}>
                             {t('sidebar.showLess')}
                           </button>
+                        )}
+                        {archivedSessionsForProject.length > 0 && (
+                          <>
+                            <button
+                              type="button"
+                              className="sidebar-archive-toggle"
+                              aria-expanded={Boolean(showArchivedLists[item.id])}
+                              onClick={() =>
+                                setShowArchivedLists((current) => ({ ...current, [item.id]: !current[item.id] }))
+                              }
+                            >
+                              <Archive size={13} aria-hidden="true" />
+                              {showArchivedLists[item.id]
+                                ? t('sidebar.hideArchived')
+                                : t('sidebar.showArchived', { count: archivedSessionsForProject.length })}
+                            </button>
+                            {showArchivedLists[item.id] &&
+                              [...archivedSessionsForProject]
+                                .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+                                .map((itemSession) => (
+                                  <SessionItem
+                                    key={itemSession.id}
+                                    session={itemSession}
+                                    selected={itemSession.id === selectedSession}
+                                    now={now}
+                                    onSelect={() => openConversation(itemSession.id)}
+                                  />
+                                ))}
+                          </>
                         )}
                       </div>
                     )}
@@ -1776,6 +1940,26 @@ export default function App() {
                   <GitBranch size={16} />
                 </button>
               )}
+            {page === 'chat' && session?.projectId && (
+              <SessionFolderMenu
+                folders={(data?.projectFolders || []).filter((folder) => folder.projectId === session.projectId)}
+                folderId={session.folderId}
+                disabled={busy || Boolean(session.activeRunId) || Boolean(session.archivedAt)}
+                onMove={(folderId) => void changeSession({ folderId })}
+              />
+            )}
+            {page === 'chat' && session && (
+              <button
+                type="button"
+                className="icon-button"
+                aria-label={session.archivedAt ? t('app.restoreConversation') : t('app.archiveConversation')}
+                title={session.archivedAt ? t('app.restoreConversation') : t('app.archiveConversation')}
+                disabled={busy || Boolean(session.activeRunId) || Boolean(messageQueue.queue?.items.length)}
+                onClick={() => void setConversationArchived(!session.archivedAt)}
+              >
+                {session.archivedAt ? <ArchiveRestore size={16} /> : <Archive size={16} />}
+              </button>
+            )}
             {page === 'chat' && session && (
               <button
                 type="button"
@@ -1928,7 +2112,7 @@ export default function App() {
                     {currentDetail?.runs.some((run) => run.compaction && run.status === 'running') && (
                       <CompactingNotice />
                     )}
-                    {stream && (
+                    {stream?.content && (
                       <div className="message-row assistant-row streaming">
                         <div className="message-author">
                           <span className="assistant-glyph" aria-hidden="true">
@@ -1940,13 +2124,7 @@ export default function App() {
                             {t('app.writing')}
                           </span>
                         </div>
-                        {stream.content ? (
-                          <Markdown>{stream.content}</Markdown>
-                        ) : (
-                          <div className="markdown-content">
-                            <span className="typing-caret" aria-hidden="true" />
-                          </div>
-                        )}
+                        <Markdown>{stream.content}</Markdown>
                       </div>
                     )}
                     {activityEvents
@@ -2029,6 +2207,12 @@ export default function App() {
                       </button>
                     </div>
                   )}
+                  {session.archivedAt && (
+                    <div className="archived-conversation-banner" role="status">
+                      <Archive size={15} aria-hidden="true" />
+                      <span>{t('app.archivedBanner')}</span>
+                    </div>
+                  )}
                   {limitBlock && limitBlock.sessionId === session.id ? (
                     <LimitNotice
                       message={limitBlock.message}
@@ -2057,7 +2241,11 @@ export default function App() {
                     className={`composer-box ${session.activeRunId ? 'is-running' : ''} ${attachments.dragging ? 'is-dragging' : ''}`}
                     {...attachments.dropHandlers}
                   >
-                    <PendingAttachments items={attachments.items} disabled={busy} onRemove={attachments.remove} />
+                    <PendingAttachments
+                      items={attachments.items}
+                      disabled={busy || Boolean(session.archivedAt)}
+                      onRemove={attachments.remove}
+                    />
                     {slash.open && (
                       <CommandPopup
                         id={slash.listboxId}
@@ -2107,25 +2295,32 @@ export default function App() {
                           });
                       }}
                       placeholder={
-                        session.activeRunId
-                          ? t('composer.placeholder.running')
-                          : session.planFirst
-                            ? t('composer.placeholder.planFirst')
-                            : t('composer.placeholder')
+                        session.archivedAt
+                          ? t('app.archivedBanner')
+                          : session.activeRunId
+                            ? t('composer.placeholder.running')
+                            : session.planFirst
+                              ? t('composer.placeholder.planFirst')
+                              : t('composer.placeholder')
                       }
                       aria-label={t('composer.input')}
+                      disabled={Boolean(session.archivedAt)}
                       rows={1}
                     />
                     <div className="composer-toolbar">
                       <div className="composer-controls">
-                        <AttachButton disabled={busy} full={attachments.full} onFiles={attachments.add} />
+                        <AttachButton
+                          disabled={busy || Boolean(session.archivedAt)}
+                          full={attachments.full}
+                          onFiles={attachments.add}
+                        />
                         {voiceEnabled && (
                           <VoiceButton
                             state={voice.state}
                             elapsed={voice.elapsed}
                             level={voice.level}
                             blocker={voice.blocker}
-                            disabled={busy && voice.state === 'idle'}
+                            disabled={(busy || Boolean(session.archivedAt)) && voice.state === 'idle'}
                             onToggle={() => {
                               if (voice.blocker) return setNotice(voice.blocker);
                               if (voice.state === 'idle') dictationTargetRef.current = session.id;
@@ -2340,15 +2535,31 @@ export default function App() {
                         )}
                       </div>
                       {session.activeRunId && composer.trim() && (
-                        <button
-                          type="button"
-                          className="queue-button"
-                          aria-label={t('composer.queue')}
-                          title={t('composer.queueTitle')}
-                          onClick={() => void queueMessage()}
-                        >
-                          <ListPlus size={16} />
-                        </button>
+                        <>
+                          {provider?.capabilities.steer && attachments.ready.length === 0 && (
+                            <button
+                              type="button"
+                              className="composer-steer-button"
+                              aria-label={t('composer.steer')}
+                              title={t('composer.steerTitle')}
+                              disabled={busy || Boolean(session.archivedAt) || attachments.uploading}
+                              onClick={() => void steerComposer()}
+                            >
+                              <CornerDownRight size={15} />
+                              <span>{t('composer.steer')}</span>
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            className="queue-button"
+                            aria-label={t('composer.queue')}
+                            title={t('composer.queueTitle')}
+                            onClick={() => void queueMessage()}
+                            disabled={busy || Boolean(session.archivedAt) || attachments.uploading}
+                          >
+                            <ListPlus size={16} />
+                          </button>
+                        </>
                       )}
                       <button
                         className={`send-button ${canCancelCurrentSend ? 'stop' : ''}`}
@@ -2367,7 +2578,11 @@ export default function App() {
                         disabled={
                           canCancelCurrentSend
                             ? false
-                            : !composer.trim() || busy || settingsPending || attachments.uploading
+                            : !composer.trim() ||
+                              busy ||
+                              settingsPending ||
+                              attachments.uploading ||
+                              Boolean(session.archivedAt)
                         }
                       >
                         {canCancelCurrentSend ? (

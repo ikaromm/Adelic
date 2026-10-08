@@ -272,6 +272,31 @@
   color: var(--text);
 }
 
+.sidebar-archive-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 28px;
+  margin: 3px 4px 2px;
+  padding: 0 7px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  text-align: left;
+}
+
+.sidebar-archive-toggle:hover,
+.sidebar-archive-toggle:focus-visible {
+  background: var(--row-hover);
+  color: var(--text);
+}
+
+.session-archived-icon {
+  color: var(--text-muted);
+}
+
 .sidebar-empty {
   padding: 4px 10px;
   color: var(--text-muted);
@@ -379,6 +404,166 @@
 .project-group > .session-list > .session-item,
 .project-group > .session-list > .sidebar-more {
   margin-left: 1px;
+}
+
+.project-folder-tree {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 2px;
+}
+
+.project-folder-tree-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 28px;
+  padding: 0 5px 0 9px;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  font-weight: 600;
+}
+
+.project-folder-tree-heading .icon-button {
+  width: 24px;
+  height: 24px;
+}
+
+.project-folder-node {
+  min-width: 0;
+}
+
+.project-folder-row {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+  min-height: 30px;
+  border-radius: var(--radius-sm);
+}
+
+.project-folder-row:hover,
+.project-folder-row:focus-within {
+  background: var(--row-hover);
+}
+
+.project-folder-toggle {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  min-height: 30px;
+  padding: 0 4px 0 5px;
+  border: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  text-align: left;
+}
+
+.project-folder-toggle > svg {
+  flex: none;
+  color: var(--text-muted);
+}
+
+.project-folder-toggle > svg:first-child {
+  transition: transform var(--duration-fast) var(--ease);
+}
+
+.project-folder-toggle > svg:first-child.collapsed {
+  transform: rotate(-90deg);
+}
+
+.project-folder-toggle > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-folder-count {
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.project-folder-action {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  opacity: 0.7;
+}
+
+.project-folder-action:hover,
+.project-folder-action:focus-visible {
+  opacity: 1;
+}
+
+.project-folder-contents {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding-left: 8px;
+}
+
+.project-folder-form {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+  padding: 3px 4px;
+}
+
+.project-folder-form input,
+.project-folder-rename {
+  flex: 1;
+  min-width: 0;
+  height: 28px;
+  padding: 0 7px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-raised);
+  color: var(--text);
+  font-size: var(--text-xs);
+}
+
+.project-folder-form input:focus-visible,
+.project-folder-rename:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+.session-folder-menu {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 180px;
+  min-height: 30px;
+  padding: 0 5px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+}
+
+.session-folder-menu:hover,
+.session-folder-menu:focus-within {
+  border-color: var(--border);
+  background: var(--surface-raised);
+  color: var(--text);
+}
+
+.session-folder-menu select {
+  max-width: 145px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-size: var(--text-xs);
+}
+
+.session-folder-menu select:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .project-new-chat {
@@ -779,6 +964,39 @@
 }
 
 @media (max-width: 480px) {
+  .topbar {
+    height: auto;
+    min-height: var(--topbar-height);
+    flex-wrap: wrap;
+    gap: 2px 8px;
+    padding-block: 5px;
+  }
+
+  .topbar-left {
+    flex: 1 1 100%;
+  }
+
+  .topbar-right {
+    flex: 1 1 100%;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    min-width: 0;
+  }
+
+  .session-folder-menu {
+    max-width: 112px;
+  }
+
+  .session-folder-menu select {
+    max-width: 78px;
+  }
+
+  .local-badge {
+    gap: 0;
+    padding-inline: 6px;
+    font-size: 0;
+  }
+
   .breadcrumbs .crumb:has(+ .crumb-separator),
   .crumb-separator {
     display: none;

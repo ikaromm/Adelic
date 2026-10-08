@@ -77,3 +77,7 @@ O teste real com os dois provedores valida o caminho de ferramentas e aprovaçõ
 ## Autonomia e observabilidade
 
 A evolução de 2026-10-08 mantém aprovação manual por padrão. Uma escolha explícita de Automático no projeto ou na conversa aprova as ferramentas elegíveis sem perguntas; o modo global não libera SSH. Manual na conversa prevalece sobre Automático no projeto. O sandbox local e a ausência de credenciais remotas permanecem. As chamadas SSH têm duração e resultado registrados na observabilidade local, sem comandos, argumentos ou saída na telemetria. Veja [contrato geral](autonomy-observability.md).
+
+### Descoberta de aliases SSH
+
+O cadastro local carrega automaticamente aliases literais de `~/.ssh/config` e dos arquivos `Include`; `ADELIC_SSH_CONFIG` permite escolher um arquivo alternativo. A descoberta lê somente `Host` e `Include`, sem avaliar `Match exec` ou executar comandos. Padrões (`*`, `?`, negações) não viram opções de servidor. Selecionar um alias preenche o destino e mantém a porta vazia para que a consulta SSH use a porta efetiva do config, em vez de substituir por 22. O SSH continua resolvendo usuário, chave e outras opções compatíveis no momento da conexão. A leitura da lista não autentica nem conecta ao servidor; o fingerprint ainda precisa ser conferido antes de salvar. Nenhum conteúdo de chave privada é enviado à interface.

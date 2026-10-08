@@ -11,6 +11,7 @@ import {
   type DelegatedTask,
   type Message,
   type Project,
+  type ProjectFolder,
   type ProjectBrief,
   type Run,
   type RunEvent,
@@ -305,6 +306,53 @@ export class Store {
   listSessions() {
     return this.rows<Session>('sessions', 'ORDER BY rowid DESC');
   }
+  getProjectFolder(id: string) {
+    const row = this.db.prepare('SELECT data FROM project_folders WHERE id=?').get(id) as { data: string } | undefined;
+    return row ? (JSON.parse(row.data) as ProjectFolder) : undefined;
+  }
+  listProjectFolders(projectId?: string) {
+    const rows = projectId
+      ? (this.db.prepare('SELECT data FROM project_folders WHERE project_id=? ORDER BY rowid').all(projectId) as {
+          data: string;
+        }[])
+      : (this.db.prepare('SELECT data FROM project_folders ORDER BY rowid').all() as { data: string }[]);
+    return rows.map((row) => JSON.parse(row.data) as ProjectFolder);
+  }
+  putProjectFolder(folder: ProjectFolder) {
+    this.db
+      .prepare(
+        'INSERT INTO project_folders(id,project_id,parent_id,name,data) VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id,parent_id=excluded.parent_id,name=excluded.name,data=excluded.data',
+      )
+      .run(folder.id, folder.projectId, folder.parentId, folder.name, JSON.stringify(folder));
+    return folder;
+  }
+  projectFolderHasChildren(id: string) {
+    return Boolean(this.db.prepare('SELECT 1 FROM project_folders WHERE parent_id=? LIMIT 1').get(id));
+  }
+  /** Move conversations to the parent/root and remove the virtual folder in one transaction. */
+  deleteProjectFolder(id: string) {
+    const folder = this.getProjectFolder(id);
+    if (!folder || this.projectFolderHasChildren(id)) return false;
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const sessions = this.db
+        .prepare("SELECT data FROM sessions WHERE project_id=? AND json_extract(data,'$.folderId')=?")
+        .all(folder.projectId, id) as { data: string }[];
+      for (const { data } of sessions) {
+        const session = JSON.parse(data) as Session;
+        if (folder.parentId) session.folderId = folder.parentId;
+        else delete session.folderId;
+        session.updatedAt = new Date().toISOString();
+        this.putSession(session);
+      }
+      this.db.prepare('DELETE FROM project_folders WHERE id=?').run(id);
+      this.db.exec('COMMIT');
+      return true;
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
   putSession(s: Session) {
     this.db
       .prepare(
@@ -454,6 +502,7 @@ export class Store {
     const session: Session = {
       id: randomUUID(),
       projectId: source.projectId,
+      ...(source.folderId ? { folderId: source.folderId } : {}),
       title: `${source.title.slice(0, 160 - suffix.length)}${suffix}`,
       providerId: source.providerId,
       ...(source.model ? { model: source.model } : {}),
@@ -805,6 +854,7 @@ export class Store {
     return {
       projects: this.listProjects(),
       sessions: this.listSessions(),
+      projectFolders: this.listProjectFolders(),
       providers,
       settings: this.getSettings()!,
       integrations,

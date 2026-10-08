@@ -6,10 +6,12 @@ export default defineMessages(
     'common.requestFailed': 'Falha na solicitação ({status})',
     'common.available': 'Disponível',
     'common.unavailable': 'Indisponível',
+    'common.cancel': 'Cancelar',
   },
   {
     'common.requestFailed': 'Request failed ({status})',
     'common.available': 'Available',
     'common.unavailable': 'Unavailable',
+    'common.cancel': 'Cancel',
   },
 );

@@ -33,6 +33,22 @@ async function newConversation(page: Page) {
 }
 const conversation = (page: Page) => page.getByRole('region', { name: 'Conversation', exact: true });
 
+async function openMobileNavigation(page: Page) {
+  const sidebar = page.locator('.sidebar');
+  if (!(await sidebar.evaluate((node) => node.classList.contains('sidebar-mobile-open')))) {
+    await page.getByRole('button', { name: 'Open navigation' }).click();
+  }
+  await expect(sidebar).toHaveClass(/sidebar-mobile-open/);
+}
+
+async function closeMobileNavigation(page: Page) {
+  const sidebar = page.locator('.sidebar');
+  if (await sidebar.evaluate((node) => node.classList.contains('sidebar-mobile-open'))) {
+    await sidebar.getByRole('button', { name: 'Close navigation' }).click();
+  }
+  await expect(sidebar).not.toHaveClass(/sidebar-mobile-open/);
+}
+
 /** None of these Portuguese UI words (whole words) is left in the visible text of the elements `region` matches. */
 async function expectNoPortuguese(region: Locator, words: string[]) {
   await expect(region.first()).toBeVisible();
@@ -124,6 +140,9 @@ test('approval card and message queue', async ({ page }) => {
   await input.press('Enter');
   const card = conversation(page).locator('.approval-card');
   await expect(card).toContainText('Command · confirm this action to continue');
+  const runningActivity = conversation(page).getByRole('region', { name: 'Activity for this run' }).first();
+  await expect(runningActivity).toContainText('Waiting for approval: Executar comando de teste');
+  await expect(runningActivity).toContainText(/No update for/);
   await expectNoPortuguese(card.locator('.approval-actions, .approval-copy > span'), ['Comando', 'Negar', 'Aprovar']);
 
   // The run waits for the approval: what is typed now goes to the queue.
@@ -146,6 +165,164 @@ test('approval card and message queue', async ({ page }) => {
   await activity.locator('summary').first().click();
   await expect(activity.getByText('Approved', { exact: true })).toBeVisible();
   await expectNoPortuguese(activity.locator('.activity-event'), ['Aprovado', 'Negado']);
+});
+
+test('shows that the model is still responding before its first token', async ({ page }) => {
+  const input = await newConversation(page);
+  await input.fill('[espera-modelo]');
+  await input.press('Enter');
+  const activity = conversation(page).getByRole('region', { name: 'Activity for this run' }).last();
+  await expect(activity).toContainText('Waiting for the model response');
+  await expect(activity).toContainText(/No update for/);
+  await expect(conversation(page).getByText('Resposta após a espera.', { exact: true }).last()).toBeVisible({
+    timeout: 10_000,
+  });
+});
+
+test('organizes project conversations in nested virtual folders', async ({ page, request }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const repo = realpathSync(mkdtempSync(join(tmpdir(), 'adelic-e2e-folders-')));
+  try {
+    const name = `Folders ${Date.now()}`;
+    const created = await request.post('/api/projects', {
+      data: { name, path: repo, memoryWorkspace: 'e2e', memoryProject: `folders-${Date.now()}` },
+    });
+    expect(created.ok()).toBe(true);
+    await page.goto('/');
+    await openMobileNavigation(page);
+    await page.getByRole('button', { name: `New conversation in ${name}` }).click();
+    await expect(page.getByRole('combobox', { name: 'Move conversation to a folder' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Archive conversation' })).toBeVisible();
+    await expect(page.locator('.topbar').evaluate((node) => node.scrollWidth <= node.clientWidth)).resolves.toBe(true);
+    await openMobileNavigation(page);
+    const tree = page.getByLabel('Project folders and conversations');
+    await expect(tree).toBeVisible();
+    await tree.getByRole('button', { name: 'Create project folder' }).click();
+    await tree.getByRole('textbox', { name: 'Folder name' }).fill('Product');
+    await tree.getByRole('button', { name: 'Create folder' }).click();
+    await tree.getByRole('button', { name: 'Create subfolder in Product' }).click();
+    await tree.getByRole('textbox', { name: 'Folder name' }).fill('Research');
+    await tree.getByRole('button', { name: 'Create folder' }).click();
+
+    const folderSelect = page.getByRole('combobox', { name: 'Move conversation to a folder' });
+    const researchId = await folderSelect.locator('option').filter({ hasText: 'Research' }).getAttribute('value');
+    expect(researchId).toBeTruthy();
+    await closeMobileNavigation(page);
+    await folderSelect.selectOption(researchId!);
+    await openMobileNavigation(page);
+    await expect(tree).toContainText('Nova conversa');
+
+    await tree.getByRole('button', { name: 'Rename Product' }).click();
+    await tree.getByRole('textbox', { name: 'Rename folder' }).fill('Product area');
+    await tree.getByRole('button', { name: 'Save folder name' }).click();
+    await expect(tree).toContainText('Product area');
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test('archives a conversation and restores it from the archived list', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto('/');
+  await openMobileNavigation(page);
+  await page
+    .getByRole('button', { name: /^New conversation/ })
+    .first()
+    .click();
+  const input = page.getByRole('textbox', { name: 'Message to the agent' });
+  await expect(input).toBeVisible();
+  await expect(page.getByRole('combobox', { name: 'Move conversation to a folder' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Archive conversation' })).toBeVisible();
+  await expect(page.locator('.topbar').evaluate((node) => node.scrollWidth <= node.clientWidth)).resolves.toBe(true);
+  await input.fill('[normal] archive this');
+  await input.press('Enter');
+  await expect(conversation(page).getByText('Resposta E2E pronta.', { exact: true }).last()).toBeVisible();
+  await page.getByRole('button', { name: 'Archive conversation' }).click();
+  await expect(page.getByText('This conversation is archived. Restore it to send more messages.')).toBeVisible();
+  await expect(page.getByRole('textbox', { name: 'Message to the agent' })).toBeDisabled();
+  await openMobileNavigation(page);
+  await page.getByRole('button', { name: /Show archived/ }).click();
+  await expect(page.locator('.session-archived-icon')).toBeVisible();
+  await closeMobileNavigation(page);
+  await page.getByRole('button', { name: 'Restore conversation' }).click();
+  await expect(page.getByText('This conversation is archived. Restore it to send more messages.')).toBeHidden();
+  await expect(page.getByRole('textbox', { name: 'Message to the agent' })).toBeEnabled();
+});
+
+test('offers a visible steer action separately from queueing while a run is active', async ({ page }) => {
+  const input = await newConversation(page);
+  await input.fill('[lento]');
+  await input.press('Enter');
+  await input.fill('Siga pelo resumo da conversa');
+  const steer = page.getByRole('button', { name: 'Steer now' });
+  await expect(steer).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Add to queue' })).toBeVisible();
+  await steer.click();
+  await expect(
+    conversation(page)
+      .locator('.assistant-row .markdown-content')
+      .filter({ hasText: 'Orientado: Siga pelo resumo da conversa' })
+      .last(),
+  ).toBeVisible({
+    timeout: 10_000,
+  });
+});
+
+test('keeps a steer queued in its original conversation when navigation happens during enqueue', async ({
+  page,
+  request,
+}) => {
+  const other = await request.post('/api/sessions', { data: { title: 'Other conversation' } });
+  expect(other.ok()).toBe(true);
+
+  await page.goto('/');
+  const createdResponse = page.waitForResponse(
+    (response) => response.request().method() === 'POST' && response.url().endsWith('/api/sessions'),
+  );
+  await page
+    .getByRole('button', { name: /^New conversation/ })
+    .first()
+    .click();
+  const current = await (await createdResponse).json();
+  const input = page.getByRole('textbox', { name: 'Message to the agent' });
+  await input.fill('[lento]');
+  await input.press('Enter');
+  await expect(page.getByRole('button', { name: 'Cancel run' })).toBeVisible();
+
+  let notifyEnqueueStarted!: () => void;
+  const enqueueStarted = new Promise<void>((resolve) => {
+    notifyEnqueueStarted = resolve;
+  });
+  let releaseEnqueue!: () => void;
+  const holdEnqueue = new Promise<void>((resolve) => {
+    releaseEnqueue = resolve;
+  });
+  await page.route('**/api/sessions/*/queue', async (route) => {
+    if (route.request().method() === 'POST') {
+      notifyEnqueueStarted();
+      await holdEnqueue;
+    }
+    await route.continue();
+  });
+
+  const queuedResponse = page.waitForResponse(
+    (response) =>
+      response.request().method() === 'POST' && response.url().endsWith(`/api/sessions/${current.id}/queue`),
+  );
+  await input.fill('Steer belongs to the first chat');
+  await page.getByRole('button', { name: 'Steer now' }).click();
+  await enqueueStarted;
+  await page.locator('.session-item[title="Other conversation"]').click();
+  await expect(page.locator('.breadcrumbs > strong')).toHaveText('Other conversation');
+  releaseEnqueue();
+  expect((await queuedResponse).ok()).toBe(true);
+
+  await expect(page.getByRole('textbox', { name: 'Message to the agent' })).toBeEnabled();
+  const queueResponse = await request.get(`/api/sessions/${current.id}/queue`);
+  expect(queueResponse.ok()).toBe(true);
+  const queue = await queueResponse.json();
+  expect(queue.items).toHaveLength(1);
+  expect(queue.items[0].content).toBe('Steer belongs to the first chat');
 });
 
 test('command palette', async ({ page }) => {

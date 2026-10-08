@@ -180,6 +180,8 @@ export interface StoredAttachment extends AttachmentMeta {
 export interface Session {
   id: string;
   projectId: string | null;
+  /** Virtual folder within project; absent/null means the project's root. */
+  folderId?: string | null;
   title: string;
   providerId: ProviderId;
   model?: string;
@@ -189,6 +191,8 @@ export interface Session {
   approvalMode?: ApprovalMode;
   createdAt: string;
   updatedAt: string;
+  /** Archived conversations remain searchable and can be restored with PATCH archived=false. */
+  archivedAt?: string;
   activeRunId?: string;
   nativeSessionId?: string;
   /** "Planejar antes": every message first produces a read-only plan to approve (docs/specs/plan-mode.md). */
@@ -197,6 +201,15 @@ export interface Session {
   branchedFrom?: { sessionId: string; messageId: string };
   /** Isolated git worktree the conversation's runs work in (docs/specs/worktrees.md). */
   worktree?: SessionWorktree;
+}
+/** Virtual conversation grouping only; it does not change the project's filesystem or runtime. */
+export interface ProjectFolder {
+  id: string;
+  projectId: string;
+  parentId: string | null;
+  name: string;
+  createdAt: string;
+  updatedAt: string;
 }
 /** A conversation's own checkout, outside the user's repository (`<dataDir>/worktrees/<sessionId>`). */
 export interface SessionWorktree {
@@ -599,6 +612,8 @@ export interface Skill {
 export interface Bootstrap {
   projects: Project[];
   sessions: Session[];
+  /** All virtual folders; optional for older clients bootstrapping from a compatible server. */
+  projectFolders?: ProjectFolder[];
   providers: ProviderInfo[];
   settings: Settings;
   integrations: Integration[];

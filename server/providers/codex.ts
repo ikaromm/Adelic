@@ -33,7 +33,9 @@ import {
   emitRemoteApproval,
   REMOTE_TOOL_SPECS,
   remoteApprovalDetail,
-  remoteRuntimeDescription,
+  remoteToolDescription,
+  remoteToolError,
+  remoteToolFailure,
   remoteToolByName,
   validateRemoteArguments,
   type RemoteToolSpec,
@@ -60,6 +62,7 @@ interface ActiveTurn {
   localEnvironmentVerified: boolean;
   /** Names of the Adelic-approved MCP servers configured on this thread. */
   mcpNames: string[];
+  remoteTools: Map<string, { spec: RemoteToolSpec; args: Record<string, unknown> }>;
   text: string;
   resolve: (result: RunResult) => void;
   reject: (error: Error) => void;
@@ -77,6 +80,7 @@ interface PendingApproval {
   params: Record<string, unknown>;
   remoteTool?: RemoteToolSpec;
   remoteArgs?: Record<string, unknown>;
+  remoteToolCallId?: string;
 }
 type CodexWrapper = (
   command: string,
@@ -801,7 +805,7 @@ export class CodexProvider {
         turn.emit({
           type: 'tool',
           name: spec.remoteName,
-          description: remoteRuntimeDescription(turn.input.remote),
+          description: remoteToolDescription(turn.input.remote, spec, args),
           status: 'denied',
           toolCallId: String(params.callId ?? message.id),
         });
@@ -817,14 +821,17 @@ export class CodexProvider {
         params,
         remoteTool: spec,
         remoteArgs: args,
+        remoteToolCallId: String(params.callId ?? message.id),
       };
       this.approvals.set(approvalId, pending);
+      const toolCallId = pending.remoteToolCallId!;
+      turn.remoteTools.set(toolCallId, { spec, args });
       turn.emit({
         type: 'tool',
         name: spec.remoteName,
-        description: remoteRuntimeDescription(turn.input.remote),
+        description: remoteToolDescription(turn.input.remote, spec, args),
         status: turn.input.approvalMode === 'automatic' ? 'running' : 'pending',
-        toolCallId: String(params.callId ?? message.id),
+        toolCallId,
       });
       const automatic = turn.input.approvalMode === 'automatic';
       emitRemoteApproval(turn.input, turn.emit, approvalId, spec, detail, automatic ? 'approved' : 'pending', args);
@@ -1040,6 +1047,16 @@ export class CodexProvider {
         );
         this.approvals.delete(id);
       }
+    for (const [toolCallId, { spec, args }] of turn.remoteTools) {
+      turn.emit({
+        type: 'tool',
+        name: spec.remoteName,
+        description: remoteToolDescription(turn.input.remote!, spec, args, 'Cancelado'),
+        status: 'cancelled',
+        toolCallId,
+      });
+      turn.remoteTools.delete(toolCallId);
+    }
     if (error) turn.reject(error);
     else turn.resolve(result);
   }
@@ -1203,6 +1220,7 @@ export class CodexProvider {
           threadId,
           localEnvironmentVerified,
           mcpNames: mcp.map((item) => item.name),
+          remoteTools: new Map(),
           text: '',
           resolve,
           reject,
@@ -1303,18 +1321,32 @@ export class CodexProvider {
           error: 'denied_by_user',
           contentItems: [{ type: 'inputText', text: 'Denied by user.' }],
         });
-        turn?.emit({
-          type: 'tool',
-          name: pending.remoteTool?.remoteName ?? 'remote',
-          description: 'Remote tool call',
-          status: 'denied',
-        });
+        const spec = pending.remoteTool;
+        const args = pending.remoteArgs;
+        if (turn && spec && args && pending.remoteToolCallId) {
+          turn.remoteTools.delete(pending.remoteToolCallId);
+          turn.emit({
+            type: 'tool',
+            name: spec.remoteName,
+            description: remoteToolDescription(turn.input.remote!, spec, args),
+            status: 'denied',
+            toolCallId: pending.remoteToolCallId,
+          });
+        }
         return;
       }
       const runtime = turn?.input.remote;
       const spec = pending.remoteTool;
       const args = pending.remoteArgs;
       if (!runtime || !spec || !args) throw new Error('Aprovação remota sem contexto válido.');
+      if (turn.input.approvalMode !== 'automatic' && pending.remoteToolCallId)
+        turn.emit({
+          type: 'tool',
+          name: spec.remoteName,
+          description: remoteToolDescription(runtime, spec, args),
+          status: 'running',
+          toolCallId: pending.remoteToolCallId,
+        });
       try {
         const result = await runtime.call(spec.remoteName, args, turn.signal);
         if (!turn || this.turns.get(turn.input.runId) !== turn || turn.signal.aborted)
@@ -1323,11 +1355,14 @@ export class CodexProvider {
           success: true,
           contentItems: [{ type: 'inputText', text: boundedRemoteResult(result) }],
         });
+        const failure = remoteToolFailure(result);
+        if (pending.remoteToolCallId) turn.remoteTools.delete(pending.remoteToolCallId);
         turn.emit({
           type: 'tool',
           name: spec.remoteName,
-          description: `${runtime.label}: ${runtime.root}`,
-          status: 'completed',
+          description: remoteToolDescription(runtime, spec, args, failure),
+          status: failure ? 'failed' : 'completed',
+          ...(pending.remoteToolCallId ? { toolCallId: pending.remoteToolCallId } : {}),
         });
       } catch (error) {
         pending.server.rpc?.respond(pending.requestId, {
@@ -1335,12 +1370,20 @@ export class CodexProvider {
           contentItems: [{ type: 'inputText', text: errorMessage(error).slice(0, 2000) }],
           error: errorMessage(error).slice(0, 2000),
         });
-        turn.emit({
-          type: 'tool',
-          name: spec.remoteName,
-          description: `${runtime.label}: ${runtime.root}`,
-          status: 'failed',
-        });
+        const toolCallId = pending.remoteToolCallId;
+        if (toolCallId && turn.remoteTools.delete(toolCallId))
+          turn.emit({
+            type: 'tool',
+            name: spec.remoteName,
+            description: remoteToolDescription(
+              runtime,
+              spec,
+              args,
+              turn.signal.aborted ? 'Cancelado' : remoteToolError(error),
+            ),
+            status: turn.signal.aborted ? 'cancelled' : 'failed',
+            toolCallId,
+          });
       }
       return;
     }

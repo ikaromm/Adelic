@@ -248,6 +248,28 @@ export const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 15,
+    description: 'Pastas virtuais de conversas vinculadas a projetos',
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS project_folders(
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL,
+          parent_id TEXT,
+          name TEXT NOT NULL,
+          data TEXT NOT NULL,
+          FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+          FOREIGN KEY(parent_id) REFERENCES project_folders(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS project_folders_project_parent ON project_folders(project_id,parent_id);
+        CREATE UNIQUE INDEX IF NOT EXISTS project_folders_root_name
+          ON project_folders(project_id,name COLLATE NOCASE) WHERE parent_id IS NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS project_folders_child_name
+          ON project_folders(project_id,parent_id,name COLLATE NOCASE) WHERE parent_id IS NOT NULL;
+      `);
+    },
+  },
 ];
 
 export const schemaVersion = migrations.at(-1)!.version;

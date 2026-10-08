@@ -1,5 +1,13 @@
 import { useEffect, useState } from 'react';
-import { Activity, ArrowUpCircle, Brain, CalendarClock, MessageSquare, Settings as SettingsIcon } from 'lucide-react';
+import {
+  Activity,
+  Archive,
+  ArrowUpCircle,
+  Brain,
+  CalendarClock,
+  MessageSquare,
+  Settings as SettingsIcon,
+} from 'lucide-react';
 import { api, type UpdateInfo } from '../api';
 import type { Session } from '../../shared/contracts';
 import { useI18n } from '../i18n';
@@ -28,11 +36,14 @@ export function SessionItem({
     >
       {session.activeRunId ? (
         <span className="session-running" aria-hidden="true" />
+      ) : session.archivedAt ? (
+        <Archive size={14} className="session-icon session-archived-icon" aria-hidden="true" />
       ) : (
         <MessageSquare size={14} className="session-icon" aria-hidden="true" />
       )}
       <span className="session-title">{title}</span>
       {session.activeRunId && <span className="visually-hidden">{t('sidebar.running')}</span>}
+      {session.archivedAt && <span className="visually-hidden">{t('sidebar.archivedConversation')}</span>}
       <time className="session-time" dateTime={session.updatedAt}>
         {fmt.relative(session.updatedAt, now)}
       </time>

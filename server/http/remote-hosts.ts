@@ -5,6 +5,7 @@ import type { RemoteHost } from '../../shared/remote-hosts.js';
 import type { BackendContext } from './context.js';
 import { requestKind } from './auth.js';
 import { error } from './common.js';
+import { sshConfigAliases } from '../remote/ssh-config.js';
 
 const target = z
   .string()
@@ -12,15 +13,16 @@ const target = z
   .max(255)
   .regex(/^[A-Za-z0-9_.@:[\]-]+$/)
   .refine((s) => !s.startsWith('-'));
-const port = z.number().int().min(1).max(65535).default(22);
+const port = z.number().int().min(1).max(65535);
 const absolute = z
   .string()
   .min(2)
   .max(4096)
   .refine((s) => s.startsWith('/') && !s.includes('\0'));
-const probeSchema = z.object({ target, port }).strict();
+const probeSchema = z.object({ target, port: port.optional() }).strict();
 const hostSchema = probeSchema
   .extend({
+    port: port.default(22),
     name: z.string().trim().min(1).max(100),
     fingerprint: z.string().regex(/^SHA256:[A-Za-z0-9+/]{43}$/),
     hostKey: z.string().min(40).max(4096),
@@ -35,6 +37,13 @@ export function remoteHostsRoutes({ store, orchestrator }: BackendContext) {
     next();
   });
   app.get('/api/remote-hosts', (_req, res) => res.json(store.listRemoteHosts()));
+  app.get('/api/remote-hosts/ssh-config', async (_req, res) => {
+    try {
+      res.json({ aliases: await sshConfigAliases() });
+    } catch (e) {
+      error(res, 409, e as Error);
+    }
+  });
   app.post('/api/remote-hosts/probe', async (req, res) => {
     const parsed = probeSchema.safeParse(req.body);
     if (!parsed.success) return error(res, 400, 'remotehosts.invalid');

@@ -14,7 +14,16 @@ import {
   X,
   XCircle,
 } from 'lucide-react';
-import type { Bootstrap, DelegatedTask, Message, ModelRef, Run, RunEvent, SessionDetail } from '../../shared/contracts';
+import type {
+  Approval,
+  Bootstrap,
+  DelegatedTask,
+  Message,
+  ModelRef,
+  Run,
+  RunEvent,
+  SessionDetail,
+} from '../../shared/contracts';
 import { isCapacityFailure } from '../../shared/model-fallback';
 import { CopyButton, Markdown } from '../Markdown';
 import { taskRoleName, taskStatusName, timeLabel } from '../labels';
@@ -177,6 +186,9 @@ export function RunActivityPanel({
   run,
   tasks,
   events,
+  approvals,
+  streamUpdatedAt,
+  eventsConnected,
   providers,
   active,
   taskOutputs,
@@ -188,6 +200,10 @@ export function RunActivityPanel({
   run?: Run;
   tasks: DelegatedTask[];
   events: SessionDetail['events'];
+  approvals: Approval[];
+  /** Receipt time of the most recent streamed text delta, when this tab observed one. */
+  streamUpdatedAt?: number;
+  eventsConnected: boolean;
   providers: Bootstrap['providers'];
   active: boolean;
   taskOutputs: Record<string, string | null>;
@@ -201,6 +217,24 @@ export function RunActivityPanel({
   const runStatus = run?.status;
   const running = runStatus === 'running' || (!runStatus && active);
   const now = useNow(1000, running);
+  const pendingApproval = approvals.find((approval) => approval.status === 'pending');
+  const runEvents = events.filter((event) => event.runId === runId);
+  const latestEventAt = runEvents.reduce((latest, event) => {
+    const timestamp = new Date(event.createdAt).getTime();
+    return Number.isFinite(timestamp) ? Math.max(latest, timestamp) : latest;
+  }, 0);
+  const activeAction = [...activity.actions]
+    .reverse()
+    .find((event) => ['running', 'in_progress', 'started', 'pending', 'queued'].includes(event.status || ''));
+  const latestActivityAt = [
+    run?.startedAt,
+    ...runEvents.map((event) => event.createdAt),
+    ...activity.tasks.flatMap((task) => [task.createdAt, task.startedAt, task.completedAt]),
+    ...(streamUpdatedAt ? [new Date(streamUpdatedAt).toISOString()] : []),
+  ]
+    .map((value) => (value ? new Date(value).getTime() : Number.NaN))
+    .filter(Number.isFinite)
+    .reduce((latest, value) => Math.max(latest, value), 0);
   const outcome = runStatusLabel(runStatus) || (active ? t('chat.activity.inProgress') : null);
   const changes = (
     <>
@@ -239,6 +273,23 @@ export function RunActivityPanel({
   // comes from the server, possibly already in English.
   const lastText = activity.events.at(-1)?.text;
   const compacting = running && (lastText === COMPACTING_TEXT || lastText === catalogs.en['chat.activity.compacting']);
+  const currentActivity = !running
+    ? null
+    : !eventsConnected
+      ? t('chat.activity.connectionLost')
+      : pendingApproval
+        ? t('chat.activity.waitingApproval', { title: pendingApproval.title })
+        : activeAction
+          ? t('chat.activity.runningTool', {
+              tool: commandTitle(activeAction.toolName),
+              detail: commandPreview(activeAction.text, 120) || t('chat.activity.toolDetailsUnavailable'),
+            })
+          : compacting
+            ? t('chat.activity.compacting')
+            : streamUpdatedAt && streamUpdatedAt >= latestEventAt
+              ? t('chat.activity.generating')
+              : t('chat.activity.waitingModel');
+  const silence = running && latestActivityAt ? fmt.duration(Math.max(0, now - latestActivityAt)) : undefined;
   const attempt = lastRetry
     ? t('chat.activity.attempt', { attempt: lastRetry.attempt ?? '', of: lastRetry.of ?? '' })
     : '';
@@ -277,117 +328,134 @@ export function RunActivityPanel({
         </div>
       ))}
       {activityIsVisible(activity) ? (
-        <details className="activity-details">
-          <summary>
-            <span className="activity-icon" aria-hidden="true">
-              {icon}
-            </span>
-            <span className="activity-headline">{headline}</span>
-            {counts && <span className="activity-counts">{counts}</span>}
-            <ChevronDown className="activity-chevron" size={14} aria-hidden="true" />
-          </summary>
-          <div className="run-activity-content">
-            {activity.tasks.map((task) => {
-              const hasCachedOutput = Object.hasOwn(taskOutputs, task.id);
-              const loadingOutput = loadingTaskOutputs.has(task.id);
-              return (
-                <article className="activity-task" key={task.id}>
-                  <div className="activity-task-heading">
-                    <i className={`run-status-dot ${task.status}`} aria-hidden="true" />
-                    <strong>{task.title}</strong>
-                    <span className="activity-task-status">{taskStatusName(task.status)}</span>
-                  </div>
-                  <div className="activity-meta">
-                    {taskRoleName(task.role)} ·{' '}
-                    {providers.find((item) => item.id === task.providerId)?.name || task.providerId}
-                    {task.model ? ` / ${task.model}` : ''}
-                    {task.effort ? t('chat.task.thinking', { thinking: thinkingLabel(task.effort) }) : ''}
-                  </div>
-                  {task.summary && (
-                    <details className="activity-summary">
-                      <summary>{t('chat.task.summary')}</summary>
-                      <p>{task.summary}</p>
-                    </details>
-                  )}
-                  {task.scope.length > 0 && (
-                    <div className="activity-scope">
-                      {t('chat.task.scope', {
-                        scope:
-                          task.scope.slice(0, 3).join(' · ') +
-                          (task.scope.length > 3 ? ` · +${task.scope.length - 3}` : ''),
-                      })}
+        <>
+          {running && currentActivity && (
+            <div className={`run-current ${!eventsConnected ? 'disconnected' : ''}`} role="status" aria-live="off">
+              <span className="activity-icon" aria-hidden="true">
+                {icon}
+              </span>
+              <span className="run-current-copy">
+                <strong>{currentActivity}</strong>
+                {silence && <small>{t('chat.activity.noUpdateFor', { elapsed: silence })}</small>}
+              </span>
+            </div>
+          )}
+          <details className="activity-details">
+            <summary>
+              <span className="activity-icon" aria-hidden="true">
+                {icon}
+              </span>
+              <span className="activity-headline">{headline}</span>
+              {counts && <span className="activity-counts">{counts}</span>}
+              <ChevronDown className="activity-chevron" size={14} aria-hidden="true" />
+            </summary>
+            <div className="run-activity-content">
+              {activity.tasks.map((task) => {
+                const hasCachedOutput = Object.hasOwn(taskOutputs, task.id);
+                const loadingOutput = loadingTaskOutputs.has(task.id);
+                return (
+                  <article className="activity-task" key={task.id}>
+                    <div className="activity-task-heading">
+                      <i className={`run-status-dot ${task.status}`} aria-hidden="true" />
+                      <strong>{task.title}</strong>
+                      <span className="activity-task-status">{taskStatusName(task.status)}</span>
                     </div>
-                  )}
-                  {hasCachedOutput ? (
-                    <details className="activity-output">
-                      <summary>{t('chat.task.output')}</summary>
-                      <pre>{taskOutputs[task.id] || t('chat.task.outputEmpty')}</pre>
-                    </details>
-                  ) : task.status !== 'running' && task.status !== 'queued' ? (
-                    <button
-                      className="task-output-button"
-                      onClick={() => void onLoadTaskOutput(task)}
-                      disabled={loadingOutput}
-                    >
-                      {loadingOutput ? <LoaderCircle className="spin" size={12} /> : <FileText size={12} />}
-                      {loadingOutput ? t('chat.task.loadingOutput') : t('chat.task.loadOutput')}
-                    </button>
-                  ) : null}
-                </article>
-              );
-            })}
-            {activity.actions.map((event) =>
-              actionNeedsDisclosure(event) ? (
-                <details className="activity-command" key={event.id}>
-                  <summary>
+                    <div className="activity-meta">
+                      {taskRoleName(task.role)} ·{' '}
+                      {providers.find((item) => item.id === task.providerId)?.name || task.providerId}
+                      {task.model ? ` / ${task.model}` : ''}
+                      {task.effort ? t('chat.task.thinking', { thinking: thinkingLabel(task.effort) }) : ''}
+                    </div>
+                    {task.summary && (
+                      <details className="activity-summary">
+                        <summary>{t('chat.task.summary')}</summary>
+                        <p>{task.summary}</p>
+                      </details>
+                    )}
+                    {task.scope.length > 0 && (
+                      <div className="activity-scope">
+                        {t('chat.task.scope', {
+                          scope:
+                            task.scope.slice(0, 3).join(' · ') +
+                            (task.scope.length > 3 ? ` · +${task.scope.length - 3}` : ''),
+                        })}
+                      </div>
+                    )}
+                    {hasCachedOutput ? (
+                      <details className="activity-output">
+                        <summary>{t('chat.task.output')}</summary>
+                        <pre>{taskOutputs[task.id] || t('chat.task.outputEmpty')}</pre>
+                      </details>
+                    ) : task.status !== 'running' && task.status !== 'queued' ? (
+                      <button
+                        className="task-output-button"
+                        onClick={() => void onLoadTaskOutput(task)}
+                        disabled={loadingOutput}
+                      >
+                        {loadingOutput ? <LoaderCircle className="spin" size={12} /> : <FileText size={12} />}
+                        {loadingOutput ? t('chat.task.loadingOutput') : t('chat.task.loadOutput')}
+                      </button>
+                    ) : null}
+                  </article>
+                );
+              })}
+              {activity.actions.map((event) =>
+                actionNeedsDisclosure(event) ? (
+                  <details className="activity-command" key={event.id}>
+                    <summary>
+                      <Code2 size={13} aria-hidden="true" />
+                      <span className="visually-hidden">{commandTitle(event.toolName)}: </span>
+                      <code className="command-preview">{commandPreview(event.text)}</code>
+                      <span className={`activity-action-status ${event.status || ''}`}>
+                        {statusLabel(event.status)}
+                      </span>
+                      <time>{timeLabel(event.createdAt)}</time>
+                    </summary>
+                    <pre>{event.text}</pre>
+                  </details>
+                ) : (
+                  <div className="activity-action" key={event.id}>
                     <Code2 size={13} aria-hidden="true" />
-                    <span className="visually-hidden">{commandTitle(event.toolName)}: </span>
-                    <code className="command-preview">{commandPreview(event.text)}</code>
-                    <span className={`activity-action-status ${event.status || ''}`}>{statusLabel(event.status)}</span>
-                    <time>{timeLabel(event.createdAt)}</time>
-                  </summary>
-                  <pre>{event.text}</pre>
-                </details>
-              ) : (
-                <div className="activity-action" key={event.id}>
-                  <Code2 size={13} aria-hidden="true" />
-                  <span>{event.text}</span>
-                  <small className={`activity-action-status ${event.status || ''}`}>{statusLabel(event.status)}</small>
+                    <span>{event.text}</span>
+                    <small className={`activity-action-status ${event.status || ''}`}>
+                      {statusLabel(event.status)}
+                    </small>
+                  </div>
+                ),
+              )}
+              {activity.fallbacks.map((event) => (
+                <div className="activity-event fallback" key={event.id} title={event.error}>
+                  <ArrowLeftRight size={13} aria-hidden="true" />
+                  <span>{eventText(event, locale)}</span>
+                  <time>{timeLabel(event.createdAt)}</time>
                 </div>
-              ),
-            )}
-            {activity.fallbacks.map((event) => (
-              <div className="activity-event fallback" key={event.id} title={event.error}>
-                <ArrowLeftRight size={13} aria-hidden="true" />
-                <span>{eventText(event, locale)}</span>
-                <time>{timeLabel(event.createdAt)}</time>
-              </div>
-            ))}
-            {activity.retries.map((event) => (
-              <div className="activity-event retry" key={event.id} title={event.error}>
-                <RotateCcw size={13} aria-hidden="true" />
-                <span>{eventText(event, locale)}</span>
-                <time>{timeLabel(event.createdAt)}</time>
-              </div>
-            ))}
-            {activity.events.map((event) => (
-              <div className="activity-event" key={event.id}>
-                <Activity size={13} aria-hidden="true" />
-                <span>{eventText(event, locale)}</span>
-                <time>{timeLabel(event.createdAt)}</time>
-              </div>
-            ))}
-          </div>
-        </details>
+              ))}
+              {activity.retries.map((event) => (
+                <div className="activity-event retry" key={event.id} title={event.error}>
+                  <RotateCcw size={13} aria-hidden="true" />
+                  <span>{eventText(event, locale)}</span>
+                  <time>{timeLabel(event.createdAt)}</time>
+                </div>
+              ))}
+              {activity.events.map((event) => (
+                <div className="activity-event" key={event.id}>
+                  <Activity size={13} aria-hidden="true" />
+                  <span>{eventText(event, locale)}</span>
+                  <time>{timeLabel(event.createdAt)}</time>
+                </div>
+              ))}
+            </div>
+          </details>
+        </>
       ) : (
         <div className="run-progress">
           <span className="activity-icon" aria-hidden="true">
             {icon}
           </span>
-          <span className="activity-headline">{headline}</span>
+          <span className="activity-headline">{running ? currentActivity : headline}</span>
           {running && (
             <span className="activity-counts">
-              {compacting ? t('chat.activity.compacting') : attempt || t('chat.activity.preparing')}
+              {silence ? t('chat.activity.noUpdateFor', { elapsed: silence }) : attempt || t('chat.activity.preparing')}
             </span>
           )}
         </div>

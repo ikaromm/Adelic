@@ -167,6 +167,7 @@ export const PatchProjectSchema = z.object({
 const projectRef = z.union([z.null(), text()]);
 export const CreateSessionSchema = z.object({
   projectId: optional(projectRef, invalid('projectId')),
+  folderId: optional(projectRef, invalid('folderId')),
   providerId: optional(ProviderIdSchema, invalid('providerId')),
   mode: optional(ModeSchema, invalid('mode')),
   model: optional(text(120), invalid('model')),
@@ -175,6 +176,8 @@ export const CreateSessionSchema = z.object({
 });
 export const PatchSessionSchema = z.object({
   projectId: optional(projectRef, invalid('projectId')),
+  folderId: optional(projectRef, invalid('folderId')),
+  archived: optional(z.boolean(), boolean('archived')),
   title: optional(text(160), invalid('title')),
   providerId: optional(ProviderIdSchema, invalid('providerId')),
   model: optional(z.union([z.null(), text(120)]), invalid('model')),
@@ -182,6 +185,14 @@ export const PatchSessionSchema = z.object({
   thinking: optional(effort, invalid('thinking')),
   planFirst: optional(z.boolean(), boolean('planFirst')),
   approvalMode: optional(z.union([z.null(), z.enum(['auto-safe', 'manual', 'automatic'])]), invalid('approvalMode')),
+});
+const projectFolderName = text(80);
+export const CreateProjectFolderSchema = z.object({
+  name: required(projectFolderName, vmsg('validation.requiredField', { field: 'name' })),
+  parentId: optional(projectRef, invalid('parentId')),
+});
+export const PatchProjectFolderSchema = z.object({
+  name: required(projectFolderName, vmsg('validation.requiredField', { field: 'name' })),
 });
 /** POST /api/sessions/:id/handoff (docs/specs/provider-handoff.md). */
 export const HandoffSchema = z.object({

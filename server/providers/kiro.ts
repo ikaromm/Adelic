@@ -18,7 +18,9 @@ import {
   emitRemoteApproval,
   REMOTE_TOOL_SPECS,
   remoteApprovalDetail,
-  remoteRuntimeDescription,
+  remoteToolDescription,
+  remoteToolError,
+  remoteToolFailure,
   validateRemoteArguments,
   type RemoteToolSpec,
 } from './remote-tools';
@@ -30,6 +32,7 @@ interface KiroTurn {
   sessionId: string;
   text: string;
   toolCalls: Map<string, { name: string; description: string }>;
+  remoteTools: Map<string, { spec: RemoteToolSpec; args: Record<string, unknown> }>;
   resolve: (result: RunResult) => void;
   reject: (error: Error) => void;
   signal: AbortSignal;
@@ -45,6 +48,7 @@ interface KiroApproval {
 }
 interface KiroRemoteApproval {
   runId: string;
+  toolCallId: string;
   socket: Socket;
   spec: RemoteToolSpec;
   args: Record<string, unknown>;
@@ -533,18 +537,19 @@ export class KiroProvider {
         turn.emit({
           type: 'tool',
           name: spec.remoteName,
-          description: remoteRuntimeDescription(input.remote),
+          description: remoteToolDescription(input.remote, spec, args),
           status: 'denied',
           toolCallId: id,
         });
         emitRemoteApproval(input, emit, id, spec, detail, 'denied', args, blocked);
         return;
       }
-      this.remoteApprovals.set(id, { runId: input.runId, socket, spec, args });
+      this.remoteApprovals.set(id, { runId: input.runId, toolCallId: id, socket, spec, args });
+      turn.remoteTools.set(id, { spec, args });
       turn.emit({
         type: 'tool',
         name: spec.remoteName,
-        description: remoteRuntimeDescription(input.remote),
+        description: remoteToolDescription(input.remote, spec, args),
         status: input.approvalMode === 'automatic' ? 'running' : 'pending',
         toolCallId: id,
       });
@@ -569,6 +574,16 @@ export class KiroProvider {
         pending.socket.end(JSON.stringify({ ok: false, text: 'Run ended before approval.' }) + '\n');
         this.remoteApprovals.delete(id);
       }
+    for (const [toolCallId, { spec, args }] of turn.remoteTools) {
+      turn.emit({
+        type: 'tool',
+        name: spec.remoteName,
+        description: remoteToolDescription(turn.input.remote!, spec, args, 'Cancelado'),
+        status: 'cancelled',
+        toolCallId,
+      });
+      turn.remoteTools.delete(toolCallId);
+    }
     if (error) turn.reject(error);
     else turn.resolve(result);
   }
@@ -763,6 +778,7 @@ export class KiroProvider {
           sessionId,
           text: '',
           toolCalls: new Map(),
+          remoteTools: new Map(),
           resolve,
           reject,
           signal,
@@ -839,33 +855,53 @@ export class KiroProvider {
       this.remoteApprovals.delete(approvalId);
       if (decision === 'deny') {
         remotePending.socket.end(JSON.stringify({ ok: false, text: 'Denied by user.' }) + '\n');
+        turn.remoteTools.delete(remotePending.toolCallId);
         turn.emit({
           type: 'tool',
           name: remotePending.spec.remoteName,
-          description: remoteRuntimeDescription(turn.input.remote),
+          description: remoteToolDescription(turn.input.remote, remotePending.spec, remotePending.args),
           status: 'denied',
+          toolCallId: remotePending.toolCallId,
         });
         return;
       }
+      if (turn.input.approvalMode !== 'automatic')
+        turn.emit({
+          type: 'tool',
+          name: remotePending.spec.remoteName,
+          description: remoteToolDescription(turn.input.remote, remotePending.spec, remotePending.args),
+          status: 'running',
+          toolCallId: remotePending.toolCallId,
+        });
       try {
         const result = await turn.input.remote.call(remotePending.spec.remoteName, remotePending.args, turn.signal);
         if (this.turns.get(turn.input.runId) !== turn || turn.signal.aborted)
           throw new Error('Remote run ended before the tool completed.');
         remotePending.socket.end(JSON.stringify({ ok: true, text: boundedRemoteResult(result) }) + '\n');
+        const failure = remoteToolFailure(result);
+        turn.remoteTools.delete(remotePending.toolCallId);
         turn.emit({
           type: 'tool',
           name: remotePending.spec.remoteName,
-          description: remoteRuntimeDescription(turn.input.remote),
-          status: 'completed',
+          description: remoteToolDescription(turn.input.remote, remotePending.spec, remotePending.args, failure),
+          status: failure ? 'failed' : 'completed',
+          toolCallId: remotePending.toolCallId,
         });
       } catch (error) {
         remotePending.socket.end(JSON.stringify({ ok: false, text: errorMessage(error).slice(0, 2000) }) + '\n');
-        turn.emit({
-          type: 'tool',
-          name: remotePending.spec.remoteName,
-          description: remoteRuntimeDescription(turn.input.remote),
-          status: 'failed',
-        });
+        if (turn.remoteTools.delete(remotePending.toolCallId))
+          turn.emit({
+            type: 'tool',
+            name: remotePending.spec.remoteName,
+            description: remoteToolDescription(
+              turn.input.remote,
+              remotePending.spec,
+              remotePending.args,
+              turn.signal.aborted ? 'Cancelado' : remoteToolError(error),
+            ),
+            status: turn.signal.aborted ? 'cancelled' : 'failed',
+            toolCallId: remotePending.toolCallId,
+          });
       }
       return;
     }

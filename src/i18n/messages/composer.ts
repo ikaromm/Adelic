@@ -13,6 +13,8 @@ export default defineMessages(
     'composer.cancel': 'Cancelar execução',
     'composer.queue': 'Adicionar à fila',
     'composer.queueTitle': 'Adicionar à fila (Enter)',
+    'composer.steer': 'Orientar agora',
+    'composer.steerTitle': 'Enviar ao agente durante a execução sem interromper',
     'composer.planFirst': 'Planejar antes',
     'composer.planFirstTitle':
       'Planejar antes: cada mensagem gera primeiro um plano somente leitura para você aprovar. Para uma mensagem só, comece com /plano.',
@@ -114,6 +116,8 @@ export default defineMessages(
     'composer.cancel': 'Cancel run',
     'composer.queue': 'Add to queue',
     'composer.queueTitle': 'Add to queue (Enter)',
+    'composer.steer': 'Steer now',
+    'composer.steerTitle': 'Send to the agent during its run without interrupting',
     'composer.planFirst': 'Plan first',
     'composer.planFirstTitle':
       'Plan first: each message first produces a read-only plan for you to approve. For a single message, start with /plano.',

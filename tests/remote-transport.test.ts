@@ -151,7 +151,7 @@ describe('SSH remote host transport', () => {
   it('probes, pins, installs and runs the credential-free runner over a configured SSH alias', async (context) => {
     if (!harness) context.skip();
     const { root, service, host, project } = harness!;
-    const probe = await service.probe(host.target, host.port);
+    const probe = await service.probe(host.target);
     expect(probe).toMatchObject({
       target: 'shared-lab',
       port: host.port,

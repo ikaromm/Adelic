@@ -194,3 +194,57 @@ test('pins a probed SSH key before creating a remote project and shows its worki
   await expect(page.getByRole('heading', { name: 'Verificações e bloqueios' })).toHaveCount(0);
   await expect(page.getByRole('heading', { name: 'Servidores MCP' })).toHaveCount(0);
 });
+
+test('loads SSH aliases automatically and keeps host details clear of action buttons', async ({ page }) => {
+  const { hostKey, fingerprint } = hostPublicKey();
+  const probeRequests: Record<string, unknown>[] = [];
+  await page.route('**/api/remote-hosts/probe', (route) => {
+    const body = route.request().postDataJSON() as Record<string, unknown>;
+    probeRequests.push(body);
+    return route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ target: body.target, port: 2222, hostname: 'configured.example', hostKey, fingerprint }),
+    });
+  });
+  await page.route('**/api/remote-hosts', (route) => {
+    if (route.request().method() !== 'GET') return route.continue();
+    return route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify([
+        {
+          id: 'layout-host',
+          name: 'Configured SSH',
+          target: 'long-configured-alias',
+          port: 2222,
+          fingerprint,
+          hostKey,
+          runnerPath: '/home/long-user/.local/share/adelic/runner-0.5.2.py',
+          createdAt: new Date().toISOString(),
+        },
+      ]),
+    });
+  });
+  await page.goto('/');
+  await page
+    .getByRole('navigation', { name: 'Navegação principal' })
+    .getByRole('button', { name: 'Configurações' })
+    .click();
+  const card = page.getByRole('region', { name: 'Servidores SSH' });
+  await expect(card.getByLabel('Servidor do ~/.ssh/config')).toBeEnabled();
+  await card.getByLabel('Servidor do ~/.ssh/config').selectOption('e2e-config-alias');
+  await expect(card.getByLabel('Destino SSH')).toHaveValue('e2e-config-alias');
+  await expect(card.getByLabel('Porta')).toHaveValue('');
+  await card.getByRole('button', { name: 'Consultar chave SSH' }).click();
+  await expect(card.getByRole('group', { name: 'Chave SSH encontrada' })).toContainText('e2e-config-alias:2222');
+  expect(probeRequests).toEqual([{ target: 'e2e-config-alias' }]);
+  await expect(card.getByRole('button', { name: 'Salvar chave confiável' })).toBeDisabled();
+  for (const width of [1920, 1024, 390]) {
+    await page.setViewportSize({ width, height: 900 });
+    const info = await card.locator('.remote-host-info').boundingBox();
+    const actions = await card.locator('.remote-host-actions').boundingBox();
+    expect(info).not.toBeNull();
+    expect(actions).not.toBeNull();
+    expect(actions!.y).toBeGreaterThanOrEqual(info!.y + info!.height);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+  }
+});

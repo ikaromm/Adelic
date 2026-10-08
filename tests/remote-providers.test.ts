@@ -5,7 +5,14 @@ import path from 'node:path';
 import net from 'node:net';
 import { CodexProvider } from '../server/providers/codex';
 import { KiroProvider } from '../server/providers/kiro';
-import { REMOTE_TOOL_SPECS, remoteApprovalDetail, validateRemoteArguments } from '../server/providers/remote-tools';
+import {
+  REMOTE_TOOL_SPECS,
+  remoteApprovalDetail,
+  remoteToolDescription,
+  remoteToolError,
+  remoteToolFailure,
+  validateRemoteArguments,
+} from '../server/providers/remote-tools';
 import type { RunInput } from '../shared/contracts';
 import type { RemoteRuntime } from '../shared/remote-hosts';
 
@@ -47,6 +54,22 @@ describe('remote provider tools', () => {
     const largeArgs = { path: 'src/large.ts', content: 'line\n'.repeat(25_000) };
     expect(validateRemoteArguments(write, largeArgs)).toEqual(largeArgs);
     expect(remoteApprovalDetail(runtime, write, largeArgs)).toContain(JSON.stringify(largeArgs));
+    expect(remoteToolDescription(runtime, write, args)).toBe(
+      'write_file: README.md\nHost build-host (builder@example.test): /srv/work/adelic',
+    );
+    expect(remoteToolFailure({ exitCode: 7, stdout: 'PRIVATE', stderr: 'PRIVATE' })).toBe('Falhou (código 7)');
+    expect(remoteToolFailure({ exitCode: 0, stdout: '', stderr: '' })).toBeUndefined();
+    const longFailure = remoteToolDescription(
+      { ...runtime, label: 'host'.repeat(200), root: '/root/'.repeat(100) },
+      REMOTE_TOOL_SPECS[0]!,
+      { command: 'command '.repeat(100) },
+      'Falhou (código 17)',
+    );
+    expect(longFailure).toContain('Falhou (código 17)');
+    expect(longFailure.length).toBeLessThanOrEqual(280);
+    expect(remoteToolError(Object.assign(new Error('ssh ECONNRESET PRIVATE'), { code: 'ECONNRESET' }))).toBe(
+      'Falha de conexão remota',
+    );
   });
 
   it('does not call the remote executor on denial and rejects a hostile local tool request', async () => {
@@ -100,13 +123,20 @@ readline.createInterface({input:process.stdin}).on('line',(line)=>{
       async (command, args) => ({ command, args }),
     );
     const approvals: { id: string; command?: string }[] = [];
-    const events: { type: string; name?: string; status?: string }[] = [];
+    const events: { type: string; name?: string; status?: string; toolCallId?: string; description?: string }[] = [];
     try {
       const resultPromise = provider.run(
         input(process.cwd(), runtime),
         (event) => {
           if (event.type === 'approval') approvals.push({ id: event.approval.id, command: event.approval.command });
-          if (event.type === 'tool') events.push({ type: event.type, name: event.name, status: event.status });
+          if (event.type === 'tool')
+            events.push({
+              type: event.type,
+              name: event.name,
+              status: event.status,
+              toolCallId: event.toolCallId,
+              description: event.description,
+            });
         },
         new AbortController().signal,
       );
@@ -115,6 +145,20 @@ readline.createInterface({input:process.stdin}).on('line',(line)=>{
       await provider.approve(approvals[0]!.id, 'deny');
       await expect(resultPromise).resolves.toMatchObject({ stopReason: 'completed' });
       expect(remoteCalls).toEqual([]);
+      expect(events).toEqual([
+        expect.objectContaining({
+          name: 'exec',
+          status: 'pending',
+          toolCallId: 'call-remote',
+          description: expect.stringMatching(/^exec: uname -a\nHost fixture-host:/),
+        }),
+        expect.objectContaining({
+          name: 'exec',
+          status: 'denied',
+          toolCallId: 'call-remote',
+          description: expect.stringMatching(/^exec: uname -a\nHost fixture-host:/),
+        }),
+      ]);
       const requests = (await readFile(requestLog, 'utf8'))
         .trim()
         .split('\n')
@@ -155,15 +199,19 @@ readline.createInterface({input:process.stdin}).on('line',(line)=>{
       });
       expect(approvals).toHaveLength(1);
       expect(approvals[0]).toMatchObject({ command: 'uname -a' });
-      expect(events).toContainEqual({ type: 'tool', name: 'exec', status: 'pending' });
-      expect(events).toContainEqual({ type: 'tool', name: 'exec', status: 'denied' });
+      expect(events).toContainEqual(
+        expect.objectContaining({ name: 'exec', status: 'pending', toolCallId: 'call-remote' }),
+      );
+      expect(events).toContainEqual(
+        expect.objectContaining({ name: 'exec', status: 'denied', toolCallId: 'call-remote' }),
+      );
       expect(JSON.stringify(requests)).not.toContain('should-not-run');
     } finally {
       await provider.shutdown();
     }
   });
 
-  it('keeps Kiro native tools unavailable and routes bridge calls through local approval', async () => {
+  it('keeps Kiro native tools unavailable and shows approved bridge calls as running', async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), 'adelic-remote-kiro-'));
     dirs.push(directory);
     const cwd = path.join(directory, 'workspace');
@@ -217,12 +265,18 @@ readline.createInterface({input:process.stdin}).on('line',(line)=>{
     const prior = process.env.ADELIC_KIRO_BIN;
     process.env.ADELIC_KIRO_BIN = fake;
     const remoteCalls: unknown[] = [];
+    let releaseRemote!: () => void;
+    let remoteCallStarted!: () => void;
+    const enteredRemoteCall = new Promise<void>((resolve) => (remoteCallStarted = resolve));
     const runtime: RemoteRuntime = {
       label: 'fixture-host',
       root: '/remote/project',
       call: async (tool, args) => {
         remoteCalls.push({ tool, args });
-        return 'remote result';
+        return new Promise((resolve) => {
+          releaseRemote = () => resolve('remote result');
+          remoteCallStarted();
+        });
       },
     };
     const rows: Record<string, unknown>[] = [];
@@ -246,6 +300,7 @@ readline.createInterface({input:process.stdin}).on('line',(line)=>{
     });
     const provider = new KiroProvider();
     const approvals: string[] = [];
+    const toolEvents: { name: string; status: string; description: string; toolCallId?: string }[] = [];
     try {
       const resultPromise = provider.run(
         {
@@ -255,14 +310,30 @@ readline.createInterface({input:process.stdin}).on('line',(line)=>{
         },
         (event) => {
           if (event.type === 'approval') approvals.push(event.approval.id);
+          if (event.type === 'tool') toolEvents.push(event);
         },
         new AbortController().signal,
       );
       for (let i = 0; i < 300 && approvals.length === 0; i++) await new Promise((resolve) => setTimeout(resolve, 10));
       expect(approvals).toHaveLength(1);
-      await provider.approve(approvals[0]!, 'deny');
+      const approval = provider.approve(approvals[0]!, 'approve');
+      await enteredRemoteCall;
+      expect(toolEvents[0]?.toolCallId).toBeTruthy();
+      expect(toolEvents.map((event) => [event.status, event.toolCallId])).toEqual([
+        ['pending', toolEvents[0]?.toolCallId],
+        ['running', toolEvents[0]?.toolCallId],
+      ]);
+      releaseRemote();
+      await approval;
       await expect(resultPromise).resolves.toMatchObject({ stopReason: 'completed' });
-      expect(remoteCalls).toEqual([]);
+      expect(remoteCalls).toEqual([{ tool: 'exec', args: { command: `touch ${hostileFile}` } }]);
+      expect(toolEvents).toHaveLength(3);
+      expect(toolEvents.map((event) => [event.status, event.toolCallId])).toEqual([
+        ['pending', expect.any(String)],
+        ['running', toolEvents[0]?.toolCallId],
+        ['completed', toolEvents[0]?.toolCallId],
+      ]);
+      expect(toolEvents[0]?.description).toMatch(/^exec: touch .*\nHost fixture-host:/);
       const agent = rows.find((row) => row.agent)?.agent as
         | {
             tools: string[];
@@ -289,9 +360,10 @@ readline.createInterface({input:process.stdin}).on('line',(line)=>{
         code: -32601,
       });
       expect(rows.find((row) => row.localWrite)?.localWrite).toBe('blocked');
-      expect(rows.find((row) => row.bridgeResult)?.bridgeResult).toMatchObject({ ok: false, text: 'Denied by user.' });
+      expect(rows.find((row) => row.bridgeResult)?.bridgeResult).toMatchObject({ ok: true, text: 'remote result' });
       await expect(readFile(hostileFile, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
     } finally {
+      releaseRemote?.();
       await provider.shutdown();
       await new Promise<void>((resolve) => telemetry.close(() => resolve()));
       if (prior === undefined) delete process.env.ADELIC_KIRO_BIN;
@@ -420,12 +492,14 @@ readline.createInterface({input:process.stdin}).on('line',(line)=>{
     );
     await chmod(fake, 0o700);
     const calls: { tool: string; args: unknown }[] = [];
+    const toolEvents: { name: string; description: string; status: string; toolCallId?: string }[] = [];
     const runtime: RemoteRuntime = {
       label: 'explicit-build-host',
       root: '/srv/work/project',
       executionKind: 'ssh',
       call: async (tool, args) => {
         calls.push({ tool, args });
+        if (tool === 'exec') return { exitCode: 7, stdout: 'PRIVATE OUTPUT', stderr: 'PRIVATE STDERR' };
         return 'completed';
       },
     };
@@ -443,6 +517,7 @@ readline.createInterface({input:process.stdin}).on('line',(line)=>{
           provider.run(
             { ...input(process.cwd(), executor), approvalMode: 'automatic' },
             (event) => {
+              if (event.type === 'tool') toolEvents.push(event);
               if (event.type === 'approval')
                 approvals.push({
                   status: event.approval.status,
@@ -465,10 +540,34 @@ readline.createInterface({input:process.stdin}).on('line',(line)=>{
       executionKind: 'isolated-local',
       call: async (tool, args) => {
         calls.push({ tool, args });
+        if (tool === 'exec') return { exitCode: 7, stdout: 'PRIVATE OUTPUT', stderr: 'PRIVATE STDERR' };
         return 'completed';
       },
     });
     expect(calls.map(({ tool }) => tool)).toEqual(['exec', 'write_file', 'exec', 'write_file']);
+    expect(toolEvents.filter((event) => event.name === 'exec')).toEqual([
+      expect.objectContaining({
+        status: 'running',
+        toolCallId: 'exec-call',
+        description: expect.stringMatching(/^exec: npm test\nHost explicit-build-host:/),
+      }),
+      expect.objectContaining({
+        status: 'failed',
+        toolCallId: 'exec-call',
+        description: expect.stringContaining('Falhou (código 7)'),
+      }),
+      expect.objectContaining({
+        status: 'running',
+        toolCallId: 'exec-call',
+        description: expect.stringMatching(/^exec: npm test\nExecutor local isolado:/),
+      }),
+      expect.objectContaining({
+        status: 'failed',
+        toolCallId: 'exec-call',
+        description: expect.stringContaining('Falhou (código 7)'),
+      }),
+    ]);
+    expect(toolEvents.every((event) => !event.description.includes('PRIVATE'))).toBe(true);
     expect(sshApprovals).toHaveLength(2);
     expect(sshApprovals.every((item) => item.status === 'approved')).toBe(true);
     expect(
@@ -483,6 +582,79 @@ readline.createInterface({input:process.stdin}).on('line',(line)=>{
       [...sshApprovals, ...localApprovals].every(({ detail }) => detail.includes('[redigidos no registro automático]')),
     ).toBe(true);
     expect([...sshApprovals, ...localApprovals].every(({ detail }) => !detail.includes('updated remotely'))).toBe(true);
+  });
+
+  it('shows a manual remote tool as running while the approved call is still pending', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'adelic-remote-approved-running-'));
+    dirs.push(directory);
+    const fake = path.join(directory, 'codex.mjs');
+    await writeFile(
+      fake,
+      `#!/usr/bin/env node
+import readline from 'node:readline';
+const send=(m)=>process.stdout.write(JSON.stringify(m)+'\\n');
+const thread='approved-running-thread';
+readline.createInterface({input:process.stdin}).on('line',(line)=>{
+ const m=JSON.parse(line);
+ if(m.method==='initialize')send({jsonrpc:'2.0',id:m.id,result:{}});
+ else if(m.method==='config/read')send({jsonrpc:'2.0',id:m.id,result:{config:{mcp_servers:{}}}});
+ else if(m.method==='thread/start')send({jsonrpc:'2.0',id:m.id,result:{thread:{id:thread}}});
+ else if(m.method==='turn/start'){
+  send({jsonrpc:'2.0',id:m.id,result:{turn:{id:'turn-1'}}});
+  send({jsonrpc:'2.0',method:'turn/started',params:{threadId:thread,turn:{id:'turn-1'}}});
+  send({jsonrpc:'2.0',id:701,method:'item/tool/call',params:{threadId:thread,turnId:'turn-1',callId:'manual-call',tool:'adelic_remote_exec',arguments:{command:'find src -type f'}}});
+ }
+ else if(m.id===701)send({jsonrpc:'2.0',method:'turn/completed',params:{threadId:thread,turn:{id:'turn-1',status:'completed'}}});
+});
+`,
+    );
+    await chmod(fake, 0o700);
+    let release!: () => void;
+    let callStarted!: () => void;
+    const enteredCall = new Promise<void>((resolve) => (callStarted = resolve));
+    const runtime: RemoteRuntime = {
+      label: 'slow-host',
+      root: '/remote/project',
+      call: async () =>
+        new Promise((resolve) => {
+          release = () => resolve({ exitCode: 0, stdout: 'done', stderr: '' });
+          callStarted();
+        }),
+    };
+    const provider = new CodexProvider(
+      async () => fake,
+      undefined,
+      undefined,
+      undefined,
+      async (command, args) => ({ command, args }),
+    );
+    const approvals: string[] = [];
+    const tools: { status: string; toolCallId?: string }[] = [];
+    try {
+      const result = provider.run(
+        input(process.cwd(), runtime),
+        (event) => {
+          if (event.type === 'approval') approvals.push(event.approval.id);
+          if (event.type === 'tool') tools.push(event);
+        },
+        new AbortController().signal,
+      );
+      for (let i = 0; i < 200 && approvals.length === 0; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(approvals).toHaveLength(1);
+      const approved = provider.approve(approvals[0]!, 'approve');
+      await enteredCall;
+      expect(tools.map(({ status, toolCallId }) => [status, toolCallId])).toEqual([
+        ['pending', 'manual-call'],
+        ['running', 'manual-call'],
+      ]);
+      release();
+      await approved;
+      await expect(result).resolves.toMatchObject({ stopReason: 'completed' });
+      expect(tools.at(-1)).toMatchObject({ status: 'completed', toolCallId: 'manual-call' });
+    } finally {
+      release?.();
+      await provider.shutdown();
+    }
   });
 
   it('denies blocked remote commands before approval or execution in Codex and Kiro', async () => {

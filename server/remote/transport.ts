@@ -333,16 +333,24 @@ export function RemoteHostService(dataDir: string, options: { configFile?: strin
     return args;
   };
 
-  const probe = async (target: string, port = 22): Promise<RemoteProbe> => {
-    if (!validTarget(target) || !validPort(port)) throw new Error('Invalid SSH target or port');
-    const config = await runCapture('ssh', [...configArgs, '-G', '-p', String(port), target]);
+  const probe = async (target: string, port?: number): Promise<RemoteProbe> => {
+    if (!validTarget(target) || (port !== undefined && !validPort(port))) throw new Error('Invalid SSH target or port');
+    const config = await runCapture('ssh', [
+      ...configArgs,
+      '-G',
+      ...(port === undefined ? [] : ['-p', String(port)]),
+      target,
+    ]);
     if (config.code !== 0)
       throw new Error(`ssh -G failed: ${config.stderr.trim() || 'unable to resolve SSH configuration'}`);
     const hostnameLine = config.stdout.split(/\r?\n/).find((line) => line.toLowerCase().startsWith('hostname '));
     const hostname = hostnameLine?.slice('hostname '.length).trim();
     if (!hostname || !validTarget(hostname))
       throw new Error('SSH configuration did not provide a valid effective hostname');
-    const scan = await runCapture('ssh-keyscan', ['-T', '7', '-p', String(port), hostname], 10000);
+    const portLine = config.stdout.split(/\r?\n/).find((line) => line.toLowerCase().startsWith('port '));
+    const effectivePort = port ?? Number(portLine?.slice('port '.length).trim());
+    if (!validPort(effectivePort)) throw new Error('SSH configuration did not provide a valid port');
+    const scan = await runCapture('ssh-keyscan', ['-T', '7', '-p', String(effectivePort), hostname], 10000);
     const candidates = scan.stdout
       .split(/\r?\n/)
       .map(parseKey)
@@ -354,7 +362,13 @@ export function RemoteHostService(dataDir: string, options: { configFile?: strin
     })[0];
     if (!key)
       throw new Error(`ssh-keyscan found no usable host key${scan.stderr.trim() ? `: ${scan.stderr.trim()}` : ''}`);
-    return { target, port, hostname, fingerprint: fingerprint(key.key), hostKey: `${key.type} ${key.key}` };
+    return {
+      target,
+      port: effectivePort,
+      hostname,
+      fingerprint: fingerprint(key.key),
+      hostKey: `${key.type} ${key.key}`,
+    };
   };
 
   const connect = async (host: RemoteHost, cwd: string): Promise<RemoteConnection> => {
@@ -555,7 +569,7 @@ export function RemoteHostService(dataDir: string, options: { configFile?: strin
   };
 
   const service: RemoteHostServiceInstance = {
-    async probe(target, port = 22) {
+    async probe(target, port) {
       return withObservation('ssh.probe', 'ssh', {}, () => probe(target, port));
     },
     async test(host) {

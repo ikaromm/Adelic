@@ -92,6 +92,10 @@ export function sessionsRoutes({ store, orchestrator, providerList }: BackendCon
     const { projectId, model, thinking } = parsed.data;
     const project = projectId ? store.getProject(projectId) : undefined;
     if (projectId && !project) return error(res, 404, 'common.projectNotFound');
+    const folderId = parsed.data.folderId ?? null;
+    if (folderId && !project) return error(res, 400, 'sessions.folderProjectRequired');
+    if (folderId && store.getProjectFolder(folderId)?.projectId !== project?.id)
+      return error(res, 409, 'sessions.folderWrongProject');
     const preferred = parsed.data.providerId ?? store.getSettings()!.defaultProviderId;
     if (project?.remote && parsed.data.providerId && preferred !== 'codex' && preferred !== 'kiro')
       return error(res, 409, 'remotehosts.provider');
@@ -111,10 +115,14 @@ export function sessionsRoutes({ store, orchestrator, providerList }: BackendCon
       )
     )
       return error(res, 400, 'sessions.effortNotAdvertised');
+    if (projectId && !store.getProject(projectId)) return error(res, 404, 'common.projectNotFound');
+    if (folderId && store.getProjectFolder(folderId)?.projectId !== projectId)
+      return error(res, 409, 'sessions.folderWrongProject');
     const now = new Date().toISOString();
     const s: Session = {
       id: randomUUID(),
       projectId: project?.id ?? null,
+      ...(folderId ? { folderId } : {}),
       title: titleSchema.safeParse(req.body?.title).data || 'Nova conversa',
       providerId,
       model,
@@ -163,12 +171,21 @@ export function sessionsRoutes({ store, orchestrator, providerList }: BackendCon
     const parsed = parseBody(PatchSessionSchema, req.body, 'sessions.invalid', req.locale);
     if (!parsed.ok) return error(res, 400, parsed.message);
     const body = parsed.data;
+    if (body.archived === true && !snapshot.archivedAt && orchestrator.queue(snapshot.id).items.length)
+      return error(res, 409, 'sessions.archiveQueueNotEmpty');
     if (body.approvalMode === 'automatic' && requestKind(req) !== 'local') return error(res, 403, LOCAL_ONLY);
     let projectId = snapshot.projectId;
     if (body.projectId !== undefined) {
       if (body.projectId && !store.getProject(body.projectId)) return error(res, 404, 'common.projectNotFound');
       projectId = body.projectId;
     }
+    let folderId = snapshot.folderId ?? null;
+    if (body.projectId !== undefined && projectId !== snapshot.projectId && body.folderId === undefined)
+      folderId = null;
+    if (body.folderId !== undefined) folderId = body.folderId;
+    if (folderId && !projectId) return error(res, 400, 'sessions.folderProjectRequired');
+    if (folderId && store.getProjectFolder(folderId)?.projectId !== projectId)
+      return error(res, 409, 'sessions.folderWrongProject');
     if (snapshot.worktree && projectId !== snapshot.projectId) return error(res, 409, 'sessions.dropWorktreeFirst');
     const title = body.title ?? snapshot.title;
     const providerId = body.providerId ?? snapshot.providerId;
@@ -206,9 +223,15 @@ export function sessionsRoutes({ store, orchestrator, providerList }: BackendCon
       JSON.stringify(current) !== JSON.stringify(snapshot)
     )
       return error(res, 409, 'sessions.changedDuringUpdate');
+    if (projectId && !store.getProject(projectId)) return error(res, 404, 'common.projectNotFound');
+    if (folderId && store.getProjectFolder(folderId)?.projectId !== projectId)
+      return error(res, 409, 'sessions.folderWrongProject');
+    if (body.archived === true && !snapshot.archivedAt && orchestrator.queue(snapshot.id).items.length)
+      return error(res, 409, 'sessions.archiveQueueNotEmpty');
     const next: Session = {
       ...current,
       projectId,
+      ...(folderId ? { folderId } : {}),
       title,
       providerId,
       model,
@@ -216,6 +239,10 @@ export function sessionsRoutes({ store, orchestrator, providerList }: BackendCon
       thinking,
       updatedAt: new Date().toISOString(),
     };
+    if (folderId) next.folderId = folderId;
+    else delete next.folderId;
+    if (body.archived === true) next.archivedAt = snapshot.archivedAt ?? new Date().toISOString();
+    else if (body.archived === false) delete next.archivedAt;
     if (body.approvalMode === null) delete next.approvalMode;
     else if (body.approvalMode !== undefined) next.approvalMode = body.approvalMode;
     if (body.planFirst !== undefined) {

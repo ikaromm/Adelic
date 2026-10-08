@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import type { ProviderRegistry, RunInput } from '../shared/contracts.js';
+import type { ProviderInfo, ProviderRegistry, RunInput } from '../shared/contracts.js';
 import { createBackend } from '../server/index.js';
 import { Store } from '../server/store.js';
 import { Orchestrator } from '../server/orchestrator.js';
@@ -81,6 +81,316 @@ async function ready(server: Server) {
 const headers = (base: string) => ({ 'content-type': 'application/json', origin: base });
 
 describe('backend persistence and API', () => {
+  it('archives and restores conversations, blocks archived sends, and keeps archive state after restart', async () => {
+    const { store, server } = setup();
+    const base = await ready(server);
+    const created = await fetch(`${base}/api/sessions`, {
+      method: 'POST',
+      headers: headers(base),
+      body: JSON.stringify({}),
+    });
+    const session = (await created.json()) as Session;
+    const runningStart = await fetch(`${base}/api/sessions/${session.id}/messages`, {
+      method: 'POST',
+      headers: headers(base),
+      body: JSON.stringify({ content: 'Still running' }),
+    });
+    expect(runningStart.status).toBe(202);
+    const runningConflict = await fetch(`${base}/api/sessions/${session.id}`, {
+      method: 'PATCH',
+      headers: headers(base),
+      body: JSON.stringify({ archived: true }),
+    });
+    expect(runningConflict.status).toBe(409);
+    for (let i = 0; i < 100 && store.getSession(session.id)?.activeRunId; i++)
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    store.enqueue({
+      id: 'queued-before-archive',
+      sessionId: session.id,
+      content: 'queued',
+      createdAt: new Date().toISOString(),
+    });
+    const queueConflict = await fetch(`${base}/api/sessions/${session.id}`, {
+      method: 'PATCH',
+      headers: headers(base),
+      body: JSON.stringify({ archived: true }),
+    });
+    expect(queueConflict.status).toBe(409);
+    expect(store.getSession(session.id)?.archivedAt).toBeUndefined();
+    store.removeQueued(session.id, 'queued-before-archive');
+
+    const archived = await fetch(`${base}/api/sessions/${session.id}`, {
+      method: 'PATCH',
+      headers: headers(base),
+      body: JSON.stringify({ archived: true }),
+    });
+    expect(archived.status).toBe(200);
+    const archivedSession = (await archived.json()) as Session;
+    expect(archivedSession.archivedAt).toBeTruthy();
+    expect(
+      (
+        await fetch(`${base}/api/sessions/${session.id}/messages`, {
+          method: 'POST',
+          headers: headers(base),
+          body: JSON.stringify({ content: 'Should not start' }),
+        })
+      ).status,
+    ).toBe(409);
+    expect(
+      (
+        await fetch(`${base}/api/sessions/${session.id}/queue`, {
+          method: 'POST',
+          headers: headers(base),
+          body: JSON.stringify({ content: 'Should not queue' }),
+        })
+      ).status,
+    ).toBe(409);
+
+    const restored = await fetch(`${base}/api/sessions/${session.id}`, {
+      method: 'PATCH',
+      headers: headers(base),
+      body: JSON.stringify({ archived: false }),
+    });
+    expect(restored.status).toBe(200);
+    expect(((await restored.json()) as Session).archivedAt).toBeUndefined();
+    const started = await fetch(`${base}/api/sessions/${session.id}/messages`, {
+      method: 'POST',
+      headers: headers(base),
+      body: JSON.stringify({ content: 'Restored conversation works' }),
+    });
+    expect(started.status).toBe(202);
+    const { runId } = (await started.json()) as { runId: string };
+    for (let i = 0; i < 100 && store.getRun(runId)?.status === 'running'; i++)
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+    const archivedAgain = await fetch(`${base}/api/sessions/${session.id}`, {
+      method: 'PATCH',
+      headers: headers(base),
+      body: JSON.stringify({ archived: true }),
+    });
+    expect(archivedAgain.status).toBe(200);
+    const dataDir = store.dataDir;
+    store.close();
+    const reopened = new Store(dataDir);
+    expect(reopened.getSession(session.id)?.archivedAt).toBeTruthy();
+    expect(reopened.listSessions()).toHaveLength(1);
+    reopened.close();
+  });
+
+  it('organizes project conversations in nested virtual folders and preserves conversations on deletion', async () => {
+    const { store, server } = setup();
+    const base = await ready(server);
+    const now = new Date().toISOString();
+    for (const id of ['project-a', 'project-b'])
+      store.putProject({ id, name: id, path: process.cwd(), createdAt: now, memoryWorkspace: 'w', memoryProject: id });
+
+    const createFolder = async (projectId: string, body: unknown) =>
+      fetch(`${base}/api/projects/${projectId}/folders`, {
+        method: 'POST',
+        headers: headers(base),
+        body: JSON.stringify(body),
+      });
+    const rootResponse = await createFolder('project-a', { name: 'Pesquisa' });
+    expect(rootResponse.status).toBe(201);
+    const root = await rootResponse.json();
+    const childResponse = await createFolder('project-a', { name: 'Interface', parentId: root.id });
+    expect(childResponse.status).toBe(201);
+    const child = await childResponse.json();
+    expect(child.parentId).toBe(root.id);
+    const foreignResponse = await createFolder('project-b', { name: 'Foreign' });
+    const foreign = await foreignResponse.json();
+    expect((await createFolder('project-b', { name: 'Cross project', parentId: root.id })).status).toBe(409);
+    expect((await createFolder('project-a', { name: 'Interface', parentId: root.id })).status).toBe(409);
+
+    const createdSession = await fetch(`${base}/api/sessions`, {
+      method: 'POST',
+      headers: headers(base),
+      body: JSON.stringify({ projectId: 'project-a', folderId: child.id }),
+    });
+    expect(createdSession.status).toBe(201);
+    const session = (await createdSession.json()) as Session;
+    expect(session.folderId).toBe(child.id);
+    expect(
+      (
+        await fetch(`${base}/api/sessions/${session.id}`, {
+          method: 'PATCH',
+          headers: headers(base),
+          body: JSON.stringify({ folderId: foreign.id }),
+        })
+      ).status,
+    ).toBe(409);
+    const projectChangeSourceResponse = await fetch(`${base}/api/sessions`, {
+      method: 'POST',
+      headers: headers(base),
+      body: JSON.stringify({ projectId: 'project-a', folderId: child.id }),
+    });
+    const projectChangeSource = (await projectChangeSourceResponse.json()) as Session;
+    const projectChanged = await fetch(`${base}/api/sessions/${projectChangeSource.id}`, {
+      method: 'PATCH',
+      headers: headers(base),
+      body: JSON.stringify({ projectId: 'project-b' }),
+    });
+    expect(projectChanged.status).toBe(200);
+    expect(((await projectChanged.json()) as Session).folderId).toBeUndefined();
+    expect(
+      (
+        await fetch(`${base}/api/sessions`, {
+          method: 'POST',
+          headers: headers(base),
+          body: JSON.stringify({ projectId: null, folderId: root.id }),
+        })
+      ).status,
+    ).toBe(400);
+    expect(
+      (
+        await fetch(`${base}/api/project-folders/${root.id}`, {
+          method: 'DELETE',
+          headers: headers(base),
+          body: JSON.stringify({}),
+        })
+      ).status,
+    ).toBe(409);
+
+    const renamed = await fetch(`${base}/api/project-folders/${root.id}`, {
+      method: 'PATCH',
+      headers: headers(base),
+      body: JSON.stringify({ name: 'Revisão' }),
+    });
+    expect(renamed.status).toBe(200);
+    expect((await renamed.json()).name).toBe('Revisão');
+    const deleted = await fetch(`${base}/api/project-folders/${child.id}`, {
+      method: 'DELETE',
+      headers: headers(base),
+      body: JSON.stringify({}),
+    });
+    expect(deleted.status).toBe(204);
+    expect(store.getSession(session.id)?.folderId).toBe(root.id);
+
+    const persistentFolderResponse = await createFolder('project-a', { name: 'Keep' });
+    const persistentFolder = await persistentFolderResponse.json();
+    const persistentSessionResponse = await fetch(`${base}/api/sessions`, {
+      method: 'POST',
+      headers: headers(base),
+      body: JSON.stringify({ projectId: 'project-a', folderId: persistentFolder.id }),
+    });
+    const persistentSession = (await persistentSessionResponse.json()) as Session;
+    const deletedRoot = await fetch(`${base}/api/project-folders/${root.id}`, {
+      method: 'DELETE',
+      headers: headers(base),
+      body: JSON.stringify({}),
+    });
+    expect(deletedRoot.status).toBe(204);
+    expect(store.getSession(session.id)?.folderId).toBeUndefined();
+
+    const dataDir = store.dataDir;
+    store.close();
+    const reopened = new Store(dataDir);
+    expect(reopened.listProjectFolders('project-a')).toMatchObject([{ name: 'Keep', parentId: null }]);
+    expect(reopened.getSession(session.id)?.folderId).toBeUndefined();
+    expect(reopened.getSession(persistentSession.id)?.folderId).toBe(persistentFolder.id);
+    expect(reopened.bootstrap([], []).projectFolders).toHaveLength(2);
+    reopened.close();
+  });
+
+  it('revalidates folder and queue state after asynchronous session catalog lookups', async () => {
+    let holdCatalog = false;
+    let releaseCatalog!: () => void;
+    let signalCatalogStarted!: () => void;
+    let catalogGate = Promise.resolve();
+    let catalogStarted!: Promise<void>;
+    const catalog: ProviderInfo = {
+      id: 'codex',
+      name: 'stub',
+      installed: true,
+      available: true,
+      status: 'ready' as const,
+      detail: 'test',
+      models: [{ id: 'm1', name: 'm1', isDefault: true, efforts: ['low', 'medium'] }],
+      defaultModel: 'm1',
+      capabilities: { fast: true, tools: true, approvals: true, cancel: true, reasoning: true },
+    };
+    const { store, server } = setup(async () => {
+      if (holdCatalog) {
+        signalCatalogStarted();
+        await catalogGate;
+      }
+      return [catalog];
+    });
+    const base = await ready(server);
+    const now = new Date().toISOString();
+    store.putProject({
+      id: 'catalog-project',
+      name: 'Catalog project',
+      path: process.cwd(),
+      createdAt: now,
+      memoryWorkspace: 'w',
+      memoryProject: 'catalog-project',
+    });
+    const makeFolder = async () => {
+      const response = await fetch(`${base}/api/projects/catalog-project/folders`, {
+        method: 'POST',
+        headers: headers(base),
+        body: JSON.stringify({ name: `Folder ${Date.now()}` }),
+      });
+      return (await response.json()) as { id: string };
+    };
+    const beginCatalogWait = () => {
+      holdCatalog = true;
+      catalogGate = new Promise<void>((resolve) => (releaseCatalog = resolve));
+      catalogStarted = new Promise<void>((resolve) => (signalCatalogStarted = resolve));
+    };
+    const sessionPost = (body: Record<string, unknown>) =>
+      fetch(`${base}/api/sessions`, {
+        method: 'POST',
+        headers: headers(base),
+        body: JSON.stringify(body),
+      });
+    const patchSession = (id: string, body: Record<string, unknown>) =>
+      fetch(`${base}/api/sessions/${id}`, {
+        method: 'PATCH',
+        headers: headers(base),
+        body: JSON.stringify(body),
+      });
+    try {
+      const createFolder = await makeFolder();
+      const moveFolder = await makeFolder();
+      const createSource = (await (await sessionPost({ projectId: 'catalog-project' })).json()) as Session;
+      const moveSource = (await (await sessionPost({ projectId: 'catalog-project' })).json()) as Session;
+      const archivable = (await (await sessionPost({ projectId: 'catalog-project' })).json()) as Session;
+      store.setQueuePause(archivable.id, { reason: 'failed', at: new Date().toISOString() });
+      beginCatalogWait();
+      const create = sessionPost({ projectId: 'catalog-project', folderId: createFolder.id, model: 'm1' });
+      const moving = patchSession(moveSource.id, { folderId: moveFolder.id, model: 'm1' });
+      const archive = patchSession(archivable.id, { archived: true, model: 'm1' });
+      await catalogStarted;
+      for (const folder of [createFolder, moveFolder]) {
+        const deletedFolder = await fetch(`${base}/api/project-folders/${folder.id}`, {
+          method: 'DELETE',
+          headers: headers(base),
+          body: JSON.stringify({}),
+        });
+        expect(deletedFolder.status).toBe(204);
+      }
+      store.enqueue({
+        id: 'queued-during-archive-patch',
+        sessionId: archivable.id,
+        content: 'queued while lookup waits',
+        createdAt: new Date().toISOString(),
+      });
+      releaseCatalog();
+      holdCatalog = false;
+      expect((await create).status).toBe(409);
+      expect((await moving).status).toBe(409);
+      expect((await archive).status).toBe(409);
+      expect(store.getSession(createSource.id)?.folderId).toBeUndefined();
+      expect(store.getSession(moveSource.id)?.folderId).toBeUndefined();
+      expect(store.getSession(archivable.id)?.archivedAt).toBeUndefined();
+      expect(store.listSessions()).toHaveLength(3);
+    } finally {
+      if (holdCatalog) releaseCatalog();
+    }
+  });
+
   it('rejects unknown explicit models without persistence and coalesces concurrent catalog discovery with retry after failure', async () => {
     let calls = 0,
       release!: () => void,

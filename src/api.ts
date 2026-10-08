@@ -20,6 +20,7 @@ import type {
   MessageQueue,
   Plan,
   Project,
+  ProjectFolder,
   QueuedMessage,
   ProjectCoordination,
   Run,
@@ -208,8 +209,21 @@ export const api = {
     memoryWorkspace?: string;
     memoryProject?: string;
   }) => request<Project>('/api/projects', { method: 'POST', body: JSON.stringify(data) }),
+  createProjectFolder: (projectId: string, data: { name: string; parentId?: string | null }) =>
+    request<ProjectFolder>(`/api/projects/${encodeURIComponent(projectId)}/folders`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  renameProjectFolder: (id: string, data: { name: string }) =>
+    request<ProjectFolder>(`/api/project-folders/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(data),
+    }),
+  deleteProjectFolder: (id: string) =>
+    request<void>(`/api/project-folders/${encodeURIComponent(id)}`, { method: 'DELETE', body: JSON.stringify({}) }),
   remoteHosts: () => request<RemoteHost[]>('/api/remote-hosts'),
-  probeRemoteHost: (data: { target: string; port: number }) =>
+  sshConfigHosts: () => request<{ aliases: string[] }>('/api/remote-hosts/ssh-config'),
+  probeRemoteHost: (data: { target: string; port?: number }) =>
     request<RemoteProbe>('/api/remote-hosts/probe', { method: 'POST', body: JSON.stringify(data) }),
   createRemoteHost: (data: {
     name: string;
@@ -260,6 +274,7 @@ export const api = {
     }),
   createSession: (data: {
     projectId?: string | null;
+    folderId?: string | null;
     providerId: string;
     model?: string;
     mode?: string;
@@ -267,9 +282,12 @@ export const api = {
   }) => request<Session>('/api/sessions', { method: 'POST', body: JSON.stringify(data) }),
   updateSession: (
     id: string,
-    data: Partial<Pick<Session, 'title' | 'providerId' | 'mode' | 'projectId' | 'thinking' | 'planFirst'>> & {
+    data: Partial<
+      Pick<Session, 'title' | 'providerId' | 'mode' | 'projectId' | 'folderId' | 'thinking' | 'planFirst'>
+    > & {
       model?: string | null;
       approvalMode?: ApprovalMode | null;
+      archived?: boolean;
     },
   ) => request<Session>(`/api/sessions/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(data) }),
   /** "Continuar com outro agente" (docs/specs/provider-handoff.md). */

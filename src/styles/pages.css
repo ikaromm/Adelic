@@ -3224,10 +3224,43 @@ label.setting-row > input {
   grid-template-columns: minmax(0, 1fr) 100px;
   gap: 10px;
 }
+.remote-config-picker {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 10px;
+}
+.remote-config-picker label {
+  display: grid;
+  flex: 1 1 230px;
+  min-width: 0;
+  gap: 6px;
+}
+.remote-config-picker select {
+  width: 100%;
+  min-width: 0;
+}
+.remote-config-hint {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+}
 .remote-host-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 10px 16px;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 14px;
+}
+.remote-host-info,
+.remote-host-form-grid > label {
+  min-width: 0;
+}
+.remote-host-form-grid > label {
+  display: grid;
+  gap: 6px;
+}
+.remote-host-form-grid input {
+  width: 100%;
+  min-width: 0;
 }
 .remote-host-info code,
 .remote-probe-result code {
@@ -3240,11 +3273,12 @@ label.setting-row > input {
 .remote-probe-result p,
 .remote-install-warning {
   color: var(--text-secondary);
+  overflow-wrap: anywhere;
 }
 .remote-host-actions {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: flex-start;
   flex-wrap: wrap;
 }
 .remote-host-actions .secondary-button {
@@ -3350,10 +3384,10 @@ label.setting-row > input {
 }
 .observability-filters {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr)) auto;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   align-items: end;
   gap: 9px;
-  margin: 0 0 16px;
+  margin-block: 0 16px;
   padding: 12px;
   border: 1px solid var(--border-soft);
   border-radius: var(--radius-lg);
@@ -3383,7 +3417,7 @@ label.setting-row > input {
   width: 36px;
 }
 .observability-metrics {
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 145px), 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 210px), 1fr));
 }
 .observability-components .section-title-row {
   margin-bottom: 11px;

@@ -256,3 +256,24 @@ test('observability filters and autonomy selector fit a 390px viewport', async (
   expect(box!.x + box!.width).toBeLessThanOrEqual(390);
   await checkNoHorizontalOverflow();
 });
+
+test('observability filters align with cards at desktop and narrow widths', async ({ page }) => {
+  await page.goto('/');
+  await page
+    .getByRole('navigation', { name: 'Navegação principal' })
+    .getByRole('button', { name: 'Observabilidade' })
+    .click();
+  for (const width of [2048, 1280, 390]) {
+    await page.setViewportSize({ width, height: 900 });
+    const heading = await page.locator('.observability-page .page-heading').boundingBox();
+    const filters = await page.locator('.observability-filters').boundingBox();
+    const metrics = await page.locator('.observability-metrics').boundingBox();
+    expect(heading).not.toBeNull();
+    expect(filters).not.toBeNull();
+    expect(metrics).not.toBeNull();
+    expect(Math.abs(filters!.x - heading!.x)).toBeLessThan(2);
+    expect(Math.abs(filters!.x - metrics!.x)).toBeLessThan(2);
+    expect(Math.abs(filters!.width - metrics!.width)).toBeLessThan(2);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+  }
+});

@@ -14,6 +14,7 @@ export { default as compaction } from './compaction';
 export { default as composer } from './composer';
 export { default as diagnostics } from './diagnostics';
 export { default as 'error-boundary' } from './error-boundary';
+export { default as folders } from './folders';
 export { default as git } from './git';
 export { default as handoff } from './handoff';
 export { default as hooks } from './hooks';

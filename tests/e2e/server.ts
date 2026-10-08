@@ -7,6 +7,7 @@
 //   [lento]   → streams slowly until cancelled
 //   [escrever] → with sandbox workspace-write, edits README.md and creates novo.txt in input.cwd
 //   [medio]   → streams for about two seconds, then completes (message queue flows)
+//   [espera-modelo] → waits before its first token, so the UI can show an honest waiting state
 //   [normal] or no marker → streams a short Markdown answer with a code block
 //   [anexos]  → lists the images it received and the text files inlined in the prompt
 // Plan mode: a planning prompt answers a fixed spec with two tasks (a planning prompt with
@@ -51,6 +52,10 @@ const port = Number(process.env.E2E_PORT || 4399);
 if (process.env.E2E_MEMORY_PORT) startFakeMemory(Number(process.env.E2E_MEMORY_PORT));
 const dataDir = mkdtempSync(join(tmpdir(), 'adelic-e2e-'));
 const store = new Store(dataDir);
+// Never read personal SSH configuration in the browser fixture.
+const fixtureSshConfig = join(dataDir, 'ssh-config');
+writeFileSync(fixtureSshConfig, 'Host e2e-config-alias\n  HostName 127.0.0.1\n  Port 2222\n');
+process.env.ADELIC_SSH_CONFIG = fixtureSshConfig;
 
 const codex: ProviderInfo = {
   id: 'codex',
@@ -64,7 +69,7 @@ const codex: ProviderInfo = {
     { id: 'e2e-reserva', name: 'E2E Reserva', efforts: ['low', 'medium'] },
   ],
   defaultModel: 'e2e-model',
-  capabilities: { fast: true, tools: true, approvals: true, cancel: true, reasoning: true, images: true },
+  capabilities: { fast: true, tools: true, approvals: true, cancel: true, reasoning: true, images: true, steer: true },
 };
 const kiro: ProviderInfo = {
   ...codex,
@@ -73,11 +78,12 @@ const kiro: ProviderInfo = {
   detail: 'Segundo provedor simulado para testes E2E',
   models: [{ id: 'kiro-e2e', name: 'Kiro E2E Model', isDefault: true }],
   defaultModel: 'kiro-e2e',
-  capabilities: { ...codex.capabilities, reasoning: false },
+  capabilities: { ...codex.capabilities, reasoning: false, steer: false },
 };
 export const E2E_HANDOFF_SUMMARY =
   '**Objetivo**\nExportar o relatório.\n\n**Próximo passo**\nLigar o botão Exportar (resumo E2E).';
 const pending = new Map<string, (decision: 'approve' | 'deny') => void>();
+let steeredContent = '';
 let holdPlanTasks = false;
 const heldPlanTasks: (() => void)[] = [];
 const flaky = new Map<string, number>();
@@ -92,6 +98,7 @@ const providers: ProviderRegistry = {
     return [codex, kiro];
   },
   async run(input, emit, signal) {
+    steeredContent = '';
     if (input.prompt.startsWith(HANDOFF_PROMPT_MARKER)) {
       await sleep(150, signal).catch(() => undefined);
       if (input.prompt.includes('[resumo-falha]')) throw new Error('Kiro stream failed: The operation timed out.');
@@ -151,6 +158,7 @@ const providers: ProviderRegistry = {
         '[bloquear]',
         '[lento]',
         '[medio]',
+        '[espera-modelo]',
         '[normal]',
         '[instavel]',
         '[quebra]',
@@ -246,6 +254,11 @@ const providers: ProviderRegistry = {
         let text = '';
         for (let i = 0; i < 600; i++) {
           await sleep(100, signal);
+          if (steeredContent) {
+            const answer = `Orientado: ${steeredContent}`;
+            emit({ type: 'delta', text: answer });
+            return { text: answer, stopReason: 'completed' };
+          }
           text += '.';
           emit({ type: 'delta', text: '.' });
         }
@@ -258,6 +271,11 @@ const providers: ProviderRegistry = {
         }
         emit({ type: 'delta', text: ' Resposta média concluída.' });
         return { text: '-'.repeat(20) + ' Resposta média concluída.', stopReason: 'completed' };
+      }
+      if (marker === '[espera-modelo]') {
+        await sleep(2_000, signal);
+        emit({ type: 'delta', text: 'Resposta após a espera.' });
+        return { text: 'Resposta após a espera.', stopReason: 'completed' };
       }
       const chunks = ['Resposta **E2E** pronta.\n\n', '```ts\n', 'const soma = 2 + 2;\n', '```\n'];
       for (const chunk of chunks) {
@@ -277,6 +295,9 @@ const providers: ProviderRegistry = {
     if (!resolveDecision) throw new Error('Aprovação não está mais pendente.');
     pending.delete(id);
     resolveDecision(decision);
+  },
+  async steer(_runId, content) {
+    steeredContent = content;
   },
   async shutdown() {},
 };

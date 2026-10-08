@@ -165,10 +165,80 @@ export function remoteToolTitle(spec: RemoteToolSpec, runtime?: RemoteRuntime) {
   return `${runtime?.executionKind === 'isolated-local' ? 'Executar ferramenta local isolada' : 'Permitir ferramenta remota'}: ${spec.remoteName}`;
 }
 
-export function remoteRuntimeDescription(runtime: RemoteRuntime) {
-  return runtime.executionKind === 'isolated-local'
-    ? `Local isolado: ${runtime.root}`
-    : `${runtime.label}: ${runtime.root}`;
+const MAX_TOOL_EVENT_DETAIL = 280;
+
+function compactToolText(value: unknown, maxLength = 180) {
+  if (typeof value !== 'string') return '';
+  const compact = value
+    .replace(/[\r\n\t]+/g, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+  if (!compact) return '';
+  return compact.length <= maxLength ? compact : `${compact.slice(0, maxLength - 1)}…`;
+}
+
+/** Describe the operation first, then its runtime, so an activity row identifies the work. */
+export function remoteToolDescription(
+  runtime: RemoteRuntime,
+  spec: RemoteToolSpec,
+  args: Record<string, unknown>,
+  failure?: string,
+) {
+  const path = typeof args.path === 'string' && args.path ? args.path : '.';
+  let operation: string;
+  switch (spec.remoteName) {
+    case 'exec':
+      operation = `exec: ${compactToolText(args.command) || 'comando'}`;
+      break;
+    case 'read_file':
+      operation = `read_file: ${compactToolText(path)}`;
+      break;
+    case 'write_file':
+      operation = `write_file: ${compactToolText(path)}`;
+      break;
+    case 'list':
+      operation = `list: ${compactToolText(path)}`;
+      break;
+    case 'stat':
+      operation = `stat: ${compactToolText(path)}`;
+      break;
+    case 'search':
+      operation = `search: ${compactToolText(args.query, 100)} em ${compactToolText(path)}`;
+      break;
+    case 'git':
+      operation = `git ${Array.isArray(args.args) ? compactToolText(args.args[0]) : ''}`.trim();
+      break;
+  }
+  const context = runtime.executionKind === 'isolated-local' ? 'Executor local isolado' : `Host ${runtime.label}`;
+  const suffix = failure ? `\n${compactToolText(failure, 80)}` : '';
+  const runtimeLine = compactToolText(`${context}: ${runtime.root}`, 110);
+  const remaining = MAX_TOOL_EVENT_DETAIL - runtimeLine.length - suffix.length - 2;
+  const safeOperation =
+    operation.length <= remaining ? operation : `${operation.slice(0, Math.max(1, remaining - 1))}…`;
+  return `${safeOperation}\n${runtimeLine}${suffix}`;
+}
+
+/** A nonzero command result is a failed operation even though it remains a valid RPC result. */
+export function remoteToolFailure(result: unknown): string | undefined {
+  if (!isRecord(result) || !Number.isInteger(result.exitCode) || result.exitCode === 0) return undefined;
+  return `Falhou (código ${String(result.exitCode)})`;
+}
+
+export function remoteToolError(error: unknown) {
+  const record = isRecord(error) ? error : undefined;
+  const code = typeof record?.code === 'string' ? record.code : '';
+  const name = error instanceof Error ? error.name : '';
+  const message = error instanceof Error ? error.message : '';
+  if (name === 'AbortError' || name === 'CanceledError' || /\babort(ed)?\b|\bcancel(l)?ed\b/i.test(message))
+    return 'Cancelado';
+  if (name === 'TimeoutError' || code === 'ETIMEDOUT' || /timed? ?out|timeout/i.test(message))
+    return 'Tempo limite excedido';
+  if (
+    /^(ECONNREFUSED|ECONNRESET|EHOSTUNREACH|ENETUNREACH|EPIPE)$/.test(code) ||
+    /ssh|connection|conexão/i.test(message)
+  )
+    return 'Falha de conexão remota';
+  return 'Falha na execução remota';
 }
 
 /** Return the command used by the exec tool, if this is an executable request. */

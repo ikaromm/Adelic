@@ -32,12 +32,12 @@ export function bootstrapSelection(
   const projectId = preserveSelection && projectStillExists ? currentProjectId : '';
   if (preserveSelection && !currentSessionId) return { projectId, sessionId: '' };
 
-  const candidates = snapshot.sessions.filter((session) => session.projectId === projectId);
+  const candidates = snapshot.sessions.filter((session) => session.projectId === projectId && !session.archivedAt);
   if (preserveSelection && projectId && candidates.length === 0) return { projectId, sessionId: '' };
   const fallback =
     candidates[0] ||
     snapshot.sessions
-      .filter((session) => session.projectId === null)
+      .filter((session) => session.projectId === null && !session.archivedAt)
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
   const selectedProjectId = fallback?.projectId || '';
   const sessionId = fallback?.id || '';

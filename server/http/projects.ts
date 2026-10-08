@@ -2,11 +2,13 @@ import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { Router } from 'express';
 import { randomUUID } from 'node:crypto';
-import type { Project } from '../../shared/contracts.js';
+import type { Project, ProjectFolder } from '../../shared/contracts.js';
 import {
   CreateProjectSchema,
+  CreateProjectFolderSchema,
   HookTestSchema,
   PatchProjectSchema,
+  PatchProjectFolderSchema,
   ProjectFilesQuerySchema,
   ProjectHooksSchema,
   parseBody,
@@ -20,6 +22,71 @@ import type { BackendContext } from './context.js';
 
 export function projectsRoutes({ store, orchestrator }: BackendContext) {
   const app = Router();
+  app.get('/api/projects/:id/folders', (req, res) => {
+    if (!store.getProject(req.params.id)) return error(res, 404, 'common.projectNotFound');
+    res.json({ folders: store.listProjectFolders(req.params.id) });
+  });
+  app.post('/api/projects/:id/folders', (req, res) => {
+    const project = store.getProject(req.params.id);
+    if (!project) return error(res, 404, 'common.projectNotFound');
+    const parsed = parseBody(CreateProjectFolderSchema, req.body, 'common.invalidRequest', req.locale);
+    if (!parsed.ok) return error(res, 400, parsed.message);
+    const parentId = parsed.data.parentId ?? null;
+    if (parentId) {
+      const parent = store.getProjectFolder(parentId);
+      if (!parent) return error(res, 404, 'projects.folderNotFound');
+      if (parent.projectId !== project.id) return error(res, 409, 'projects.folderParentInvalid');
+    }
+    const duplicate = store
+      .listProjectFolders(project.id)
+      .some((folder) => folder.parentId === parentId && folder.name.toLowerCase() === parsed.data.name.toLowerCase());
+    if (duplicate) return error(res, 409, 'projects.folderNameExists');
+    const now = new Date().toISOString();
+    const folder: ProjectFolder = {
+      id: randomUUID(),
+      projectId: project.id,
+      parentId,
+      name: parsed.data.name,
+      createdAt: now,
+      updatedAt: now,
+    };
+    try {
+      res.status(201).json(store.putProjectFolder(folder));
+    } catch {
+      error(res, 409, 'projects.folderNameExists');
+    }
+  });
+  app.patch('/api/project-folders/:id', (req, res) => {
+    const folder = store.getProjectFolder(req.params.id);
+    if (!folder) return error(res, 404, 'projects.folderNotFound');
+    const parsed = parseBody(PatchProjectFolderSchema, req.body, 'common.invalidRequest', req.locale);
+    if (!parsed.ok) return error(res, 400, parsed.message);
+    const duplicate = store
+      .listProjectFolders(folder.projectId)
+      .some(
+        (item) =>
+          item.id !== folder.id &&
+          item.parentId === folder.parentId &&
+          item.name.toLowerCase() === parsed.data.name.toLowerCase(),
+      );
+    if (duplicate) return error(res, 409, 'projects.folderNameExists');
+    const next = { ...folder, name: parsed.data.name, updatedAt: new Date().toISOString() };
+    try {
+      res.json(store.putProjectFolder(next));
+    } catch {
+      error(res, 409, 'projects.folderNameExists');
+    }
+  });
+  app.delete('/api/project-folders/:id', (req, res) => {
+    const folder = store.getProjectFolder(req.params.id);
+    if (!folder) return error(res, 404, 'projects.folderNotFound');
+    if (store.projectFolderHasChildren(folder.id)) return error(res, 409, 'projects.folderHasChildren');
+    const sessions = store.listSessions().filter((session) => session.folderId === folder.id);
+    if (sessions.some((session) => session.activeRunId || orchestrator.isActive(session.id)))
+      return error(res, 409, 'projects.folderSessionRunning');
+    if (!store.deleteProjectFolder(folder.id)) return error(res, 409, 'projects.folderHasChildren');
+    res.status(204).end();
+  });
   app.post('/api/projects', async (req, res) => {
     const parsed = parseBody(CreateProjectSchema, req.body, 'projects.createRequired', req.locale);
     if (!parsed.ok) return error(res, 400, parsed.message);

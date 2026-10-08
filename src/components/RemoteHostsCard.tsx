@@ -13,7 +13,10 @@ export function RemoteHostsCard() {
   const [notice, setNotice] = useState('');
   const [busy, setBusy] = useState('');
   const [target, setTarget] = useState('');
-  const [port, setPort] = useState('22');
+  const [port, setPort] = useState('');
+  const [aliases, setAliases] = useState<string[]>([]);
+  const [configLoading, setConfigLoading] = useState(false);
+  const [configError, setConfigError] = useState('');
   const [name, setName] = useState('');
   const [runnerPath, setRunnerPath] = useState('');
   const [probe, setProbe] = useState<RemoteProbe | null>(null);
@@ -29,6 +32,19 @@ export function RemoteHostsCard() {
     }
   }, []);
   useEffect(() => void load(), [load]);
+  const loadConfig = useCallback(async () => {
+    if (!loopback()) return;
+    setConfigLoading(true);
+    setConfigError('');
+    try {
+      setAliases((await api.sshConfigHosts()).aliases);
+    } catch (e) {
+      setConfigError((e as Error).message);
+    } finally {
+      setConfigLoading(false);
+    }
+  }, []);
+  useEffect(() => void loadConfig(), [loadConfig]);
 
   const act = async (key: string, work: () => Promise<unknown>) => {
     setBusy(key);
@@ -51,7 +67,10 @@ export function RemoteHostsCard() {
     setNotice('');
     setTrusted(false);
     try {
-      const result = await api.probeRemoteHost({ target: target.trim(), port: Number(port) });
+      const result = await api.probeRemoteHost({
+        target: target.trim(),
+        ...(port.trim() ? { port: Number(port) } : {}),
+      });
       setProbe(result);
       if (!name.trim()) setName(result.hostname);
     } catch (e) {
@@ -176,6 +195,52 @@ export function RemoteHostsCard() {
       </div>
       <form className="remote-host-form" onSubmit={(event) => void onProbe(event)}>
         <h3>{t('remoteHosts.add')}</h3>
+        <div className="remote-config-picker">
+          <label>
+            {t('remoteHosts.sshConfig')}
+            <select
+              value={aliases.includes(target) ? target : ''}
+              disabled={!local || configLoading || Boolean(busy) || aliases.length === 0}
+              onChange={(event) => {
+                if (!event.target.value) return;
+                setTarget(event.target.value);
+                setName(event.target.value);
+                setPort('');
+                setProbe(null);
+                setTrusted(false);
+              }}
+            >
+              <option value="">
+                {t(
+                  configLoading
+                    ? 'remoteHosts.configLoading'
+                    : aliases.length
+                      ? 'remoteHosts.configChoose'
+                      : 'remoteHosts.configEmpty',
+                )}
+              </option>
+              {aliases.map((alias) => (
+                <option value={alias} key={alias}>
+                  {alias}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button
+            type="button"
+            className="secondary-button"
+            disabled={!local || configLoading || Boolean(busy)}
+            onClick={() => void loadConfig()}
+          >
+            <RefreshCw size={14} className={configLoading ? 'spin' : undefined} /> {t('remoteHosts.configRefresh')}
+          </button>
+        </div>
+        <p className="remote-config-hint">{t('remoteHosts.configHint')}</p>
+        {configError && (
+          <div className="inline-notice error-notice" role="alert">
+            {configError}
+          </div>
+        )}
         <div className="remote-host-form-grid">
           <label>
             {t('remoteHosts.target')}
@@ -188,7 +253,7 @@ export function RemoteHostsCard() {
               }}
               placeholder="dev@192.0.2.10"
               required
-              disabled={!local}
+              disabled={!local || Boolean(busy)}
             />
           </label>
           <label>
@@ -203,8 +268,8 @@ export function RemoteHostsCard() {
                 setProbe(null);
                 setTrusted(false);
               }}
-              required
-              disabled={!local}
+              placeholder={t('remoteHosts.configPort')}
+              disabled={!local || Boolean(busy)}
             />
           </label>
         </div>

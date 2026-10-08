@@ -2,6 +2,9 @@
 
 ## Não publicado
 
+- Acompanhamento visível da execução, comandos SSH com estados consistentes, cadastro por aliases do SSH config e correção do alinhamento na observabilidade.
+- Orientação do turno pelo compositor, arquivamento de conversas e subpastas virtuais para organizar conversas de projetos.
+
 - Autonomia explícita por conversa/projeto: Automático executa solicitações elegíveis sem perguntas, com bloqueios, sandbox e política manual da internet preservados. SSH exige escolha explícita; configurações anteriores continuam como antes.
 - Observabilidade geral local com filtros, histórico paginado, consumo conhecido, eventos recentes e timeline por execução. Instrumentação de memória, processos, Git, Graphify, terminal, SSH e desktop; telemetria sem prompts, comandos ou saídas. Veja [contrato](docs/specs/autonomy-observability.md).
 

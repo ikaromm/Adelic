@@ -12,6 +12,11 @@ export default defineMessages(
     'projects.listFilesFailed': 'Não foi possível listar os arquivos do projeto: {detail}',
     'projects.invalidHooks': 'Configuração de verificações inválida',
     'projects.taskNotFound': 'Tarefa não encontrada',
+    'projects.folderNotFound': 'Pasta de conversas não encontrada',
+    'projects.folderParentInvalid': 'A pasta pai precisa pertencer ao mesmo projeto',
+    'projects.folderNameExists': 'Já existe uma pasta com esse nome neste nível',
+    'projects.folderHasChildren': 'Mova ou remova as subpastas antes de excluir esta pasta',
+    'projects.folderSessionRunning': 'Não é possível excluir uma pasta com conversas em execução',
   },
   {
     'projects.createRequired': 'name, path, memoryWorkspace and memoryProject are required',
@@ -22,5 +27,10 @@ export default defineMessages(
     'projects.listFilesFailed': 'Could not list the project files: {detail}',
     'projects.invalidHooks': 'Invalid checks configuration',
     'projects.taskNotFound': 'Task not found',
+    'projects.folderNotFound': 'Conversation folder not found',
+    'projects.folderParentInvalid': 'The parent folder must belong to the same project',
+    'projects.folderNameExists': 'A folder with this name already exists at this level',
+    'projects.folderHasChildren': 'Move or remove child folders before deleting this folder',
+    'projects.folderSessionRunning': 'A folder with running conversations cannot be deleted',
   },
 );

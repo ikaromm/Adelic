@@ -2,7 +2,9 @@
 
 ## Não publicado
 
-_Nada ainda._
+- **Projetos SSH com login local**: Codex e Kiro rodam neste computador; um runner Python sem credenciais executa ferramentas no servidor. Cadastro com fingerprint confirmado, encaminhamentos SSH desativados, aprovação manual por chamada e histórico local preservado ao mudar de projeto. Veja [servidores SSH](docs/specs/remote-hosts.md).
+- Navegação de pastas remotas, menções a arquivos, terminal com cancelamento e Git de leitura. Recursos que dependem de execução local (Graphify, coordenação, worktrees, hooks, MCP de projeto e automações) ficam desativados no projeto remoto.
+- Proteções contra helpers Git, respostas RPC inesperadas e cancelamentos concorrentes. Usuário Unix compartilhado continua podendo alterar arquivos e influenciar saídas; não é uma fronteira de isolamento contra esse usuário. O runner não recebe login de modelo nem oferece um endpoint de inferência.
 
 ## 0.5.0 — 2026-10-07
 

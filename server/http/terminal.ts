@@ -29,7 +29,7 @@ export function terminalAccess(req: Request, store: Store) {
 }
 
 /** Integrated command runner (docs/specs/terminal-preview.md). Commands never reach a model. */
-export function terminalRoutes({ store }: BackendContext, terminal: TerminalService) {
+export function terminalRoutes({ store, orchestrator }: BackendContext, terminal: TerminalService) {
   const app = Router();
   const allowed = (req: Request, res: Response) => {
     const access = terminalAccess(req, store);
@@ -67,10 +67,29 @@ export function terminalRoutes({ store }: BackendContext, terminal: TerminalServ
     const parsed = parseBody(TerminalRunSchema, req.body, 'terminal.invalidCommand', req.locale);
     if (!parsed.ok) return error(res, 400, parsed.message);
     try {
+      if (p.remote && requestKind(req) !== 'local') return error(res, 403, 'remotehosts.localOnly');
+      if (p.remote && store.getSettings()!.sandbox === 'read-only') return error(res, 409, 'remotehosts.readOnly');
+      const host = p.remote ? store.getRemoteHost(p.remote.hostId) : undefined;
+      if (p.remote && !host) return error(res, 404, 'remotehosts.notFound');
       const started = await terminal.start({
         projectId: p.id,
-        cwd: p.path,
+        cwd: p.remote ? `${host!.name}:${p.remote.path}` : p.path,
         command: parsed.data.command,
+        ...(p.remote && host
+          ? {
+              remote: async (signal: AbortSignal) =>
+                (await orchestrator.remoteHosts.call(
+                  host,
+                  p.remote!.path,
+                  'exec',
+                  {
+                    command: parsed.data.command,
+                    timeoutMs: (parsed.data.timeoutSec ?? TERMINAL_TIMEOUT_DEFAULT_SEC) * 1000,
+                  },
+                  signal,
+                )) as { stdout: string; stderr: string; exitCode: number },
+            }
+          : {}),
         // The sandbox is read when the command starts, like an agent run.
         sandbox: store.getSettings()!.sandbox,
         timeoutMs: (parsed.data.timeoutSec ?? TERMINAL_TIMEOUT_DEFAULT_SEC) * 1000,

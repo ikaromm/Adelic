@@ -1,5 +1,6 @@
 import type { CheckResult } from './hooks.js';
 import type { RunMcpServer } from './mcp.js';
+import type { RemoteProject, RemoteRuntime } from './remote-hosts.js';
 export type ProviderId = 'codex' | 'claude' | 'kiro' | 'opencode';
 export type Mode = 'auto' | 'fast' | 'deep';
 export type ReasoningEffort = string;
@@ -11,6 +12,8 @@ export interface Project {
   id: string;
   name: string;
   path: string;
+  /** path remains an operational local directory; remote.path is the SSH workspace. */
+  remote?: RemoteProject;
   createdAt: string;
   memoryWorkspace: string;
   memoryProject: string;
@@ -685,6 +688,7 @@ export interface RunInput {
    * providers keep failing closed on any MCP server. Never set for detached conversations.
    */
   mcpServers?: RunMcpServer[];
+  remote?: RemoteRuntime;
 }
 export type ProviderEvent =
   | { type: 'delta'; text: string }

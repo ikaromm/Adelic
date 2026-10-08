@@ -1,3 +1,7 @@
+import { RemoteHostService } from './remote/transport.js';
+import type { RemoteRuntime } from '../shared/remote-hosts.js';
+import { rankFiles } from '../shared/mentions.js';
+import { inlineTextBlock } from './attachments.js';
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, realpathSync } from 'node:fs';
 import { join, sep } from 'node:path';
@@ -149,6 +153,8 @@ export class Orchestrator {
   /** Queued items allowed past the usage limits once ("Continuar mesmo assim"); memory only. */
   private limitOverrides = new Set<string>();
   /** Plan mode: plans, their approval and sequential task execution. */
+  readonly remoteHosts: ReturnType<typeof RemoteHostService>;
+  private remoteConnections = new Map<string, Promise<{ close(): unknown }>>();
   readonly plans: Plans;
   /** After-edit checks per project (docs/specs/project-hooks.md). */
   readonly hookChecks: HookChecks;
@@ -163,6 +169,7 @@ export class Orchestrator {
     /** Test hook: the after-edit check runner (production: bubblewrap). */
     checkRunner?: typeof runCheck,
   ) {
+    this.remoteHosts = RemoteHostService(store.dataDir, { configFile: process.env.ADELIC_SSH_CONFIG });
     this.hookChecks = new HookChecks({
       runner: checkRunner,
       saveEvent: (event) => {
@@ -297,6 +304,9 @@ export class Orchestrator {
         throw httpError(409, 'orchestrator.configChanged');
       if (this.worktreeBusy.has(session.id)) throw httpError(409, 'orchestrator.worktreeChanging');
       const project = this.workspaceFor(session);
+      if (project.remote && session.providerId !== 'codex' && session.providerId !== 'kiro')
+        throw httpError(409, 'remotehosts.provider');
+      if (project.remote && options.automationId) throw httpError(409, 'remotehosts.unsupported');
       const writeKey = this.writeKey(session, project);
       if (this.writingProjects.has(writeKey) || this.reservedProjectWrites.has(writeKey))
         throw httpError(409, 'orchestrator.projectWriting');
@@ -805,7 +815,7 @@ export class Orchestrator {
     project: Project,
     tools: boolean,
   ): Promise<Pick<RunInput, 'graphifyApproval'>> {
-    if (!tools || session.projectId === null || project.graphify?.enabled === false) return {};
+    if (project.remote || !tools || session.projectId === null || project.graphify?.enabled === false) return {};
     // Best effort: without trusted paths a graphify query simply asks.
     const paths = await Promise.resolve()
       .then(() => this.graphifyService.approvalPaths(this.store.getProject(project.id) ?? project))
@@ -814,6 +824,7 @@ export class Orchestrator {
   }
   private mcpFor(session: Session, project: Project, tools: boolean): Pick<RunInput, 'mcpServers'> {
     if (!tools) return {};
+    if (project.remote) return {};
     const servers = runMcpServers(this.store, project, session.projectId === null);
     return servers.length ? { mcpServers: servers } : {};
   }
@@ -842,6 +853,7 @@ export class Orchestrator {
     if (session.projectId === null) throw httpError(409, 'orchestrator.detachedNoWorktree');
     const project = this.store.getProject(session.projectId);
     if (!project) throw httpError(404, 'common.projectNotFound');
+    if (project.remote) throw httpError(409, 'remotehosts.unsupported');
     return { session, project };
   }
   private assertIdle(session: Session) {
@@ -947,7 +959,7 @@ export class Orchestrator {
     for (const session of this.store.listSessions()) {
       if (!session.worktree || !(await worktreeMissing(session.worktree))) continue;
       const project = session.projectId === null ? undefined : this.store.getProject(session.projectId);
-      if (project) repos.set(project.path, project);
+      if (project && !project.remote) repos.set(project.path, project);
       delete session.worktree;
       delete session.nativeSessionId;
       this.store.putSession(session);
@@ -967,6 +979,115 @@ export class Orchestrator {
     const scope = settings.detachedMemory;
     if (!scope?.workspace || !scope.project) return undefined;
     return { ...project, memoryWorkspace: scope.workspace, memoryProject: scope.project };
+  }
+  async disconnectRemoteHost(hostId: string) {
+    for (const [sessionId, active] of this.active) {
+      const session = this.store.getSession(sessionId);
+      if (session?.projectId && this.store.getProject(session.projectId)?.remote?.hostId === hostId)
+        active.controller.abort();
+    }
+    await this.remoteHosts.disconnect(hostId);
+  }
+  remoteFor(
+    project: Project,
+    sandbox: RunInput['sandbox'],
+    signal: AbortSignal,
+    runId: string,
+  ): Pick<RunInput, 'remote'> {
+    if (!project.remote) return {};
+    const host = this.store.getRemoteHost(project.remote.hostId);
+    if (!host) throw httpError(404, 'remotehosts.notFound');
+    const root = project.remote.path;
+    let connection: ReturnType<typeof this.remoteHosts.connect> | undefined;
+    const close = () => {
+      void connection?.then((c) => c.close()).catch(() => undefined);
+    };
+    signal.addEventListener('abort', close, { once: true });
+    const remote: RemoteRuntime = {
+      label: `${host.name}:${root}`,
+      root,
+      call: async (tool, args, callSignal) => {
+        if (signal.aborted || callSignal.aborted) throw new Error('Execução SSH cancelada');
+        if (sandbox === 'read-only' && (tool === 'exec' || tool === 'write_file'))
+          throw httpError(409, 'remotehosts.readOnly');
+        if (!connection) {
+          connection = this.remoteHosts.connect(host, root);
+          this.remoteConnections.set(runId, connection);
+        }
+        const c = await connection;
+        if (signal.aborted) {
+          c.close();
+          throw new Error('Execução SSH cancelada');
+        }
+        return c.call(
+          tool,
+          { ...args, ...(tool === 'exec' || tool === 'write_file' ? { readOnly: sandbox === 'read-only' } : {}) },
+          callSignal,
+        );
+      },
+    };
+    return { remote };
+  }
+  private async closeRemoteRun(runId: string) {
+    const keys = [...this.remoteConnections.keys()].filter((key) => key === runId || key.startsWith(runId + ':'));
+    await Promise.allSettled(
+      keys.map(async (key) => {
+        const pending = this.remoteConnections.get(key);
+        this.remoteConnections.delete(key);
+        await (await pending)?.close();
+      }),
+    );
+  }
+  async remoteFiles(project: Project, query: string, limit = 20) {
+    if (!project.remote) throw httpError(409, 'remotehosts.unsupported');
+    const host = this.store.getRemoteHost(project.remote.hostId);
+    if (!host) throw httpError(404, 'remotehosts.notFound');
+    const result = (await this.remoteHosts.call(
+      host,
+      project.remote.path,
+      'list',
+      { path: '.', recursive: true, limit: 20000 },
+      new AbortController().signal,
+    )) as { entries: { path: string; directory: boolean }[]; truncated: boolean };
+    const paths = result.entries
+      .filter(
+        (e) =>
+          !e.directory && typeof e.path === 'string' && !e.path.startsWith('/') && !e.path.split('/').includes('..'),
+      )
+      .map((e) => e.path);
+    return { files: rankFiles(paths, query).slice(0, limit), truncated: result.truncated, source: 'walk' as const };
+  }
+  private async remoteMentions(project: Project, mentions: string[], signal: AbortSignal) {
+    const host = this.store.getRemoteHost(project.remote!.hostId);
+    if (!host) throw httpError(404, 'remotehosts.notFound');
+    const included: string[] = [],
+      ignored: { path: string; reason: string }[] = [];
+    let text = '',
+      bytes = 0;
+    for (const path of mentions.slice(0, 5)) {
+      if (path.startsWith('/') || path.includes('\\') || path.split('/').includes('..')) {
+        ignored.push({ path, reason: 'fora do projeto' });
+        continue;
+      }
+      try {
+        const result = (await this.remoteHosts.call(host, project.remote!.path, 'read_file', { path }, signal)) as {
+          content: string;
+        };
+        if (
+          typeof result.content !== 'string' ||
+          result.content.includes('\0') ||
+          Buffer.byteLength(result.content) > 512 * 1024 ||
+          bytes + Buffer.byteLength(result.content) > 2 * 1024 * 1024
+        )
+          throw new Error('arquivo excede limite');
+        bytes += Buffer.byteLength(result.content);
+        text += inlineTextBlock(path, result.content);
+        included.push(path);
+      } catch (e) {
+        ignored.push({ path, reason: errorText(e) });
+      }
+    }
+    return { text, included, ignored };
   }
   private detachedProject(sessionId: string): Project {
     const path = join(this.store.dataDir, 'conversations', sessionId);
@@ -1008,7 +1129,7 @@ export class Orchestrator {
       // Checks still running from an earlier run stop before this one may write (with a note).
       if (mayWrite) await this.hookChecks.cancel(project.id, 'nova execução neste projeto');
       // The project is reserved for this run, so nothing else writes there until `after`.
-      if (mayWrite) {
+      if (mayWrite && !project.remote) {
         run.checkpoint = await checkpointBefore(project.path, run.id, {
           requireToplevel: session.projectId === null,
         });
@@ -1073,7 +1194,9 @@ export class Orchestrator {
       // Mentioned files join the inlined attachments, so every path (direct, coordinated,
       // plan mode) receives them where it receives the attachments: in the prompt only.
       if (mentions.length) {
-        const mentioned = await resolveMentions(project.path, mentions);
+        const mentioned = project.remote
+          ? await this.remoteMentions(project, mentions, controller.signal)
+          : await resolveMentions(project.path, mentions);
         attached.text += mentioned.text;
         if (mentioned.included.length)
           this.publishKeyed(session.id, run.id, 'status', 'event.mentionIncluded', {
@@ -1137,7 +1260,8 @@ export class Orchestrator {
           history: boundedHistory(history, plan.contextBudget),
           plan,
           sandbox: settings.sandbox,
-          approvalMode: settings.approvalMode ?? 'auto-safe',
+          approvalMode: project.remote ? 'manual' : (settings.approvalMode ?? 'auto-safe'),
+          ...this.remoteFor(project, readOnlyPlan ? 'read-only' : settings.sandbox, controller.signal, run.id),
           memoryContext: boundedMemory,
           ...(hooks.blockedCommands.length ? { blockedCommands: hooks.blockedCommands } : {}),
           ...(summary ? { summary } : {}),
@@ -1279,6 +1403,7 @@ export class Orchestrator {
         this.emit({ type: 'task', task: { ...task, output: undefined } });
       }
     } finally {
+      await this.closeRemoteRun(run.id);
       addUsage(run, directUsage.totals());
       if (run.checkpoint) run.checkpoint = await checkpointAfter(run.id, run.checkpoint);
       run.completedAt = new Date().toISOString();
@@ -1411,6 +1536,8 @@ export class Orchestrator {
       level?: 'fast' | 'deep',
       taskImages: RunInput['attachments'] = [],
     ) => {
+      if (project.remote && providerId !== 'codex' && providerId !== 'kiro')
+        throw httpError(409, 'remotehosts.provider');
       const taskLevel = level || (tools ? 'deep' : 'fast');
       return {
         runId: childRun(task),
@@ -1433,7 +1560,8 @@ export class Orchestrator {
           contextBudget: taskLevel === 'deep' && tools ? 9000 : 3500,
         },
         sandbox,
-        approvalMode: settings.approvalMode ?? 'auto-safe',
+        approvalMode: project.remote ? 'manual' : (settings.approvalMode ?? 'auto-safe'),
+        ...this.remoteFor(project, sandbox, controller.signal, childRun(task)),
         memoryContext: taskMemory,
         ...(blockedCommands.length ? { blockedCommands } : {}),
         // The conversation summary goes where the conversation goes; review and synthesis
@@ -1570,7 +1698,11 @@ export class Orchestrator {
       return result;
     };
     const graph = async (query: string) =>
-      session.projectId === null || project.graphify?.enabled === false || route.level !== 'deep' || !route.tools
+      project.remote ||
+      session.projectId === null ||
+      project.graphify?.enabled === false ||
+      route.level !== 'deep' ||
+      !route.tools
         ? ''
         : // A worktree shares the main checkout's paths: its graph is the project's own.
           await graphifyContext(
@@ -2146,6 +2278,7 @@ export class Orchestrator {
     this.assertNotUpdating();
     const project = this.store.getProject(projectId);
     if (!project) throw httpError(404, 'common.projectNotFound');
+    if (project.remote) throw httpError(409, 'remotehosts.unsupported');
     const check = this.store.getHooks(projectId).afterEdit[index];
     if (!check) throw httpError(404, 'orchestrator.checkNotFound');
     const path = realPath(project.path);
@@ -2460,7 +2593,7 @@ export class Orchestrator {
       catalog: ProviderInfo[];
       signal: AbortSignal;
       current: ModelRef;
-      input: Pick<RunInput, 'plan' | 'attachments'>;
+      input: Pick<RunInput, 'plan' | 'attachments' | 'remote'>;
       taskTitle?: string;
     },
     attempt: (target: Required<ModelRef>, effects: EffectTracker) => Promise<T>,
@@ -2533,7 +2666,7 @@ export class Orchestrator {
   private fallbackUsable(
     catalog: ProviderInfo[],
     target: Required<ModelRef>,
-    input: Pick<RunInput, 'plan' | 'attachments'>,
+    input: Pick<RunInput, 'plan' | 'attachments' | 'remote'>,
   ) {
     if (
       !availableModel(catalog, target) ||
@@ -2543,6 +2676,7 @@ export class Orchestrator {
       )
     )
       return false;
+    if (input.remote && target.providerId !== 'codex' && target.providerId !== 'kiro') return false;
     const caps = catalog.find((p) => p.id === target.providerId)!.capabilities;
     if (input.plan.tools && !caps.tools) return false;
     if (input.plan.level === 'fast' && !caps.fast) return false;
@@ -2686,6 +2820,7 @@ export class Orchestrator {
       ...starting.map((item) => item.done),
       ...active.map((item) => item.done).filter((p): p is Promise<void> => Boolean(p)),
       this.hookChecks.shutdown(),
+      this.remoteHosts.shutdown(),
     ]);
   }
 }

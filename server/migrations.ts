@@ -200,6 +200,13 @@ export const migrations: Migration[] = [
         CREATE TABLE IF NOT EXISTS remote_logins(id INTEGER PRIMARY KEY AUTOINCREMENT, data TEXT NOT NULL);`);
     },
   },
+  {
+    version: 13,
+    description: 'Servidores SSH: chaves públicas fixadas e executor sem credenciais',
+    up(db) {
+      db.exec('CREATE TABLE IF NOT EXISTS ssh_hosts(id TEXT PRIMARY KEY, data TEXT NOT NULL);');
+    },
+  },
 ];
 
 export const schemaVersion = migrations.at(-1)!.version;

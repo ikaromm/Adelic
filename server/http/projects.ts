@@ -1,3 +1,5 @@
+import { mkdirSync } from 'node:fs';
+import { join } from 'node:path';
 import { Router } from 'express';
 import { randomUUID } from 'node:crypto';
 import type { Project } from '../../shared/contracts.js';
@@ -17,25 +19,41 @@ import type { BackendContext } from './context.js';
 
 export function projectsRoutes({ store, orchestrator }: BackendContext) {
   const app = Router();
-  app.post('/api/projects', (req, res) => {
+  app.post('/api/projects', async (req, res) => {
     const parsed = parseBody(CreateProjectSchema, req.body, 'projects.createRequired', req.locale);
     if (!parsed.ok) return error(res, 400, parsed.message);
-    const { name, path, memoryWorkspace, memoryProject } = parsed.data;
+    const { name, path, remote, memoryWorkspace, memoryProject } = parsed.data;
     try {
-      const resolved = projectPath(path);
+      const id = randomUUID();
+      if (remote && req.body?.orchestration?.enabled) return error(res, 409, 'remotehosts.unsupported');
+      if (remote) {
+        const host = store.getRemoteHost(remote.hostId);
+        if (!host) return error(res, 404, 'remotehosts.notFound');
+        const info = (await orchestrator.remoteHosts.call(
+          host,
+          remote.path,
+          'stat',
+          { path: '.' },
+          new AbortController().signal,
+        )) as { type: string };
+        if (info.type !== 'directory') return error(res, 400, 'remotehosts.invalid');
+      }
+      const resolved = remote ? join(store.dataDir, 'remote-projects', id) : projectPath(path);
+      if (remote) mkdirSync(resolved, { recursive: true, mode: 0o700 });
       const config = req.body?.orchestration === undefined ? undefined : orchestrationConfig(req.body.orchestration);
       if (req.body?.orchestration !== undefined && !config) return error(res, 400, 'projects.invalidOrchestration');
       const graphify = req.body?.graphify === undefined ? undefined : graphifyConfig(req.body.graphify);
       if (req.body?.graphify !== undefined && !graphify) return error(res, 400, 'projects.invalidGraphify');
       const p: Project = {
-        id: randomUUID(),
+        id,
         name,
         path: resolved,
         createdAt: new Date().toISOString(),
         memoryWorkspace,
         memoryProject,
-        orchestration: config,
-        graphify,
+        orchestration: remote ? { enabled: false, maxWorkers: 1, review: false } : config,
+        graphify: remote ? { enabled: false } : graphify,
+        ...(remote ? { remote } : {}),
       };
       store.putProject(p);
       res.status(201).json(store.getProject(p.id));
@@ -55,6 +73,7 @@ export function projectsRoutes({ store, orchestrator }: BackendContext) {
     const query = parseBody(ProjectFilesQuerySchema, req.query, 'common.invalidParams', req.locale);
     if (!query.ok) return error(res, 400, query.message);
     try {
+      if (project.remote) return res.json(await orchestrator.remoteFiles(project, query.data.query, query.data.limit));
       const session = query.data.sessionId ? store.getSession(query.data.sessionId) : undefined;
       const root = session?.projectId === project.id && session.worktree ? session.worktree.path : project.path;
       res.json(await searchProjectFiles(root, query.data.query, query.data.limit));
@@ -69,6 +88,7 @@ export function projectsRoutes({ store, orchestrator }: BackendContext) {
   });
   app.put('/api/projects/:id/hooks', (req, res) => {
     if (!store.getProject(req.params.id)) return error(res, 404, 'common.projectNotFound');
+    if (store.getProject(req.params.id)?.remote) return error(res, 409, 'remotehosts.unsupported');
     const parsed = parseBody(ProjectHooksSchema, req.body, 'projects.invalidHooks', req.locale);
     if (!parsed.ok) return error(res, 400, parsed.message);
     res.json(store.putHooks(req.params.id, parsed.data));
@@ -90,6 +110,8 @@ export function projectsRoutes({ store, orchestrator }: BackendContext) {
   app.patch('/api/projects/:id', (req, res) => {
     const p = store.getProject(req.params.id);
     if (!p) return error(res, 404, 'common.projectNotFound');
+    if (p.remote && (req.body?.graphify?.enabled || req.body?.git?.runHooks || req.body?.orchestration?.enabled))
+      return error(res, 409, 'remotehosts.unsupported');
     // Orchestration/graphify are checked before name and scope, as before.
     const fields = parseBody(PatchProjectSchema, req.body, 'validation.projectFields', req.locale);
     if (req.body?.orchestration !== undefined) {

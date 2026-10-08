@@ -29,6 +29,7 @@ export function automationsRoutes({ store, providerList, orchestrator, automatio
     const parsed = parseBody(CreateAutomationSchema, req.body, 'automations.invalid', req.locale);
     if (!parsed.ok) return error(res, 400, parsed.message);
     const body = parsed.data;
+    if (store.getProject(body.projectId)?.remote) return error(res, 409, 'remotehosts.unsupported');
     if (!store.getProject(body.projectId)) return error(res, 404, 'common.projectNotFound');
     if (body.model && !(await knownModel(body.providerId ?? store.getSettings()!.defaultProviderId, body.model)))
       return error(res, 400, 'common.modelNotAdvertised');
@@ -65,6 +66,8 @@ export function automationsRoutes({ store, providerList, orchestrator, automatio
     const parsed = parseBody(PatchAutomationSchema, req.body, 'automations.invalid', req.locale);
     if (!parsed.ok) return error(res, 400, parsed.message);
     const patch = parsed.data;
+    if (store.getProject(patch.projectId ?? current.projectId)?.remote)
+      return error(res, 409, 'remotehosts.unsupported');
     if (patch.projectId && !store.getProject(patch.projectId)) return error(res, 404, 'common.projectNotFound');
     const now = service.now();
     const next: Automation = { ...current, updatedAt: new Date(now).toISOString() };

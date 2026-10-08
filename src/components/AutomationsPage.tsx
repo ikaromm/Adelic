@@ -177,6 +177,7 @@ export function AutomationsPage({
   const [rowNotice, setRowNotice] = useState<Record<string, string>>({});
   const titleId = useId();
   const globalOn = data.settings.automations === true;
+  const localProjects = data.projects.filter((project) => !project.remote);
 
   const reload = useCallback(async () => {
     try {
@@ -196,7 +197,7 @@ export function AutomationsPage({
     setDraft({
       name: '',
       prompt: '',
-      projectId: data.projects[0]?.id ?? '',
+      projectId: localProjects[0]?.id ?? '',
       providerId: '',
       model: '',
       mode: '',
@@ -278,8 +279,8 @@ export function AutomationsPage({
             type="button"
             className="primary-button"
             onClick={startNew}
-            disabled={!data.projects.length}
-            title={data.projects.length ? undefined : t('automations.needProject')}
+            disabled={!localProjects.length}
+            title={localProjects.length ? undefined : t('automations.needProject')}
           >
             <Plus size={15} /> {t('automations.new')}
           </button>
@@ -315,7 +316,7 @@ export function AutomationsPage({
             <CalendarClock size={18} />
           </div>
           <strong>{t('automations.empty')}</strong>
-          <span>{data.projects.length ? t('automations.emptyHint') : t('automations.emptyNoProject')}</span>
+          <span>{localProjects.length ? t('automations.emptyHint') : t('automations.emptyNoProject')}</span>
         </div>
       )}
       {automations && automations.length > 0 && (
@@ -505,11 +506,13 @@ function AutomationForm({
         <label>
           {t('automations.form.project')}
           <select value={draft.projectId} onChange={(e) => set({ projectId: e.target.value })}>
-            {data.projects.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name}
-              </option>
-            ))}
+            {data.projects
+              .filter((p) => !p.remote)
+              .map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}
+                </option>
+              ))}
           </select>
         </label>
       </div>

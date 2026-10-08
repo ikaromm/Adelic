@@ -171,6 +171,7 @@ export class Plans {
     const session = this.session(plan);
     const project = session.projectId === null ? undefined : this.store.getProject(session.projectId);
     if (!project) throw httpError(409, 'plans.noProject');
+    if (project.remote) throw httpError(409, 'remotehosts.unsupported');
     let root: string;
     try {
       root = realpathSync(project.path);

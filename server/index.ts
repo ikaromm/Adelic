@@ -1,3 +1,4 @@
+import { remoteHostsRoutes } from './http/remote-hosts.js';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import { execFileSync } from 'node:child_process';
 import type { ProviderRegistry } from '../shared/contracts.js';
@@ -10,7 +11,7 @@ import { localeMiddleware } from './i18n.js';
 import type { BackendContext } from './http/context.js';
 import type { RetryPolicy } from './retry.js';
 import type { runCheck } from './hooks.js';
-import { AccessControl, securityHeaders, type RemoteAccess } from './http/auth.js';
+import { AccessControl, requestKind, securityHeaders, type RemoteAccess } from './http/auth.js';
 import { FunnelControl, remoteAccessRoutes, type FunnelListener } from './http/remote-access.js';
 import { FunnelService } from './funnel.js';
 import type { LoginLimiter } from './remote-auth.js';
@@ -156,6 +157,25 @@ export function createBackend(
   // Scheduled automations run only inside this process; runtime.close() stops the timers.
   const automations = new AutomationService(store, orchestrator, automationClock);
   const context: BackendContext = { store, orchestrator, providerList, automations };
+  // SSH capabilities are available only from this computer's browser, including indirect actions.
+  app.use('/api', (req, res, next) => {
+    if (requestKind(req) === 'local') return next();
+    const segments = req.path.split('/').filter(Boolean);
+    const plan = segments[0] === 'plans' ? store.getPlan(segments[1]) : undefined;
+    const sessionId = segments[0] === 'sessions' ? segments[1] : (req.body?.sessionId ?? plan?.sessionId);
+    const run = segments[0] === 'runs' ? store.getRun(segments[1]) : undefined;
+    const session = sessionId ? store.getSession(sessionId) : run ? store.getSession(run.sessionId) : undefined;
+    const projectId = segments[0] === 'projects' ? segments[1] : (req.body?.projectId ?? session?.projectId);
+    if (req.body?.remote || (projectId && store.getProject(projectId)?.remote))
+      return error(res, 403, 'remotehosts.localOnly');
+    next();
+  });
+  app.use('/api/projects/:id', (req, res, next) => {
+    if (store.getProject(req.params.id)?.remote && /^\/(?:git|graphify|hooks|mcp)(?:\/|$)/.test(req.path))
+      return error(res, 409, 'remotehosts.unsupported');
+    next();
+  });
+  app.use(remoteHostsRoutes(context));
   app.use(projectsRoutes(context));
   app.use(gitRoutes(context));
   app.use(sessionsRoutes(context));

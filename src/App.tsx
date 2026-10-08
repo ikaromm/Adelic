@@ -39,6 +39,7 @@ import type {
   SessionDetail,
   StreamEvent,
 } from '../shared/contracts';
+import type { RemoteHost } from '../shared/remote-hosts';
 import { api, eventsUrl } from './api';
 import SharedMemoryPage from './MemoryPage';
 import { BrandMark } from './BrandMark';
@@ -83,6 +84,7 @@ import { timelineSegments, upsertCompaction } from './compaction-timeline';
 import { compactCommand } from '../shared/compaction';
 import { SettingsPage } from './components/SettingsPage';
 import { GitPanel, useGitRepo } from './components/GitPanel';
+import { RemoteGitPanel } from './components/RemoteGitPanel';
 import { HandoffDialog, type HandoffTarget } from './components/HandoffDialog';
 import { LimitNotice, SpendWarningBanner } from './components/SpendLimits';
 import { isLimitError, useUsage } from './hooks/useUsage';
@@ -96,6 +98,16 @@ import { useAccessKind } from './RemoteGate';
 
 type LocalStream = { runId: string; messageId: string; content: string };
 
+function providerForRemoteProject(preferred: string, providers: Bootstrap['providers']) {
+  const supported = providers.filter((provider) => provider.id === 'codex' || provider.id === 'kiro');
+  if (
+    (preferred === 'codex' || preferred === 'kiro') &&
+    supported.find((provider) => provider.id === preferred)?.available
+  )
+    return preferred;
+  return supported.find((provider) => provider.available)?.id;
+}
+
 export default function App() {
   const { t, tRich } = useI18n();
   const accessKind = useAccessKind();
@@ -103,6 +115,7 @@ export default function App() {
   const [detail, setDetail] = useState<SessionDetail | null>(null);
   const [coordination, setCoordination] = useState<ProjectCoordination | null>(null);
   const [graphifyStatus, setGraphifyStatus] = useState<GraphifyStatus | null>(null);
+  const [remoteHosts, setRemoteHosts] = useState<RemoteHost[]>([]);
   const [selectedSession, setSelectedSession] = useState('');
   const [selectedProject, setSelectedProject] = useState('');
   const [page, setPage] = useState<Page>('chat');
@@ -282,6 +295,28 @@ export default function App() {
   useEffect(() => {
     void refreshBootstrap(false).catch((error: Error) => setNotice(error.message));
   }, [refreshBootstrap]);
+
+  const remoteHostIds = useMemo(
+    () =>
+      [...new Set((data?.projects ?? []).flatMap((item) => (item.remote ? [item.remote.hostId] : [])))]
+        .sort()
+        .join(','),
+    [data?.projects],
+  );
+  useEffect(() => {
+    if (!remoteHostIds) {
+      setRemoteHosts([]);
+      return;
+    }
+    let active = true;
+    void api
+      .remoteHosts()
+      .then((hosts) => active && setRemoteHosts(hosts))
+      .catch(() => active && setRemoteHosts([]));
+    return () => {
+      active = false;
+    };
+  }, [remoteHostIds]);
 
   useEffect(() => {
     setDetail(null);
@@ -526,8 +561,10 @@ export default function App() {
   );
   const detachedSessions = useMemo(() => data?.sessions.filter((s) => s.projectId === null) || [], [data?.sessions]);
   const conversationProject = data?.projects.find((item) => item.id === session?.projectId);
+  const cwdProject = page === 'chat' && session ? conversationProject : project;
+  const cwdHost = cwdProject?.remote ? remoteHosts.find((host) => host.id === cwdProject.remote?.hostId) : undefined;
   // The Git page follows the selected project (a linked conversation selects its project).
-  const projectIsGit = useGitRepo(project?.id);
+  const projectIsGit = useGitRepo(project?.remote ? undefined : project?.id);
   const messages = currentDetail?.messages || [];
   const activityEvents = currentDetail?.events || [];
   const activityTasks = currentDetail?.tasks || [];
@@ -704,12 +741,20 @@ export default function App() {
 
   async function newConversation(projectId: string | null = null) {
     if (!data || busy) return;
+    const remoteProject = projectId ? data.projects.find((item) => item.id === projectId)?.remote : undefined;
+    const providerId = remoteProject
+      ? providerForRemoteProject(data.settings.defaultProviderId, data.providers)
+      : data.settings.defaultProviderId;
+    if (!providerId) {
+      setNotice(t('remoteHosts.providerRequired'));
+      return;
+    }
     setBusy(true);
     setNotice('');
     try {
       const created = await api.createSession({
         projectId,
-        providerId: data.settings.defaultProviderId,
+        providerId,
         mode: data.settings.defaultMode,
       });
       invalidateBootstrapRefreshes();
@@ -1345,7 +1390,7 @@ export default function App() {
       ? `${data.settings.detachedMemory.workspace}/${data.settings.detachedMemory.project}`
       : undefined;
   const conversationContext = conversationProject
-    ? conversationProject.orchestration?.enabled === false
+    ? conversationProject.remote || conversationProject.orchestration?.enabled === false
       ? t('composer.context.direct')
       : t('composer.context.orchestrated', { agent: provider?.name || t('composer.context.agentFallback') })
     : detachedMemoryScope
@@ -1551,7 +1596,19 @@ export default function App() {
                         }}
                       >
                         <Folder size={15} className="project-icon" aria-hidden="true" />
-                        <span className="sidebar-label">{item.name}</span>
+                        <span className="sidebar-project-copy">
+                          <span className="sidebar-label">{item.name}</span>
+                          {item.remote && (
+                            <small>
+                              {remoteHosts.find((host) => host.id === item.remote?.hostId)?.name ||
+                                t('remoteHosts.remote')}{' '}
+                              ·{' '}
+                              {remoteHosts.find((host) => host.id === item.remote?.hostId)?.target ||
+                                item.remote.hostId}{' '}
+                              · {item.remote.path}
+                            </small>
+                          )}
+                        </span>
                         <ChevronRight size={14} className="project-chevron" aria-hidden="true" />
                       </button>
                       <button
@@ -1618,6 +1675,13 @@ export default function App() {
             </button>
             <div className="breadcrumbs">
               <span className="crumb">{pageTitle}</span>
+              {cwdProject?.remote && (
+                <span className="remote-cwd-label" title={t('remoteHosts.cwdLabel')}>
+                  <span>{cwdHost?.name || t('remoteHosts.remote')}</span>
+                  <span>{cwdHost?.target || cwdProject.remote.hostId}</span>
+                  {cwdProject.remote.path}
+                </span>
+              )}
               {page === 'chat' && session && (
                 <>
                   <span className="crumb-separator" aria-hidden="true">
@@ -1642,17 +1706,20 @@ export default function App() {
                 <SquareTerminal size={16} />
               </button>
             )}
-            {page === 'chat' && project && projectIsGit && (!session || session.projectId === project.id) && (
-              <button
-                type="button"
-                className="icon-button"
-                aria-label={t('app.git', { project: project.name })}
-                title={t('app.gitTitle')}
-                onClick={() => goTo('git')}
-              >
-                <GitBranch size={16} />
-              </button>
-            )}
+            {page === 'chat' &&
+              project &&
+              (project.remote || projectIsGit) &&
+              (!session || session.projectId === project.id) && (
+                <button
+                  type="button"
+                  className="icon-button"
+                  aria-label={t('app.git', { project: project.name })}
+                  title={t('app.gitTitle')}
+                  onClick={() => goTo('git')}
+                >
+                  <GitBranch size={16} />
+                </button>
+              )}
             {page === 'chat' && session && (
               <button
                 type="button"
@@ -1733,18 +1800,22 @@ export default function App() {
               </div>
             ) : (
               <div className="chat-view">
-                <WorktreePanel
-                  session={session}
-                  running={Boolean(session.activeRunId) || pendingSendForSession}
-                  onSession={(next) => {
-                    setDetail((current) => (current?.session.id === next.id ? { ...current, session: next } : current));
-                    setData((current) =>
-                      current
-                        ? { ...current, sessions: current.sessions.map((s) => (s.id === next.id ? next : s)) }
-                        : current,
-                    );
-                  }}
-                />
+                {!conversationProject?.remote && (
+                  <WorktreePanel
+                    session={session}
+                    running={Boolean(session.activeRunId) || pendingSendForSession}
+                    onSession={(next) => {
+                      setDetail((current) =>
+                        current?.session.id === next.id ? { ...current, session: next } : current,
+                      );
+                      setData((current) =>
+                        current
+                          ? { ...current, sessions: current.sessions.map((s) => (s.id === next.id ? next : s)) }
+                          : current,
+                      );
+                    }}
+                  />
+                )}
                 <section
                   className="conversation"
                   aria-label={t('app.conversation')}
@@ -2003,7 +2074,11 @@ export default function App() {
                           />
                         )}
                         <ModelMenu
-                          providers={data.providers}
+                          providers={
+                            conversationProject?.remote
+                              ? data.providers.filter((item) => item.id === 'codex' || item.id === 'kiro')
+                              : data.providers
+                          }
                           providerId={session.providerId}
                           sessionId={session.id}
                           modelId={session.model}
@@ -2090,7 +2165,16 @@ export default function App() {
                           disabled={busy || Boolean(session.activeRunId)}
                           context={conversationContext}
                           memoryScope={session.projectId === null ? detachedMemoryScope : undefined}
-                          onProject={(projectId) => void changeSession({ projectId })}
+                          onProject={(projectId) => {
+                            const destination = data.projects.find((item) => item.id === projectId);
+                            if (!destination?.remote) return void changeSession({ projectId });
+                            const providerId = providerForRemoteProject(session.providerId, data.providers);
+                            if (!providerId) return setNotice(t('remoteHosts.providerRequired'));
+                            void changeSession({
+                              projectId,
+                              ...(providerId !== session.providerId ? { providerId } : {}),
+                            });
+                          }}
                           onMode={(mode) => void changeSession({ mode })}
                           onConfigure={
                             conversationProject
@@ -2102,17 +2186,19 @@ export default function App() {
                               : undefined
                           }
                         />
-                        <button
-                          type="button"
-                          className={`composer-pill plan-first-toggle ${session.planFirst ? 'active' : ''}`}
-                          aria-pressed={Boolean(session.planFirst)}
-                          title={t('composer.planFirstTitle')}
-                          disabled={busy || Boolean(session.activeRunId)}
-                          onClick={() => void changeSession({ planFirst: !session.planFirst })}
-                        >
-                          <ClipboardList size={14} />
-                          <span className="composer-pill-label">{t('composer.planFirst')}</span>
-                        </button>
+                        {!conversationProject?.remote && (
+                          <button
+                            type="button"
+                            className={`composer-pill plan-first-toggle ${session.planFirst ? 'active' : ''}`}
+                            aria-pressed={Boolean(session.planFirst)}
+                            title={t('composer.planFirstTitle')}
+                            disabled={busy || Boolean(session.activeRunId)}
+                            onClick={() => void changeSession({ planFirst: !session.planFirst })}
+                          >
+                            <ClipboardList size={14} />
+                            <span className="composer-pill-label">{t('composer.planFirst')}</span>
+                          </button>
+                        )}
                       </div>
                       {session.activeRunId && composer.trim() && (
                         <button
@@ -2175,7 +2261,14 @@ export default function App() {
           </ErrorBoundary>
         )}
 
-        {data && page === 'git' && project && (
+        {data && page === 'git' && project?.remote && (
+          <RemoteGitPanel
+            key={project.id}
+            project={project}
+            remoteHost={remoteHosts.find((host) => host.id === project.remote?.hostId)}
+          />
+        )}
+        {data && page === 'git' && project && !project.remote && (
           <ErrorBoundary scope={t('app.scope.git')} resetKey={project.id}>
             <GitPanel
               key={project.id}
@@ -2308,7 +2401,11 @@ export default function App() {
       )}
       {handoff && data && session?.id === handoff.sessionId && (
         <HandoffDialog
-          providers={data.providers}
+          providers={
+            conversationProject?.remote
+              ? data.providers.filter((item) => item.id === 'codex' || item.id === 'kiro')
+              : data.providers
+          }
           currentProviderId={session.providerId}
           fixedTarget={handoff.target}
           busy={handoffBusy}

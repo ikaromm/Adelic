@@ -40,6 +40,7 @@ import type { Automation, AutomationSchedule } from '../shared/automations';
 import type { CheckResult, ProjectHooks } from '../shared/hooks';
 import type { McpEnvSource, McpServerView, ProjectMcpReport } from '../shared/mcp';
 import type { RemoteAccessState, TailscaleState } from '../shared/remote-access';
+import type { RemoteHost, RemoteProbe } from '../shared/remote-hosts';
 import { t } from './i18n/catalog';
 import { getLocale } from './i18n/store';
 /** Report from /api/diagnostics: versions, paths and status only, without secrets or content. */
@@ -179,8 +180,49 @@ export const api = {
   updateProgress: () => request<UpdateProgress>('/api/update/progress'),
   detail: (id: string) => request<SessionDetail>(`/api/sessions/${encodeURIComponent(id)}`),
   task: (id: string) => request<DelegatedTask>(`/api/tasks/${encodeURIComponent(id)}`),
-  createProject: (data: { name: string; path: string; memoryWorkspace?: string; memoryProject?: string }) =>
-    request<Project>('/api/projects', { method: 'POST', body: JSON.stringify(data) }),
+  createProject: (data: {
+    name: string;
+    path?: string;
+    remote?: { hostId: string; path: string };
+    memoryWorkspace?: string;
+    memoryProject?: string;
+  }) => request<Project>('/api/projects', { method: 'POST', body: JSON.stringify(data) }),
+  remoteHosts: () => request<RemoteHost[]>('/api/remote-hosts'),
+  probeRemoteHost: (data: { target: string; port: number }) =>
+    request<RemoteProbe>('/api/remote-hosts/probe', { method: 'POST', body: JSON.stringify(data) }),
+  createRemoteHost: (data: {
+    name: string;
+    target: string;
+    port: number;
+    fingerprint: string;
+    hostKey: string;
+    runnerPath: string;
+  }) => request<RemoteHost>('/api/remote-hosts', { method: 'POST', body: JSON.stringify(data) }),
+  testRemoteHost: (id: string) =>
+    request<{ ok: true; detail: string }>(`/api/remote-hosts/${encodeURIComponent(id)}/test`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    }),
+  installRemoteHost: (id: string) =>
+    request<{ ok: true; detail: string }>(`/api/remote-hosts/${encodeURIComponent(id)}/install`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    }),
+  disconnectRemoteHost: (id: string) =>
+    request<{ ok: true }>(`/api/remote-hosts/${encodeURIComponent(id)}/disconnect`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    }),
+  deleteRemoteHost: (id: string) =>
+    request<void>(`/api/remote-hosts/${encodeURIComponent(id)}`, { method: 'DELETE', body: JSON.stringify({}) }),
+  remoteDirectories: (id: string, path: string) =>
+    request<{ entries: { name: string; path: string; directory: boolean }[]; truncated: boolean }>(
+      `/api/remote-hosts/${encodeURIComponent(id)}/directories?path=${encodeURIComponent(path)}`,
+    ),
+  remoteGit: (id: string, operation: 'status' | 'diff' | 'log') =>
+    request<{ output: string }>(
+      `/api/projects/${encodeURIComponent(id)}/remote-git?operation=${encodeURIComponent(operation)}`,
+    ),
   updateProject: (id: string, data: ProjectPatch) =>
     request<Project>(`/api/projects/${encodeURIComponent(id)}`, { method: 'PATCH', body: serializeProjectPatch(data) }),
   coordination: (id: string) => request<ProjectCoordination>(`/api/projects/${encodeURIComponent(id)}/coordination`),

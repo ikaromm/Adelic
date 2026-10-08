@@ -39,6 +39,8 @@ export function createProviderRegistry(
       return listing;
     },
     async run(input: RunInput, emit: (event: ProviderEvent) => void, signal: AbortSignal) {
+      if (input.remote && input.providerId !== 'codex' && input.providerId !== 'kiro')
+        throw new Error('Projetos SSH remotos exigem Codex ou Kiro locais.');
       const provider = providers[input.providerId];
       try {
         return await provider.run(

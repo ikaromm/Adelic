@@ -91,7 +91,10 @@ export function sessionsRoutes({ store, orchestrator, providerList }: BackendCon
     const { projectId, model, thinking } = parsed.data;
     const project = projectId ? store.getProject(projectId) : undefined;
     if (projectId && !project) return error(res, 404, 'common.projectNotFound');
-    const providerId = parsed.data.providerId ?? store.getSettings()!.defaultProviderId;
+    const preferred = parsed.data.providerId ?? store.getSettings()!.defaultProviderId;
+    if (project?.remote && parsed.data.providerId && preferred !== 'codex' && preferred !== 'kiro')
+      return error(res, 409, 'remotehosts.provider');
+    const providerId = project?.remote && preferred !== 'codex' && preferred !== 'kiro' ? 'codex' : preferred;
     const mode = parsed.data.mode ?? store.getSettings()!.defaultMode;
     const needsCatalog = Boolean(model) || (thinking !== undefined && thinking !== 'auto');
     const catalog = needsCatalog ? await providerList() : undefined;
@@ -166,6 +169,8 @@ export function sessionsRoutes({ store, orchestrator, providerList }: BackendCon
     if (snapshot.worktree && projectId !== snapshot.projectId) return error(res, 409, 'sessions.dropWorktreeFirst');
     const title = body.title ?? snapshot.title;
     const providerId = body.providerId ?? snapshot.providerId;
+    if (projectId && store.getProject(projectId)?.remote && providerId !== 'codex' && providerId !== 'kiro')
+      return error(res, 409, 'remotehosts.provider');
     const providerChanged = providerId !== snapshot.providerId;
     let model = snapshot.model;
     if (providerChanged && body.model === undefined) model = undefined;

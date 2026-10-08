@@ -32,6 +32,7 @@ import { DetachedMemorySetting } from './DetachedMemorySetting';
 import { HooksCard } from './HooksCard';
 import { ProjectTools } from './ProjectTools';
 import { RemoteAccessCard } from './RemoteAccessCard';
+import { RemoteHostsCard } from './RemoteHostsCard';
 import { LANGUAGE_PREFERENCES, t as translate, useI18n, type LanguagePreference } from '../i18n';
 import { modeLabel } from '../ComposerMenus';
 
@@ -162,7 +163,7 @@ export function SettingsPage({
               </select>
             </div>
           </section>
-          {project && (
+          {project && !project.remote && (
             <ProjectTools
               project={project}
               data={data}
@@ -180,8 +181,24 @@ export function SettingsPage({
               onRefreshProject={onRefreshProject}
             />
           )}
+          {project?.remote && (
+            <section className="settings-card">
+              <div className="settings-card-heading">
+                <div className="settings-card-icon blue">
+                  <Code2 size={17} />
+                </div>
+                <div>
+                  <h2>{t('remoteHosts.projectTitle')}</h2>
+                  <p>{t('remoteHosts.projectRestrictions')}</p>
+                </div>
+              </div>
+              <div className="remote-git-location">
+                <strong>{project.remote.path}</strong>
+              </div>
+            </section>
+          )}
 
-          {project && <HooksCard project={project} />}
+          {project && !project.remote && <HooksCard project={project} />}
 
           {project && (
             <ProjectSpendCard
@@ -465,6 +482,7 @@ export function SettingsPage({
             internetManualApproval={data.settings.internetManualApproval !== false}
             onInternetManualApproval={(enabled) => onSetting('internetManualApproval', enabled)}
           />
+          {isLoopbackPage() && <RemoteHostsCard />}
           <section className="settings-card">
             <div className="settings-card-heading">
               <div className="settings-card-icon blue">
@@ -503,7 +521,7 @@ export function SettingsPage({
             )}
           </section>
           <CommandsCard projects={data.projects} project={project} />
-          <McpCard project={project} onProjectUpdated={onProjectUpdated} />
+          {!project?.remote && <McpCard project={project} onProjectUpdated={onProjectUpdated} />}
           <DiagnosticsCard
             updateCheck={data.settings.updateCheck === true}
             onUpdateCheck={(enabled) => onSetting('updateCheck', enabled)}

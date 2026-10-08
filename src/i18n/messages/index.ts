@@ -30,6 +30,7 @@ export { default as 'project-tools' } from './project-tools';
 export { default as pwa } from './pwa';
 export { default as queue } from './queue';
 export { default as 'remote-access' } from './remote-access';
+export { default as 'remote-hosts' } from './remote-hosts';
 export { default as search } from './search';
 export { default as 'self-update' } from './self-update';
 export { default as settings } from './settings';

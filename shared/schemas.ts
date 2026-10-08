@@ -146,7 +146,11 @@ export const MemoryScopeSchema = z.object({ workspace: text(100), project: text(
 
 export const CreateProjectSchema = z.object({
   name: text(),
-  path: text(4096),
+  path: text(4096).optional(),
+  remote: z
+    .object({ hostId: text(100), path: text(4096).refine((p) => p.startsWith('/') && !p.includes('\0')) })
+    .strict()
+    .optional(),
   memoryWorkspace: text(100),
   memoryProject: text(100),
 });

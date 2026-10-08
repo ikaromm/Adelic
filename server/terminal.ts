@@ -56,6 +56,7 @@ export interface StartTerminalCommand {
   command: string;
   sandbox: Sandbox;
   timeoutMs: number;
+  remote?: (signal: AbortSignal) => Promise<{ stdout: string; stderr: string; exitCode: number }>;
 }
 
 /** Variables never passed to the user's commands: Adelic's own credentials. */
@@ -75,6 +76,7 @@ interface Entry {
   info: TerminalCommandInfo;
   output: TerminalCommand['output'];
   child?: ChildProcess;
+  remoteController?: AbortController;
   /** PID (outside the sandbox) of the sandbox's init; resolves undefined without one. */
   sandboxPid?: Promise<number | undefined>;
   timer?: NodeJS.Timeout;
@@ -197,6 +199,22 @@ export class TerminalService {
     this.prune(request.projectId);
     this.emit(request.projectId, { type: 'command', command: { ...entry.info } });
     const started = Date.now();
+    if (request.remote) {
+      const controller = new AbortController();
+      entry.remoteController = controller;
+      entry.timer = setTimeout(() => void this.terminate(entry, 'timeout'), request.timeoutMs);
+      void request
+        .remote(controller.signal)
+        .then((result) => {
+          this.append(entry, 'stdout', result.stdout);
+          this.append(entry, 'stderr', result.stderr);
+          this.end(entry, started, entry.stopping ?? 'exited', entry.stopping ? null : result.exitCode);
+        })
+        .catch((error: unknown) => {
+          this.end(entry, started, entry.stopping ?? 'failed', null, undefined, (error as Error).message);
+        });
+      return { ...entry.info };
+    }
     let wrapped: Awaited<ReturnType<TerminalWrapper>>;
     try {
       wrapped = await this.wrap('/bin/sh', ['-c', request.command], request.cwd, request.sandbox);
@@ -243,6 +261,7 @@ export class TerminalService {
   private async terminate(entry: Entry, reason: 'stopped' | 'timeout') {
     if (entry.info.status !== 'running') return;
     entry.stopping ??= reason;
+    entry.remoteController?.abort();
     const child = entry.child;
     if (child) {
       const pid = await entry.sandboxPid;

@@ -5,7 +5,18 @@ import globals from 'globals';
 import prettier from 'eslint-config-prettier';
 
 export default tseslint.config(
-  { ignores: ['dist/', 'release/', '.desktop/', '.adelic/', 'coverage/', 'node_modules/'] },
+  {
+    ignores: [
+      'dist/',
+      'release/',
+      '.desktop/',
+      '.adelic/',
+      'coverage/',
+      'test-results/',
+      'playwright-report/',
+      'node_modules/',
+    ],
+  },
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {

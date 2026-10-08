@@ -1,3 +1,4 @@
+import type { RemoteHost } from '../shared/remote-hosts.js';
 import { chmodSync, constants, copyFileSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
@@ -139,6 +140,19 @@ export class Store {
     return (this.db.prepare(`SELECT data FROM ${table} ${where}`).all(...values) as { data: string }[]).map(
       (r) => JSON.parse(r.data) as T,
     );
+  }
+  listRemoteHosts() {
+    return this.rows<RemoteHost>('ssh_hosts', 'ORDER BY rowid DESC');
+  }
+  getRemoteHost(id: string) {
+    return this.get<RemoteHost>('ssh_hosts', id);
+  }
+  putRemoteHost(host: RemoteHost) {
+    this.put('ssh_hosts', host.id, host);
+    return host;
+  }
+  deleteRemoteHost(id: string) {
+    this.db.prepare('DELETE FROM ssh_hosts WHERE id=?').run(id);
   }
   getProject(id: string) {
     const p = this.get<Project>('projects', id);

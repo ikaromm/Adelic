@@ -220,8 +220,8 @@ const entryOf = (command: SavedCommand): CommandEntry => ({
  * Every command visible from `project` (or only global and built-in ones without a
  * project), sorted by name, with `active: false` on the ones shadowed by precedence.
  */
-export function listCommands(store: Store, project?: Pick<Project, 'id' | 'path'>): CommandList {
-  const repo = project ? loadRepoCommands(project.path) : { commands: [], issues: [] };
+export function listCommands(store: Store, project?: Pick<Project, 'id' | 'path' | 'remote'>): CommandList {
+  const repo = project && !project.remote ? loadRepoCommands(project.path) : { commands: [], issues: [] };
   const all = [
     ...(project ? store.listCommands(project.id).map(entryOf) : []),
     ...repo.commands.map((c) => ({ ...c, projectId: project!.id })),
@@ -242,7 +242,7 @@ export function listCommands(store: Store, project?: Pick<Project, 'id' | 'path'
 }
 
 /** The winning command named `name`, if any. */
-export function findCommand(store: Store, name: string, project?: Pick<Project, 'id' | 'path'>) {
+export function findCommand(store: Store, name: string, project?: Pick<Project, 'id' | 'path' | 'remote'>) {
   return listCommands(store, project).commands.find((c) => c.active && c.name === name);
 }
 
@@ -257,7 +257,11 @@ export interface ExpandedMessage {
  * Expands a message that starts with `/name`. Unknown names, and anything that is not a
  * command, come back unchanged so they are sent as plain text.
  */
-export function expandMessage(store: Store, content: string, project?: Pick<Project, 'id' | 'path'>): ExpandedMessage {
+export function expandMessage(
+  store: Store,
+  content: string,
+  project?: Pick<Project, 'id' | 'path' | 'remote'>,
+): ExpandedMessage {
   const slash = parseSlash(content);
   // Reserved names are actions handled before expansion; their description is never a prompt.
   if (!slash || RESERVED_COMMAND_NAMES.includes(slash.name)) return { prompt: content };

@@ -16,6 +16,7 @@ export { default as orchestrator } from './orchestrator.js';
 export { default as plans } from './plans.js';
 export { default as projects } from './projects.js';
 export { default as remote } from './remote.js';
+export { default as remotehosts } from './remote-hosts.js';
 export { default as sessions } from './sessions.js';
 export { default as settings } from './settings.js';
 export { default as spend } from './spend.js';

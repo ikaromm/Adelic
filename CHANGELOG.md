@@ -2,6 +2,10 @@
 
 ## Não publicado
 
+_Nada ainda._
+
+## 0.5.3 — 2026-10-08
+
 - Acompanhamento visível da execução, comandos SSH com estados consistentes, cadastro por aliases do SSH config e correção do alinhamento na observabilidade.
 - Orientação do turno pelo compositor, arquivamento de conversas e subpastas virtuais para organizar conversas de projetos.
 

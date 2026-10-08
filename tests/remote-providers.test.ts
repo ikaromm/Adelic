@@ -298,17 +298,23 @@ import fs from 'node:fs';
 import net from 'node:net';
 const telemetry=${JSON.stringify(logSocket)};
 const send=(m)=>process.stdout.write(JSON.stringify(m)+'\\n');
-const append=(m)=>{const s=net.createConnection(telemetry,()=>s.end(JSON.stringify(m)+'\\n'));};
-readline.createInterface({input:process.stdin}).on('line',(line)=>{
+const append=(m)=>new Promise((resolve,reject)=>{
+ const s=net.createConnection(telemetry);
+ let response='';
+ s.once('error',reject);
+ s.on('data',(chunk)=>{response+=chunk.toString();if(response.includes('\\n'))resolve();});
+ s.once('connect',()=>s.end(JSON.stringify(m)+'\\n'));
+});
+readline.createInterface({input:process.stdin}).on('line',async (line)=>{
  const m=JSON.parse(line);
  if(m.method==='initialize')send({jsonrpc:'2.0',id:m.id,result:{agentCapabilities:{promptCapabilities:{image:false}}}});
  else if(m.method==='session/new'){
   const agent=JSON.parse(fs.readFileSync(process.env.KIRO_HOME+'/agents/adelic-runtime.json','utf8'));
-  append({agent,session:m.params});
+  await append({agent,session:m.params});
   send({jsonrpc:'2.0',id:m.id,result:{sessionId:'no-tools-session'}});
  }
  else if(m.method==='session/prompt'){
-  append({prompt:m.params});
+  await append({prompt:m.params});
   send({jsonrpc:'2.0',id:m.id,result:{stopReason:'end_turn'}});
  }
 });
@@ -323,7 +329,10 @@ readline.createInterface({input:process.stdin}).on('line',(line)=>{
       socket.on('data', (chunk) => {
         data += chunk.toString('utf8');
         const newline = data.indexOf('\n');
-        if (newline >= 0) rows.push(JSON.parse(data.slice(0, newline)) as Record<string, unknown>);
+        if (newline >= 0) {
+          rows.push(JSON.parse(data.slice(0, newline)) as Record<string, unknown>);
+          socket.end('ok\n');
+        }
       });
     });
     await new Promise<void>((resolve, reject) => {
@@ -356,9 +365,9 @@ readline.createInterface({input:process.stdin}).on('line',(line)=>{
       const row = rows.find((item) => item.agent);
       expect(row?.agent).toMatchObject({ tools: [], allowedTools: [], mcpServers: {} });
       expect(row?.session).toMatchObject({ mcpServers: [] });
-      expect((rows.find((item) => item.prompt)?.prompt as { prompt?: unknown })?.prompt).not.toContain(
-        '[PROJETO REMOTO]',
-      );
+      const promptRow = rows.find((item) => item.prompt);
+      expect(promptRow).toBeDefined();
+      expect((promptRow?.prompt as { prompt?: unknown }).prompt).not.toContain('[PROJETO REMOTO]');
       expect(remoteCalls).toEqual([]);
     } finally {
       await provider.shutdown();

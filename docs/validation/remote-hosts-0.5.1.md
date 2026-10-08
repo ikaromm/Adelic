@@ -35,3 +35,7 @@ Distribuição suportada: AppImage Linux x86_64. No computador cliente são nece
 - `npm run build`: passou; aviso de tamanho do bundle permanece.
 - `E2E_PORT=4490 PLAYWRIGHT_CHROMIUM=/usr/bin/chromium npm run test:e2e`: 119 fluxos passaram. O fixture do fluxo remoto simula SSH; os testes reais com Docker e provedores são separados, conforme descrito acima.
 - Revisões independentes de integração e segurança concluídas sem bloqueador confirmado restante no escopo revisado.
+- `npm run coverage`: passou, incluindo os pisos de cobertura de `server/` e `shared/`.
+- `npm run package:linux` e `npm run desktop:smoke`: AppImage 0.5.1 gerado e validado fora do checkout, com DOM pronto, instância única, histórico preservado e backend encerrado ao fechar.
+- Release `v0.5.1` publicada pelo workflow de Release; AppImage publicado baixado, checksum conferido e instalado em `~/.local/share/adelic-desktop/Adelic.AppImage`. O smoke test da cópia instalada também passou. A cópia anterior foi preservada como `Adelic.AppImage.v0.5.0`.
+- O CI encontrou uma corrida na telemetria do fixture Kiro sem ferramentas: o processo simulado respondia antes da captura do prompt e era encerrado. O fixture agora espera um ACK antes de responder; a asserção exige a captura. A correção altera somente o teste, sem mudança no runtime publicado.

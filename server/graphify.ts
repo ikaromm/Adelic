@@ -1,3 +1,4 @@
+import { withObservation } from './observability.js';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { access, mkdir, readFile, readdir, realpath, stat, writeFile } from 'node:fs/promises';
@@ -75,6 +76,18 @@ export async function findGraphify() {
 }
 
 function runCli(
+  binary: string,
+  args: string[],
+  cwd: string,
+  timeoutMs: number,
+  signal?: AbortSignal,
+  environment: Record<string, string> = {},
+) {
+  return withObservation('graph.cli', 'graph', {}, () =>
+    runCliUnobserved(binary, args, cwd, timeoutMs, signal, environment),
+  );
+}
+function runCliUnobserved(
   binary: string,
   args: string[],
   cwd: string,

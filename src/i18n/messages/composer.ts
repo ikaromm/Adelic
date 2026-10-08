@@ -43,8 +43,11 @@ export default defineMessages(
     'composer.permissions': 'Permissões',
     'composer.permissions.readAuto': 'Leitura · Auto',
     'composer.permissions.readManual': 'Leitura · Manual',
+    'composer.permissions.readAutomatic': 'Leitura · Automático',
     'composer.permissions.writeAuto': 'Escrita · Auto',
     'composer.permissions.writeManual': 'Escrita · Manual',
+    'composer.permissions.writeAutomatic': 'Escrita · Automático',
+    'composer.permissions.automaticDetail': 'Mantém a autonomia Automática definida para esta conversa ou projeto.',
     'composer.permissions.autoDetail': 'Confirmação automática quando disponível.',
     'composer.permissions.manualDetail': 'Pede confirmação quando o agente oferece essa opção.',
     'composer.permissions.writeAutoDetail': 'Alterações permitidas no projeto.',
@@ -52,6 +55,25 @@ export default defineMessages(
       'O Codex aprova leituras reconhecidas. No Kiro, os pedidos ainda exigem confirmação; Claude não oferece confirmação pelo Adelic. Leituras e alterações feitas sem solicitação e scripts podem alterar ou excluir arquivos.',
     'composer.permissions.internetForced':
       'Pela internet, comandos sempre pedem aprovação (Configurações › Acesso remoto).',
+    'composer.autonomy.label': 'Autonomia',
+    'composer.autonomy.inherit': 'Herdar configuração',
+    'composer.autonomy.effective': 'Modo efetivo: {mode}',
+    'composer.autonomy.mode.autoSafe': 'Automático seguro',
+    'composer.autonomy.mode.manual': 'Manual',
+    'composer.autonomy.mode.automatic': 'Automático',
+    'composer.autonomy.autoSafeDetail': 'Autoriza apenas operações seguras conhecidas.',
+    'composer.autonomy.manualDetail': 'Pede aprovação para operações que exigem confirmação.',
+    'composer.autonomy.automaticDetail':
+      'Codex e Kiro usam um executor isolado, sem credenciais pessoais nem rede. O sandbox é separado.',
+    'composer.autonomy.automaticUnavailable':
+      'Indisponível neste runtime. Automático exige Codex ou Kiro com suporte a ferramentas.',
+    'composer.autonomy.hint': 'Este modo fica salvo nesta conversa. O sandbox continua separado.',
+    'composer.autonomy.remoteHint':
+      'Em SSH, somente Automático escolhido explicitamente habilita aprovações automáticas; Manual e Auto-seguro são executados como Manual.',
+    'composer.autonomy.remoteSafeDetail': 'Em SSH, Auto-seguro é tratado como Manual.',
+    'composer.autonomy.remoteAutomaticDetail':
+      'Opt-in explícito: aprova automaticamente as operações do agente no projeto SSH.',
+    'composer.autonomy.localOnly': 'A autonomia só pode ser alterada no acesso local.',
     // Model menu
     'composer.model.label': 'Escolher modelo e provedor',
     'composer.model.default': 'Modelo padrão',
@@ -119,8 +141,11 @@ export default defineMessages(
     'composer.permissions': 'Permissions',
     'composer.permissions.readAuto': 'Read · Auto',
     'composer.permissions.readManual': 'Read · Manual',
+    'composer.permissions.readAutomatic': 'Read · Automatic',
     'composer.permissions.writeAuto': 'Write · Auto',
     'composer.permissions.writeManual': 'Write · Manual',
+    'composer.permissions.writeAutomatic': 'Write · Automatic',
+    'composer.permissions.automaticDetail': 'Keeps the Automatic autonomy set for this conversation or project.',
     'composer.permissions.autoDetail': 'Automatic confirmation when available.',
     'composer.permissions.manualDetail': 'Asks for confirmation when the agent offers that option.',
     'composer.permissions.writeAutoDetail': 'Changes allowed in the project.',
@@ -128,6 +153,25 @@ export default defineMessages(
       'Codex approves recognized reads. In Kiro, requests still need confirmation; Claude offers no confirmation through Adelic. Unrequested reads and changes, and scripts, can modify or delete files.',
     'composer.permissions.internetForced':
       'Over the internet, commands always ask for approval (Settings › Remote access).',
+    'composer.autonomy.label': 'Autonomy',
+    'composer.autonomy.inherit': 'Inherit configuration',
+    'composer.autonomy.effective': 'Effective mode: {mode}',
+    'composer.autonomy.mode.autoSafe': 'Safe automatic',
+    'composer.autonomy.mode.manual': 'Manual',
+    'composer.autonomy.mode.automatic': 'Automatic',
+    'composer.autonomy.autoSafeDetail': 'Allows only known safe operations.',
+    'composer.autonomy.manualDetail': 'Asks for approval for operations that require confirmation.',
+    'composer.autonomy.automaticDetail':
+      'Codex and Kiro use an isolated executor without personal credentials or network access. The sandbox is separate.',
+    'composer.autonomy.automaticUnavailable':
+      'Unavailable for this runtime. Automatic requires Codex or Kiro with tool support.',
+    'composer.autonomy.hint': 'This mode is saved for this conversation. The sandbox remains separate.',
+    'composer.autonomy.remoteHint':
+      'For SSH, only an explicit Automatic choice enables automatic approvals; Manual and Safe automatic run as Manual.',
+    'composer.autonomy.remoteSafeDetail': 'On SSH, Safe automatic is treated as Manual.',
+    'composer.autonomy.remoteAutomaticDetail':
+      'Explicit opt-in: automatically approve agent operations in this SSH project.',
+    'composer.autonomy.localOnly': 'Autonomy can only be changed through local access.',
     'composer.model.label': 'Choose model and provider',
     'composer.model.default': 'Default model',
     'composer.model.providerDefault': 'Uses the provider default',

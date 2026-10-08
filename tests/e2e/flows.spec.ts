@@ -68,11 +68,11 @@ test('cancels a running answer and re-enables the composer', async ({ page }) =>
   await expect(page.locator('.markdown-content strong', { hasText: 'E2E' }).last()).toBeVisible();
 });
 
-test('navigates to Activity and Settings and shows the scripted provider', async ({ page }) => {
+test('navigates to Observability and Settings and shows the scripted provider', async ({ page }) => {
   await page.goto('/');
   const nav = page.getByRole('navigation', { name: 'Navegação principal' });
-  await nav.getByRole('button', { name: 'Atividade' }).click();
-  await expect(page.getByRole('heading', { name: 'Atividade', level: 1 })).toBeVisible();
+  await nav.getByRole('button', { name: 'Observabilidade' }).click();
+  await expect(page.getByRole('heading', { name: 'Observabilidade', level: 1 })).toBeVisible();
   await nav.getByRole('button', { name: 'Configurações' }).click();
   await expect(page.getByRole('heading', { name: 'Configurações', level: 1 })).toBeVisible();
   await expect(page.locator('.provider-row', { hasText: 'Codex (E2E)' })).toContainText(
@@ -210,10 +210,10 @@ test('shows tokens reported by the provider and leaves an unknown cost unknown',
   await expect(activity).not.toContainText('US$');
   await page
     .getByRole('navigation', { name: 'Navegação principal' })
-    .getByRole('button', { name: 'Atividade' })
+    .getByRole('button', { name: 'Observabilidade' })
     .click();
-  await expect(page.locator('.metric-card', { hasText: 'Tokens' })).toContainText('custo não informado');
-  await expect(page.locator('.run-table-row').first()).toContainText('4,6 mil entrada · 5 saída');
+  await expect(page.locator('.metric-card', { hasText: 'Tokens' })).toContainText('Custo não informado');
+  await expect(page.locator('.observability-run').first()).toContainText('4,6 mil entrada · 5 saída');
 });
 
 test('creates a project from the dialog with a slugged memory id', async ({ page }) => {

@@ -1,3 +1,4 @@
+import { withObservation } from '../observability.js';
 import { spawn, type ChildProcess, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { z } from 'zod';
@@ -135,14 +136,20 @@ export class JsonRpcProcess {
   request(method: string, params: unknown, timeoutMs = 30_000): Promise<unknown> {
     if (this.closed || !this.child.stdin.writable) return Promise.reject(new Error('Provider process is closed'));
     const id = this.nextId++;
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pending.delete(id);
-        reject(new Error(`Provider request timed out: ${method}`));
-      }, timeoutMs);
-      this.pending.set(id, { resolve, reject, timer });
-      this.child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`);
-    });
+    return withObservation(
+      'provider.rpc',
+      'process',
+      {},
+      () =>
+        new Promise((resolve, reject) => {
+          const timer = setTimeout(() => {
+            this.pending.delete(id);
+            reject(new Error(`Provider request timed out: ${method}`));
+          }, timeoutMs);
+          this.pending.set(id, { resolve, reject, timer });
+          this.child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`);
+        }),
+    );
   }
 
   respond(id: string | number, result: unknown) {

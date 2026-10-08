@@ -69,7 +69,7 @@ Mesmo com login válido, estas operações recebem `403`:
 - Criar, trocar ou apagar a conta, ligar ou desligar o Funnel, ver o estado do Tailscale e mudar as opções de acesso remoto. A tailnet também não pode fazer isso: só este computador pode. Encerrar sessões continua possível de qualquer sessão.
 - O token `ADELIC_REMOTE_TOKEN` (`Bearer` ou login por token).
 
-As aprovações continuam funcionando pela internet. Com **Pela internet, exigir aprovação manual para comandos** ligado (padrão), cada execução iniciada de uma sessão pela internet usa `approvalMode: 'manual'`. Isso vale para mensagens, fila, editar e reenviar, tentar de novo, tarefas de plano aprovado e correção automática; a configuração global não muda.
+As aprovações continuam funcionando pela internet. Com **Pela internet, exigir aprovação manual para comandos** ligado (padrão), cada execução iniciada de uma sessão pela internet usa `approvalMode: 'manual'`. Isso vale para mensagens, fila, editar e reenviar, tentar de novo, tarefas de plano aprovado e correção automática; a configuração global não muda. Essa exigência prevalece também sobre Automático escolhido no projeto ou conversa; configurar esse modo exige acesso local.
 
 ## Cabeçalhos
 

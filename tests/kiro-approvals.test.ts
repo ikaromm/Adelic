@@ -134,6 +134,37 @@ else if(m.method==='session/cancel')send({jsonrpc:'2.0',id:m.id,result:{}});
       expect(byCommand('cat package.json')).toMatchObject({ status: 'denied', blocked: 'cat *' });
       expect(byCommand('rm package.json')).toMatchObject({ status: 'pending' });
       expect(approvals.find((a) => a.title.startsWith('Writing'))).toMatchObject({ status: 'pending' });
+
+      const automaticProvider = new KiroProvider();
+      try {
+        const automaticApprovals: Approval[] = [];
+        await automaticProvider.run(
+          { ...input, runId: 'kiro-automatic', approvalMode: 'automatic' },
+          (event) => {
+            if (event.type === 'approval') automaticApprovals.push(event.approval);
+          },
+          new AbortController().signal,
+        );
+        const allResponses = (await readFile(log, 'utf8'))
+          .trim()
+          .split('\n')
+          .map((line) => JSON.parse(line) as { id: number; result: { outcome: { optionId?: string } } });
+        const autoResponses = new Map(
+          allResponses.slice(requests.length).map((r) => [r.id, r.result.outcome.optionId]),
+        );
+        for (const id of [51, 52, 53, 54, 55, 56]) expect(autoResponses.get(id)).toBe('reject');
+        expect(automaticApprovals.filter((approval) => approval.status === 'pending')).toEqual([]);
+        expect(automaticApprovals.find((approval) => approval.command === 'rm package.json')).toMatchObject({
+          status: 'denied',
+          decision: { source: 'project-rule', rule: 'native-runtime-disabled' },
+        });
+        expect(automaticApprovals.find((approval) => approval.command === 'cat package.json')).toMatchObject({
+          status: 'denied',
+          blocked: 'cat *',
+        });
+      } finally {
+        await automaticProvider.shutdown();
+      }
     } finally {
       if (prior.bin === undefined) delete process.env.ADELIC_KIRO_BIN;
       else process.env.ADELIC_KIRO_BIN = prior.bin;

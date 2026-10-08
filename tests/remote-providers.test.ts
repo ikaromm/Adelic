@@ -99,20 +99,20 @@ readline.createInterface({input:process.stdin}).on('line',(line)=>{
       undefined,
       async (command, args) => ({ command, args }),
     );
-    const approvals: string[] = [];
+    const approvals: { id: string; command?: string }[] = [];
     const events: { type: string; name?: string; status?: string }[] = [];
     try {
       const resultPromise = provider.run(
         input(process.cwd(), runtime),
         (event) => {
-          if (event.type === 'approval') approvals.push(event.approval.id);
+          if (event.type === 'approval') approvals.push({ id: event.approval.id, command: event.approval.command });
           if (event.type === 'tool') events.push({ type: event.type, name: event.name, status: event.status });
         },
         new AbortController().signal,
       );
       for (let i = 0; i < 200 && approvals.length === 0; i++) await new Promise((resolve) => setTimeout(resolve, 10));
       expect(approvals).toHaveLength(1);
-      await provider.approve(approvals[0]!, 'deny');
+      await provider.approve(approvals[0]!.id, 'deny');
       await expect(resultPromise).resolves.toMatchObject({ stopReason: 'completed' });
       expect(remoteCalls).toEqual([]);
       const requests = (await readFile(requestLog, 'utf8'))
@@ -154,6 +154,7 @@ readline.createInterface({input:process.stdin}).on('line',(line)=>{
         contentItems: [{ type: 'inputText', text: 'Denied by user.' }],
       });
       expect(approvals).toHaveLength(1);
+      expect(approvals[0]).toMatchObject({ command: 'uname -a' });
       expect(events).toContainEqual({ type: 'tool', name: 'exec', status: 'pending' });
       expect(events).toContainEqual({ type: 'tool', name: 'exec', status: 'denied' });
       expect(JSON.stringify(requests)).not.toContain('should-not-run');
@@ -389,6 +390,212 @@ readline.createInterface({input:process.stdin}).on('line',async (line)=>{
       await new Promise<void>((resolve) => telemetry.close(() => resolve()));
       if (prior === undefined) delete process.env.ADELIC_KIRO_BIN;
       else process.env.ADELIC_KIRO_BIN = prior;
+    }
+  });
+
+  it('auto-approves fixed SSH and isolated local tools only in an automatic run', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'adelic-remote-automatic-'));
+    dirs.push(directory);
+    const fake = path.join(directory, 'codex.mjs');
+    await writeFile(
+      fake,
+      `#!/usr/bin/env node
+import readline from 'node:readline';
+const send=(m)=>process.stdout.write(JSON.stringify(m)+'\\n');
+const thread='remote-automatic-thread';
+readline.createInterface({input:process.stdin}).on('line',(line)=>{
+ const m=JSON.parse(line);
+ if(m.method==='initialize')send({jsonrpc:'2.0',id:m.id,result:{}});
+ else if(m.method==='config/read')send({jsonrpc:'2.0',id:m.id,result:{config:{mcp_servers:{}}}});
+ else if(m.method==='thread/start')send({jsonrpc:'2.0',id:m.id,result:{thread:{id:thread}}});
+ else if(m.method==='turn/start'){
+  send({jsonrpc:'2.0',id:m.id,result:{turn:{id:'turn-1'}}});
+  send({jsonrpc:'2.0',method:'turn/started',params:{threadId:thread,turn:{id:'turn-1'}}});
+  send({jsonrpc:'2.0',id:701,method:'item/tool/call',params:{threadId:thread,turnId:'turn-1',callId:'exec-call',tool:'adelic_remote_exec',arguments:{command:'npm test'}}});
+ }
+ else if(m.id===701)send({jsonrpc:'2.0',id:702,method:'item/tool/call',params:{threadId:thread,turnId:'turn-1',callId:'write-call',tool:'adelic_remote_write_file',arguments:{path:'README.md',content:'updated remotely'}}});
+ else if(m.id===702)send({jsonrpc:'2.0',method:'turn/completed',params:{threadId:thread,turn:{id:'turn-1',status:'completed'}}});
+});
+`,
+    );
+    await chmod(fake, 0o700);
+    const calls: { tool: string; args: unknown }[] = [];
+    const runtime: RemoteRuntime = {
+      label: 'explicit-build-host',
+      root: '/srv/work/project',
+      executionKind: 'ssh',
+      call: async (tool, args) => {
+        calls.push({ tool, args });
+        return 'completed';
+      },
+    };
+    const runAutomatic = async (executor: RemoteRuntime) => {
+      const provider = new CodexProvider(
+        async () => fake,
+        undefined,
+        undefined,
+        undefined,
+        async (command, args) => ({ command, args }),
+      );
+      const approvals: { status: string; decision?: unknown; detail: string }[] = [];
+      try {
+        await expect(
+          provider.run(
+            { ...input(process.cwd(), executor), approvalMode: 'automatic' },
+            (event) => {
+              if (event.type === 'approval')
+                approvals.push({
+                  status: event.approval.status,
+                  decision: event.approval.decision,
+                  detail: event.approval.detail,
+                });
+            },
+            new AbortController().signal,
+          ),
+        ).resolves.toMatchObject({ stopReason: 'completed' });
+        return approvals;
+      } finally {
+        await provider.shutdown();
+      }
+    };
+    const sshApprovals = await runAutomatic(runtime);
+    const localApprovals = await runAutomatic({
+      label: 'Local isolado',
+      root: '/workspace',
+      executionKind: 'isolated-local',
+      call: async (tool, args) => {
+        calls.push({ tool, args });
+        return 'completed';
+      },
+    });
+    expect(calls.map(({ tool }) => tool)).toEqual(['exec', 'write_file', 'exec', 'write_file']);
+    expect(sshApprovals).toHaveLength(2);
+    expect(sshApprovals.every((item) => item.status === 'approved')).toBe(true);
+    expect(
+      sshApprovals.every((item) => (item.decision as { rule: string }).rule === 'explicit-remote-project-opt-in'),
+    ).toBe(true);
+    expect(localApprovals).toHaveLength(2);
+    expect(localApprovals.every((item) => item.status === 'approved')).toBe(true);
+    expect(localApprovals.every((item) => (item.decision as { rule: string }).rule === 'isolated-local-executor')).toBe(
+      true,
+    );
+    expect(
+      [...sshApprovals, ...localApprovals].every(({ detail }) => detail.includes('[redigidos no registro automático]')),
+    ).toBe(true);
+    expect([...sshApprovals, ...localApprovals].every(({ detail }) => !detail.includes('updated remotely'))).toBe(true);
+  });
+
+  it('denies blocked remote commands before approval or execution in Codex and Kiro', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'adelic-remote-blocked-'));
+    dirs.push(directory);
+    const fakeCodex = path.join(directory, 'codex.mjs');
+    await writeFile(
+      fakeCodex,
+      `#!/usr/bin/env node
+import readline from 'node:readline';
+const send=(m)=>process.stdout.write(JSON.stringify(m)+'\\n');
+const thread='blocked-thread';
+readline.createInterface({input:process.stdin}).on('line',(line)=>{
+ const m=JSON.parse(line);
+ if(m.method==='initialize')send({jsonrpc:'2.0',id:m.id,result:{}});
+ else if(m.method==='config/read')send({jsonrpc:'2.0',id:m.id,result:{config:{mcp_servers:{}}}});
+ else if(m.method==='thread/start')send({jsonrpc:'2.0',id:m.id,result:{thread:{id:thread}}});
+ else if(m.method==='turn/start'){
+  send({jsonrpc:'2.0',id:m.id,result:{turn:{id:'turn-1'}}});
+  send({jsonrpc:'2.0',method:'turn/started',params:{threadId:thread,turn:{id:'turn-1'}}});
+  send({jsonrpc:'2.0',id:701,method:'item/tool/call',params:{threadId:thread,turnId:'turn-1',callId:'blocked-call',tool:'adelic_remote_exec',arguments:{command:'rm -rf *'}}});
+ }
+ else if(m.id===701)send({jsonrpc:'2.0',method:'turn/completed',params:{threadId:thread,turn:{id:'turn-1',status:'completed'}}});
+});
+`,
+    );
+    const fakeKiro = path.join(directory, 'kiro.mjs');
+    await writeFile(
+      fakeKiro,
+      `#!/usr/bin/env node
+import readline from 'node:readline';
+import net from 'node:net';
+const send=(m)=>process.stdout.write(JSON.stringify(m)+'\\n');
+let servers=[];
+readline.createInterface({input:process.stdin}).on('line',(line)=>{
+ const m=JSON.parse(line);
+ if(m.method==='initialize')send({jsonrpc:'2.0',id:m.id,result:{agentCapabilities:{promptCapabilities:{image:false}}}});
+ else if(m.method==='session/new'){servers=m.params.mcpServers;send({jsonrpc:'2.0',id:m.id,result:{sessionId:'blocked-session'}});}
+ else if(m.method==='_kiro.dev/commands/execute')send({jsonrpc:'2.0',id:m.id,result:{data:{servers:servers.map((item)=>({name:item.name}))}}});
+ else if(m.method==='session/prompt'){
+  const bridge=servers.find((item)=>item.name==='adelic_remote');
+  const socketPath=bridge.env.find((item)=>item.name==='ADELIC_REMOTE_SOCKET').value;
+  const socket=net.createConnection(socketPath,()=>socket.write(JSON.stringify({id:'blocked-call',tool:'exec',args:{command:'rm -rf *'}})+'\\n'));
+  let data='';socket.on('data',(chunk)=>{data+=chunk.toString();if(data.includes('\\n')){send({jsonrpc:'2.0',id:m.id,result:{stopReason:'end_turn'}});socket.end();}});
+ }
+});
+`,
+    );
+    await Promise.all([chmod(fakeCodex, 0o700), chmod(fakeKiro, 0o700)]);
+    const priorKiro = process.env.ADELIC_KIRO_BIN;
+    process.env.ADELIC_KIRO_BIN = fakeKiro;
+    const calls: unknown[] = [];
+    const runtime: RemoteRuntime = {
+      label: 'blocked-host',
+      root: '/remote/project',
+      executionKind: 'ssh',
+      call: async (...args) => {
+        calls.push(args);
+        return 'must not execute';
+      },
+    };
+    const scenarios = [
+      { provider: 'codex' as const, mode: 'automatic' as const },
+      { provider: 'codex' as const, mode: 'manual' as const },
+      { provider: 'kiro' as const, mode: 'automatic' as const },
+      { provider: 'kiro' as const, mode: 'manual' as const },
+    ];
+    try {
+      for (const scenario of scenarios) {
+        const approvals: Record<string, unknown>[] = [];
+        const tools: Record<string, unknown>[] = [];
+        const provider =
+          scenario.provider === 'codex'
+            ? new CodexProvider(
+                async () => fakeCodex,
+                undefined,
+                undefined,
+                undefined,
+                async (command, args) => ({ command, args }),
+              )
+            : new KiroProvider();
+        try {
+          await expect(
+            provider.run(
+              {
+                ...input(directory, runtime),
+                providerId: scenario.provider,
+                approvalMode: scenario.mode,
+                blockedCommands: ['rm *'],
+              },
+              (event) => {
+                if (event.type === 'approval') approvals.push(event.approval as unknown as Record<string, unknown>);
+                if (event.type === 'tool') tools.push(event as unknown as Record<string, unknown>);
+              },
+              new AbortController().signal,
+            ),
+          ).resolves.toMatchObject({ stopReason: 'completed' });
+          expect(approvals).toHaveLength(1);
+          expect(approvals[0]).toMatchObject({
+            status: 'denied',
+            command: 'rm -rf *',
+            blocked: 'rm *',
+            decision: { source: 'project-rule', rule: 'blocked-command' },
+          });
+          expect(tools).toContainEqual(expect.objectContaining({ name: 'exec', status: 'denied' }));
+        } finally {
+          await provider.shutdown();
+        }
+      }
+      expect(calls).toEqual([]);
+    } finally {
+      if (priorKiro === undefined) delete process.env.ADELIC_KIRO_BIN;
+      else process.env.ADELIC_KIRO_BIN = priorKiro;
     }
   });
 });

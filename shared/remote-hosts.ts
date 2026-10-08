@@ -25,6 +25,7 @@ export type RemoteToolName = 'exec' | 'read_file' | 'write_file' | 'list' | 'sta
 export interface RemoteRuntime {
   label: string;
   root: string;
-  /** Runs only after the local provider's explicit per-call approval. */
+  executionKind?: 'ssh' | 'isolated-local';
+  /** Fixed tool executor; each call follows the captured run approval policy. */
   call(tool: RemoteToolName, args: Record<string, unknown>, signal: AbortSignal): Promise<unknown>;
 }

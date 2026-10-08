@@ -28,6 +28,7 @@ import {
 } from 'lucide-react';
 import type {
   AttachmentMeta,
+  ApprovalMode,
   Bootstrap,
   GraphifyQueryResult,
   GraphifyStatus,
@@ -40,7 +41,7 @@ import type {
   StreamEvent,
 } from '../shared/contracts';
 import type { RemoteHost } from '../shared/remote-hosts';
-import { api, eventsUrl } from './api';
+import { api, eventsUrl, reportClientEvent } from './api';
 import SharedMemoryPage from './MemoryPage';
 import { BrandMark } from './BrandMark';
 import { ErrorBoundary } from './ErrorBoundary';
@@ -119,6 +120,11 @@ export default function App() {
   const [selectedSession, setSelectedSession] = useState('');
   const [selectedProject, setSelectedProject] = useState('');
   const [page, setPage] = useState<Page>('chat');
+  const previousPageRef = useRef<Page>(page);
+  useEffect(() => {
+    if (previousPageRef.current !== page) reportClientEvent('ui.navigation');
+    previousPageRef.current = page;
+  }, [page]);
   const [memoryVisited, setMemoryVisited] = useState(false);
   // Bumped by `automations` stream events so the Automações page reloads its list.
   const [automationsVersion, setAutomationsVersion] = useState(0);
@@ -167,7 +173,7 @@ export default function App() {
   const settingsPendingRef = useRef(0);
   const permissionTargetRef = useRef<{
     sandbox: 'read-only' | 'workspace-write';
-    approvalMode: 'auto-safe' | 'manual';
+    approvalMode: ApprovalMode;
   } | null>(null);
   const [settingsPending, setSettingsPending] = useState(false);
   const [pendingSendSession, setPendingSendSession] = useState('');
@@ -1035,6 +1041,7 @@ export default function App() {
   async function changeSession(
     patch: Partial<Pick<Session, 'providerId' | 'mode' | 'projectId' | 'thinking' | 'planFirst'>> & {
       model?: string | null;
+      approvalMode?: ApprovalMode | null;
     },
   ) {
     if (!session || busy || session.activeRunId) return;
@@ -1175,6 +1182,23 @@ export default function App() {
     }
   }
 
+  async function changeProjectApprovalMode(projectId: string, approvalMode: ApprovalMode | null) {
+    try {
+      const updated = await api.updateProject(projectId, { approvalMode });
+      const snapshot = projectSnapshotRef.current;
+      if (snapshot) {
+        const next = {
+          ...snapshot,
+          projects: snapshot.projects.map((item) => (item.id === projectId ? updated : item)),
+        };
+        projectSnapshotRef.current = next;
+        setData(next);
+      }
+    } catch (error) {
+      if (selectedProjectRef.current === projectId) setNotice((error as Error).message);
+    }
+  }
+
   async function changeGraphifyEnabled(projectId: string, enabled: boolean) {
     const action = ++graphActionRef.current;
     setProjectBusy(true);
@@ -1278,17 +1302,34 @@ export default function App() {
       };
       void updatePermissions(
         key === 'sandbox' ? (value as 'read-only' | 'workspace-write') : current.sandbox,
-        key === 'approvalMode' ? (value as 'auto-safe' | 'manual') : current.approvalMode,
+        key === 'approvalMode' ? (value as ApprovalMode) : current.approvalMode,
       );
       return;
     }
     await enqueueSettingsPatch({ [key]: value } as never);
   }
 
-  async function updatePermissions(sandbox: 'read-only' | 'workspace-write', approvalMode: 'auto-safe' | 'manual') {
+  async function updatePermissions(sandbox: 'read-only' | 'workspace-write', approvalMode: ApprovalMode) {
     if (!data) return;
     permissionTargetRef.current = { sandbox, approvalMode };
     await enqueueSettingsPatch({ sandbox, approvalMode });
+  }
+
+  async function updateChatPermissions(sandbox: 'read-only' | 'workspace-write', approvalMode: ApprovalMode) {
+    if (!data) return;
+    // In an override context, sandbox remains a global setting while approval changes belong to
+    // this conversation. Preserve an inherited Automatic mode when only the sandbox is changed.
+    if (configuredApprovalMode != null) {
+      await enqueueSettingsPatch({ sandbox });
+      if (approvalMode !== 'automatic' && approvalMode !== effectiveApprovalMode) await changeSession({ approvalMode });
+      return;
+    }
+    // Automatic can be inherited globally; selecting its matching entry only changes sandbox.
+    if (approvalMode === 'automatic') {
+      await enqueueSettingsPatch({ sandbox });
+      return;
+    }
+    await updatePermissions(sandbox, approvalMode);
   }
 
   async function changeSpendLimits(patch: SpendLimitsPatch) {
@@ -1338,7 +1379,22 @@ export default function App() {
   // From the internet the server runs everything with manual approval unless the computer turned
   // that off (server/http/auth.ts forceManualApproval); the composer shows the effective mode.
   const internetForcesManual = accessKind === 'internet' && data?.settings.internetManualApproval !== false;
-  const effectiveApprovalMode = internetForcesManual ? 'manual' : data?.settings.approvalMode || 'auto-safe';
+  const inheritedApprovalMode: ApprovalMode =
+    project?.remote && data?.settings.approvalMode === 'automatic'
+      ? 'manual'
+      : data?.settings.approvalMode || 'auto-safe';
+  const configuredApprovalMode = session?.approvalMode ?? project?.approvalMode;
+  const effectiveApprovalMode: ApprovalMode = internetForcesManual
+    ? 'manual'
+    : project?.remote
+      ? configuredApprovalMode === 'automatic'
+        ? 'automatic'
+        : 'manual'
+      : (configuredApprovalMode ?? inheritedApprovalMode);
+  const localApprovalControls = accessKind === 'local';
+  const supportsAutomaticApproval =
+    (provider?.id === 'codex' || provider?.id === 'kiro') && provider.capabilities.tools;
+  const automaticApprovalUnavailable = !supportsAutomaticApproval;
   // Settings.language is the source of truth; localStorage mirrors it for the login screen.
   const serverLanguage = data?.settings.language;
   const hasData = Boolean(data);
@@ -1520,7 +1576,7 @@ export default function App() {
           className="new-chat-button"
           title={t('sidebar.newTitle', { shortcut })}
           onClick={() => void newConversation()}
-          disabled={busy}
+          disabled={busy || !data}
         >
           <Plus size={16} />
           <span className="sidebar-label">{t('sidebar.new')}</span>
@@ -1615,7 +1671,7 @@ export default function App() {
                         className="project-new-chat"
                         aria-label={t('sidebar.newIn', { project: item.name })}
                         title={t('sidebar.newIn', { project: item.name })}
-                        disabled={busy}
+                        disabled={busy || !data}
                         onClick={() => void newConversation(item.id)}
                       >
                         <Plus size={14} />
@@ -1784,13 +1840,17 @@ export default function App() {
                 </div>
                 <h1>{t('app.welcome.title')}</h1>
                 <p>{t('app.welcome.text')}</p>
-                <button className="primary-button" onClick={() => void newConversation()} disabled={busy}>
+                <button className="primary-button" onClick={() => void newConversation()} disabled={busy || !data}>
                   <Plus size={16} /> {t('app.welcome.start')}
                 </button>
                 <div className="welcome-suggestions">
                   {[t('app.welcome.suggestion1'), t('app.welcome.suggestion2'), t('app.welcome.suggestion3')].map(
                     (suggestion) => (
-                      <button key={suggestion} onClick={() => void startSuggestedPrompt(suggestion)} disabled={busy}>
+                      <button
+                        key={suggestion}
+                        onClick={() => void startSuggestedPrompt(suggestion)}
+                        disabled={busy || !data}
+                      >
                         <span>{suggestion}</span>
                         <ArrowUp size={14} aria-hidden="true" />
                       </button>
@@ -2115,6 +2175,67 @@ export default function App() {
                           onChange={(value) => void changeSession({ thinking: value })}
                         />
                         <ChoiceMenu
+                          label={t('composer.autonomy.label')}
+                          icon={<Sparkles size={14} />}
+                          width={310}
+                          value={session.approvalMode || 'inherit'}
+                          disabled={!localApprovalControls || busy || Boolean(session.activeRunId)}
+                          title={
+                            !localApprovalControls
+                              ? t('composer.autonomy.localOnly')
+                              : automaticApprovalUnavailable
+                                ? t('composer.autonomy.automaticUnavailable')
+                                : undefined
+                          }
+                          options={[
+                            {
+                              value: 'inherit',
+                              label: t('composer.autonomy.inherit'),
+                              detail: t('composer.autonomy.effective', {
+                                mode: t(
+                                  effectiveApprovalMode === 'automatic'
+                                    ? 'composer.autonomy.mode.automatic'
+                                    : effectiveApprovalMode === 'manual'
+                                      ? 'composer.autonomy.mode.manual'
+                                      : 'composer.autonomy.mode.autoSafe',
+                                ),
+                              }),
+                            },
+                            {
+                              value: 'auto-safe',
+                              label: t('composer.autonomy.mode.autoSafe'),
+                              detail: project?.remote
+                                ? t('composer.autonomy.remoteSafeDetail')
+                                : t('composer.autonomy.autoSafeDetail'),
+                            },
+                            {
+                              value: 'manual',
+                              label: t('composer.autonomy.mode.manual'),
+                              detail: t('composer.autonomy.manualDetail'),
+                            },
+                            {
+                              value: 'automatic',
+                              label: t('composer.autonomy.mode.automatic'),
+                              detail: automaticApprovalUnavailable
+                                ? t('composer.autonomy.automaticUnavailable')
+                                : project?.remote
+                                  ? t('composer.autonomy.remoteAutomaticDetail')
+                                  : t('composer.autonomy.automaticDetail'),
+                              disabled: automaticApprovalUnavailable,
+                            },
+                          ]}
+                          hint={
+                            automaticApprovalUnavailable
+                              ? t('composer.autonomy.automaticUnavailable')
+                              : project?.remote
+                                ? t('composer.autonomy.remoteHint')
+                                : t('composer.autonomy.hint')
+                          }
+                          onChange={(value) =>
+                            void changeSession({ approvalMode: value === 'inherit' ? null : (value as ApprovalMode) })
+                          }
+                        />
+                        <ChoiceMenu
                           label={t('composer.permissions')}
                           icon={internetForcesManual ? <Lock size={14} /> : <Shield size={14} />}
                           width={340}
@@ -2135,6 +2256,15 @@ export default function App() {
                               label: t('composer.permissions.readManual'),
                               detail: t('composer.permissions.manualDetail'),
                             },
+                            ...(effectiveApprovalMode === 'automatic'
+                              ? [
+                                  {
+                                    value: 'read-only|automatic',
+                                    label: t('composer.permissions.readAutomatic'),
+                                    detail: t('composer.permissions.automaticDetail'),
+                                  },
+                                ]
+                              : []),
                             {
                               value: 'workspace-write|auto-safe',
                               label: t('composer.permissions.writeAuto'),
@@ -2148,14 +2278,23 @@ export default function App() {
                               label: t('composer.permissions.writeManual'),
                               detail: t('composer.permissions.manualDetail'),
                             },
+                            ...(effectiveApprovalMode === 'automatic'
+                              ? [
+                                  {
+                                    value: 'workspace-write|automatic',
+                                    label: t('composer.permissions.writeAutomatic'),
+                                    detail: t('composer.permissions.automaticDetail'),
+                                  },
+                                ]
+                              : []),
                           ]}
                           hint={t('composer.permissions.hint')}
                           onChange={(value) => {
                             const [sandbox, approvalMode] = value.split('|') as [
                               'read-only' | 'workspace-write',
-                              'auto-safe' | 'manual',
+                              ApprovalMode,
                             ];
-                            void updatePermissions(sandbox, approvalMode);
+                            void updateChatPermissions(sandbox, approvalMode);
                           }}
                         />
                         <ConversationMenu
@@ -2293,7 +2432,7 @@ export default function App() {
         )}
         {data && page === 'activity' && (
           <ErrorBoundary scope={t('app.scope.activity')} resetKey={page}>
-            <ActivityPage runs={data.runs} providers={data.providers} />
+            <ActivityPage providers={data.providers} projects={data.projects} sessions={data.sessions} />
           </ErrorBoundary>
         )}
         {data && page === 'automations' && (
@@ -2350,6 +2489,10 @@ export default function App() {
                     : current,
                 )
               }
+              onProjectApprovalMode={(approvalMode) =>
+                project && void changeProjectApprovalMode(project.id, approvalMode)
+              }
+              localApprovalControls={localApprovalControls}
               usage={usage.report}
               usageError={usage.error}
               onSpendLimits={(patch) => void changeSpendLimits(patch)}

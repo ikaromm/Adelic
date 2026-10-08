@@ -1,4 +1,5 @@
 import type {
+  ApprovalMode,
   AttachmentMeta,
   Compaction,
   ConversationSearchHit,
@@ -35,6 +36,11 @@ import type {
 } from '../shared/contracts';
 import type { CommandList, CommandMode, SavedCommand } from '../shared/commands';
 import type { VoiceStatus } from '../shared/voice';
+import type {
+  ObservabilityFilters,
+  ObservabilityOverviewResponse,
+  ObservabilityTraceResponse,
+} from '../shared/observability';
 import type { TerminalCommand, TerminalCommandInfo, TerminalState } from '../shared/terminal';
 import type { Automation, AutomationSchedule } from '../shared/automations';
 import type { CheckResult, ProjectHooks } from '../shared/hooks';
@@ -92,6 +98,7 @@ type ProjectPatch = {
   /** `null` clears all; a field set to `null` clears that limit. */
   spendLimits?: { monthlyTokens?: number | null; monthlyCostUsd?: number | null } | null;
   git?: Project['git'];
+  approvalMode?: ApprovalMode | null;
 };
 /** Settings › Limites de uso: absent keeps a field, `null` clears a limit. */
 export type SpendLimitsPatch = {
@@ -164,6 +171,20 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
   bootstrap: () => request<Bootstrap>('/api/bootstrap'),
   health: () => request<Health>('/api/health'),
+  observability: (filters: ObservabilityFilters) => {
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(filters)) {
+      if (value !== undefined && value !== '') query.set(key, String(value));
+    }
+    return request<ObservabilityOverviewResponse>(`/api/observability?${query.toString()}`);
+  },
+  observabilityTrace: (runId: string) =>
+    request<ObservabilityTraceResponse>(`/api/observability/runs/${encodeURIComponent(runId)}`),
+  observabilityClientEvent: (name: 'ui.error' | 'ui.navigation', status: 'success' | 'error' = 'success') =>
+    request<{ accepted: boolean }>('/api/observability/client-events', {
+      method: 'POST',
+      body: JSON.stringify({ name, status }),
+    }),
   diagnostics: () => request<Diagnostics>('/api/diagnostics'),
   searchConversations: (q: string) =>
     request<{ hits: ConversationSearchHit[] }>(`/api/search?q=${encodeURIComponent(q)}`),
@@ -248,6 +269,7 @@ export const api = {
     id: string,
     data: Partial<Pick<Session, 'title' | 'providerId' | 'mode' | 'projectId' | 'thinking' | 'planFirst'>> & {
       model?: string | null;
+      approvalMode?: ApprovalMode | null;
     },
   ) => request<Session>(`/api/sessions/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(data) }),
   /** "Continuar com outro agente" (docs/specs/provider-handoff.md). */
@@ -584,6 +606,20 @@ export const api = {
       { method: 'POST', body: JSON.stringify({}) },
     ),
 };
+
+const clientEventLastSent = new Map<string, number>();
+const isLoopbackHost = (host: string) =>
+  host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '[::1]';
+
+/** Best-effort, metadata-only frontend telemetry; never sends events from remote browser origins. */
+export function reportClientEvent(name: 'ui.error' | 'ui.navigation', status: 'success' | 'error' = 'success') {
+  if (typeof window === 'undefined' || !isLoopbackHost(window.location.hostname)) return;
+  const now = Date.now();
+  const minimumInterval = name === 'ui.error' ? 10_000 : 1_000;
+  if (now - (clientEventLastSent.get(name) ?? 0) < minimumInterval) return;
+  clientEventLastSent.set(name, now);
+  void api.observabilityClientEvent(name, status).catch(() => undefined);
+}
 /** Editable fields of an automation; `null` on providerId, model or mode goes back to the defaults. */
 export interface AutomationInput {
   name: string;

@@ -23,6 +23,15 @@ export default defineMessages(
     'settings.memoryScope.workspace': 'Workspace',
     'settings.memoryScope.project': 'Projeto na memória',
     'settings.memoryScope.save': 'Salvar escopo',
+    'settings.projectAutonomy.title': 'Autonomia do projeto',
+    'settings.projectAutonomy.detail': 'Define o modo padrão das conversas deste projeto.',
+    'settings.projectAutonomy.remoteDetail':
+      'Conversas SSH só usam automático quando o projeto ou a conversa escolhem esse modo explicitamente.',
+    'settings.projectAutonomy.mode': 'Modo de aprovação',
+    'settings.projectAutonomy.inherit': 'Herdar configuração global',
+    'settings.projectAutonomy.hint':
+      'Automático exige Codex ou Kiro com suporte a ferramentas. A conversa pode ter uma escolha própria; o sandbox é configurado separadamente.',
+    'settings.projectAutonomy.localOnly': 'A autonomia só pode ser alterada pelo acesso local.',
     // Agents and responses
     'settings.agents.title': 'Agentes e respostas',
     'settings.agents.detail': 'Escolha os padrões para novas conversas.',
@@ -125,6 +134,15 @@ export default defineMessages(
     'settings.memoryScope.workspace': 'Workspace',
     'settings.memoryScope.project': 'Memory project',
     'settings.memoryScope.save': 'Save scope',
+    'settings.projectAutonomy.title': 'Project autonomy',
+    'settings.projectAutonomy.detail': 'Sets the default mode for conversations in this project.',
+    'settings.projectAutonomy.remoteDetail':
+      'SSH conversations use automatic mode only when the project or conversation explicitly selects it.',
+    'settings.projectAutonomy.mode': 'Approval mode',
+    'settings.projectAutonomy.inherit': 'Inherit global configuration',
+    'settings.projectAutonomy.hint':
+      'Automatic requires Codex or Kiro with tool support. A conversation can have its own choice; the sandbox is configured separately.',
+    'settings.projectAutonomy.localOnly': 'Autonomy can only be changed through local access.',
     'settings.agents.title': 'Agents and responses',
     'settings.agents.detail': 'Choose the defaults for new conversations.',
     'settings.agents.default': 'Default agent',

@@ -1,3 +1,4 @@
+import type { ObservationInput } from '../shared/observability.js';
 import { startServer, type RunningServer } from './runtime.js';
 
 type ParentMessage =
@@ -41,6 +42,18 @@ function eventData(event: unknown): unknown {
 
 parentPort?.on('message', (event) => {
   const message = eventData(event);
+  if (
+    message &&
+    typeof message === 'object' &&
+    'type' in message &&
+    message.type === 'observation' &&
+    'observation' in message
+  ) {
+    const observation = message.observation as ObservationInput;
+    if (['desktop.ready', 'desktop.window.ready', 'desktop.backend.exit'].includes(observation?.name))
+      runtime?.recordObservation?.({ ...observation, component: 'desktop' });
+    return;
+  }
   if (
     message &&
     typeof message === 'object' &&

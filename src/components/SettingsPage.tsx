@@ -7,6 +7,7 @@ import {
   CHARS_PER_TOKEN,
 } from '../../shared/compaction';
 import type {
+  ApprovalMode,
   Bootstrap,
   GraphifyQueryResult,
   GraphifyStatus,
@@ -57,6 +58,8 @@ export function SettingsPage({
   onModelFallback,
   onDetachedMemory,
   onProjectUpdated,
+  onProjectApprovalMode,
+  localApprovalControls,
   usage,
   usageError,
   onSpendLimits,
@@ -103,6 +106,8 @@ export function SettingsPage({
   onModelFallback: (value: NonNullable<Settings['modelFallback']>) => void;
   onDetachedMemory: (scope: Settings['detachedMemory']) => void;
   onProjectUpdated: (project: Project) => void;
+  onProjectApprovalMode: (approvalMode: ApprovalMode | null) => void;
+  localApprovalControls: boolean;
   /** Usage report of this page's scope (the project, when one is open). */
   usage: UsageReport | null;
   usageError: string;
@@ -180,6 +185,40 @@ export function SettingsPage({
               onIndexGraphify={onIndexGraphify}
               onRefreshProject={onRefreshProject}
             />
+          )}
+          {project && (
+            <section className="settings-card">
+              <div className="settings-card-heading">
+                <div className="settings-card-icon amber">
+                  <Shield size={17} />
+                </div>
+                <div>
+                  <h2>{t('settings.projectAutonomy.title')}</h2>
+                  <p>
+                    {t(project.remote ? 'settings.projectAutonomy.remoteDetail' : 'settings.projectAutonomy.detail')}
+                  </p>
+                </div>
+              </div>
+              <label className="setting-row">
+                <strong>{t('settings.projectAutonomy.mode')}</strong>
+                <select
+                  value={project.approvalMode || 'inherit'}
+                  disabled={!localApprovalControls}
+                  title={!localApprovalControls ? t('settings.projectAutonomy.localOnly') : undefined}
+                  onChange={(event) =>
+                    onProjectApprovalMode(
+                      event.target.value === 'inherit' ? null : (event.target.value as ApprovalMode),
+                    )
+                  }
+                >
+                  <option value="inherit">{t('settings.projectAutonomy.inherit')}</option>
+                  <option value="auto-safe">{t('composer.autonomy.mode.autoSafe')}</option>
+                  <option value="manual">{t('composer.autonomy.mode.manual')}</option>
+                  <option value="automatic">{t('composer.autonomy.mode.automatic')}</option>
+                </select>
+              </label>
+              <small className="setting-help">{t('settings.projectAutonomy.hint')}</small>
+            </section>
           )}
           {project?.remote && (
             <section className="settings-card">

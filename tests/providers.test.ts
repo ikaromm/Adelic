@@ -4,12 +4,13 @@ import { readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { CodexProvider } from '../server/providers/codex';
+import { ClaudeProvider } from '../server/providers/claude';
 import { kiroToolEvent, KiroProvider, parseKiroDoctorAuth, parseKiroModelCatalog } from '../server/providers/kiro';
 import { JsonRpcProcess } from '../server/providers/process';
 import { boundedPrompt } from '../server/providers/common';
 import { CommandScope, runCommand } from '../server/providers/command';
 import { bubblewrap } from '../server/providers/sandbox';
-import type { RunInput } from '../shared/contracts';
+import type { Approval, RunInput } from '../shared/contracts';
 
 const temporaryDirectories: string[] = [];
 afterEach(async () => {
@@ -42,6 +43,25 @@ function fixtureCodex(binary: string, dataDir?: string) {
 }
 
 describe('provider runtime helpers', () => {
+  it('refuses Claude automatic mode because the integration cannot restrict native tools', async () => {
+    const provider = new ClaudeProvider();
+    const input: RunInput = {
+      ...runInput('ask'),
+      providerId: 'claude',
+      cwd: process.cwd(),
+      sandbox: 'workspace-write',
+      approvalMode: 'automatic',
+      plan: { ...runInput('ask').plan, tools: true },
+    };
+    try {
+      await expect(provider.run(input, () => {}, new AbortController().signal)).rejects.toThrow(
+        /Modo automático isolado indisponível para Claude/,
+      );
+    } finally {
+      await provider.shutdown();
+    }
+  });
+
   it('uses real bubblewrap to allow writes only inside the workspace', async () => {
     const base = path.join(process.cwd(), '.adelic/test-tmp');
     await mkdir(base, { recursive: true });
@@ -568,6 +588,10 @@ rl.on('line', (line) => {
     }
     if (process.env.FAKE_SCENARIO === 'command-approval') {
       send({ jsonrpc: '2.0', id: 700, method: 'item/commandExecution/requestApproval', params: { threadId: 'thread-1', turnId, command: 'pwd', cwd: process.cwd(), reason: 'fixture', environmentId: 'local' } });
+      return;
+    }
+    if (process.env.FAKE_SCENARIO === 'automatic-command-approval') {
+      send({ jsonrpc: '2.0', id: 700, method: 'item/commandExecution/requestApproval', params: { threadId: 'thread-1', turnId, command: 'rm note.txt', cwd: process.cwd(), environmentId: 'local' } });
       return;
     }
     if (process.env.FAKE_SCENARIO === 'safe-bash') {
@@ -1627,6 +1651,59 @@ rl.on('line', (line) => {
     }
   });
 
+  it('denies native Codex file approvals in automatic mode without the isolated runtime', async () => {
+    const priorScenario = process.env.FAKE_SCENARIO,
+      priorGrant = process.env.FAKE_GRANT;
+    process.env.FAKE_SCENARIO = 'file-grant';
+    const testTmp = path.join(process.cwd(), '.adelic/test-tmp');
+    await mkdir(testTmp, { recursive: true });
+    const fixture = await mkdtemp(path.join(testTmp, 'codex-auto-grant-'));
+    temporaryDirectories.push(fixture);
+    const workspace = path.join(fixture, 'workspace'),
+      outside = path.join(fixture, 'outside');
+    await mkdir(workspace);
+    await mkdir(outside);
+    const provider = fixtureCodex(await fakeServer());
+    const runWithGrant = async (grantRoot: string, sandbox: 'workspace-write' | 'read-only') => {
+      process.env.FAKE_GRANT = grantRoot;
+      const approvals: Approval[] = [];
+      await provider.run(
+        {
+          ...runInput('change a file'),
+          runId: `automatic-grant-${Math.random()}`,
+          cwd: workspace,
+          sandbox,
+          approvalMode: 'automatic',
+          plan: { ...runInput('x').plan, tools: true },
+        },
+        (event) => {
+          if (event.type === 'approval') approvals.push(event.approval);
+        },
+        new AbortController().signal,
+      );
+      return approvals.at(-1);
+    };
+    try {
+      expect(await runWithGrant(path.join(workspace, 'new-file.txt'), 'workspace-write')).toMatchObject({
+        status: 'denied',
+        decision: { source: 'project-rule', rule: 'native-runtime-disabled' },
+      });
+      expect(await runWithGrant(path.join(outside, 'outside.txt'), 'workspace-write')).toMatchObject({
+        status: 'denied',
+        decision: { source: 'project-rule', rule: 'native-runtime-disabled' },
+      });
+      expect(await runWithGrant(path.join(workspace, 'readonly.txt'), 'read-only')).toMatchObject({
+        status: 'denied',
+      });
+    } finally {
+      await provider.shutdown();
+      if (priorScenario === undefined) delete process.env.FAKE_SCENARIO;
+      else process.env.FAKE_SCENARIO = priorScenario;
+      if (priorGrant === undefined) delete process.env.FAKE_GRANT;
+      else process.env.FAKE_GRANT = priorGrant;
+    }
+  });
+
   it('uses untrusted Codex approvals and audits a safe command auto-approval without creating a pending owner', async () => {
     const prior = process.env.FAKE_SCENARIO;
     process.env.FAKE_SCENARIO = 'command-approval';
@@ -1679,6 +1756,44 @@ rl.on('line', (line) => {
     }
   });
 
+  it('denies native Codex shell approvals in automatic mode and records the isolation rule', async () => {
+    const prior = process.env.FAKE_SCENARIO;
+    process.env.FAKE_SCENARIO = 'automatic-command-approval';
+    const testTmp = path.join(process.cwd(), '.adelic/test-tmp');
+    await mkdir(testTmp, { recursive: true });
+    const directory = await mkdtemp(path.join(testTmp, 'codex-automatic-'));
+    temporaryDirectories.push(directory);
+    const approvalLog = path.join(directory, 'approval.json');
+    const provider = fixtureCodex(await fakeServer({ approvalLog }));
+    const approvals: { status: string; decision?: unknown }[] = [];
+    try {
+      await expect(
+        provider.run(
+          {
+            ...runInput('remove temporary file'),
+            cwd: directory,
+            approvalMode: 'automatic',
+            sandbox: 'workspace-write',
+            plan: { ...runInput('x').plan, tools: true },
+          },
+          (event) => {
+            if (event.type === 'approval')
+              approvals.push({ status: event.approval.status, decision: event.approval.decision });
+          },
+          new AbortController().signal,
+        ),
+      ).resolves.toMatchObject({ stopReason: 'completed' });
+      expect(approvals).toEqual([
+        { status: 'denied', decision: { source: 'project-rule', rule: 'native-runtime-disabled' } },
+      ]);
+      expect(JSON.parse(await readFile(approvalLog, 'utf8'))).toMatchObject({ result: { decision: 'decline' } });
+    } finally {
+      await provider.shutdown();
+      if (prior === undefined) delete process.env.FAKE_SCENARIO;
+      else process.env.FAKE_SCENARIO = prior;
+    }
+  });
+
   it('declines a command blocked by the project rules even when the safe classifier would approve it', async () => {
     const prior = process.env.FAKE_SCENARIO;
     process.env.FAKE_SCENARIO = 'command-approval';
@@ -1696,7 +1811,7 @@ rl.on('line', (line) => {
             ...runInput('run a safe command'),
             cwd: directory,
             sandbox: 'workspace-write' as const,
-            approvalMode: 'auto-safe',
+            approvalMode: 'automatic',
             blockedCommands: ['p*d'],
             plan: { ...runInput('x').plan, tools: true },
           },

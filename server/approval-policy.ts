@@ -7,7 +7,7 @@ import { gitConfigSafety, globalIgnoreFiles, readConfig, type GitConfigSources }
 
 export type ApprovalInput = {
   tools: unknown;
-  mode?: 'auto-safe' | 'manual';
+  mode?: 'auto-safe' | 'manual' | 'automatic';
   kind: 'command' | 'file' | 'permissions' | 'stdin' | 'unknown';
   command?: unknown;
   cwd?: unknown;
@@ -15,6 +15,8 @@ export type ApprovalInput = {
   sandbox: 'read-only' | 'workspace-write';
   networkApprovalContext?: unknown;
   trustedNonLoginShell?: boolean;
+  /** Set only by an adapter after its Adelic bubblewrap sandbox is active. */
+  sandboxVerified?: boolean;
   /**
    * Graphify paths Adelic itself uses (server/graphify.ts). With both set, exactly the query
    * Adelic suggests to agents is auto-approved; absent → graphify asks like any program.
@@ -1038,8 +1040,16 @@ export async function classifyApproval(input: ApprovalInput): Promise<ApprovalRe
     return pending('Workspace ou diretório não existe.');
   }
   if (cwd !== root && !cwd.startsWith(root + path.sep)) return pending('Diretório fora do workspace.');
+  if (input.mode === 'automatic' && input.sandboxVerified)
+    return { decision: 'auto', reason: `Aprovado pelo modo automático sob sandbox ${input.sandbox}.` };
   const parsed = parseShell(input.command, { portable: input.portableShell === true });
   if (!parsed.ok) return pending(`Sintaxe de shell não suportada: ${parsed.reason}`);
+  // Without a verified bubblewrap boundary, automatic approval cannot expand the command grammar.
+  if (input.mode === 'automatic') {
+    if (!input.trustedNonLoginShell)
+      return pending('Execução automática exige runtime local verificado e sandbox ativo.');
+    return { decision: 'auto', reason: `Aprovado pelo modo automático sob sandbox ${input.sandbox}.` };
+  }
   const { commands } = parsed.script;
   // One canonical non-login bash layer, only in the Codex-internal trusted context.
   const only = commands.length === 1 ? commands[0]! : undefined;

@@ -65,6 +65,17 @@ describe('classifyApproval', () => {
       expect((await run(c, { trustedNonLoginShell: true })).decision).toBe('pending');
     expect((await run('/usr/bin/bash -c "uname -a"', { trustedNonLoginShell: false })).decision).toBe('pending');
   });
+  it('allows automatic Codex commands only for the verified sandboxed runtime', async () => {
+    expect((await run('rm note.txt', { mode: 'automatic', trustedNonLoginShell: true })).decision).toBe('auto');
+    expect((await run('rm note.txt', { mode: 'automatic', trustedNonLoginShell: false })).decision).toBe('pending');
+    expect(
+      (await run('rm note.txt', { mode: 'automatic', trustedNonLoginShell: true, networkApprovalContext: {} }))
+        .decision,
+    ).toBe('pending');
+    expect((await run('rm note.txt', { mode: 'automatic', trustedNonLoginShell: true, tools: false })).decision).toBe(
+      'deny',
+    );
+  });
   it('rejects sensitive, external, missing and symlinked paths', async () => {
     await writeFile(path.join(root, '.env'), 'secret');
     await symlink('/etc/passwd', path.join(root, 'escape'));

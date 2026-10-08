@@ -1,3 +1,4 @@
+import { withObservation } from './observability.js';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import type { Sandbox } from '../shared/contracts.js';
@@ -199,6 +200,11 @@ export class TerminalService {
     this.prune(request.projectId);
     this.emit(request.projectId, { type: 'command', command: { ...entry.info } });
     const started = Date.now();
+    void withObservation('terminal.command', 'terminal', { projectId: request.projectId }, async () => {
+      await entry.done;
+      if (entry.info.status === 'stopped') throw Object.assign(new Error('Terminal cancelled'), { name: 'AbortError' });
+      if (entry.info.status !== 'exited' || entry.info.exitCode !== 0) throw new Error('Terminal failed');
+    }).catch(() => undefined);
     if (request.remote) {
       const controller = new AbortController();
       entry.remoteController = controller;

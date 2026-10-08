@@ -1,3 +1,4 @@
+import { withObservation } from './observability.js';
 import type { Integration, MemoryHit, MemoryPage, Project } from '../shared/contracts.js';
 import type { MemoryScope } from '../shared/contracts.js';
 import { createHash } from 'node:crypto';
@@ -23,6 +24,9 @@ let integrationRefresh: Promise<Integration> | undefined;
 let integrationCheckedAt = 0;
 
 async function rpc(method: string, params: unknown, timeoutMs = 2500): Promise<unknown> {
+  return withObservation('memory.rpc', 'memory', {}, () => rpcUnobserved(method, params, timeoutMs));
+}
+async function rpcUnobserved(method: string, params: unknown, timeoutMs = 2500): Promise<unknown> {
   const url = endpoint(),
     auth = memoryAuthHeaders();
   const controller = new AbortController();

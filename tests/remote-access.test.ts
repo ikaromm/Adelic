@@ -861,7 +861,7 @@ describe('internet runs use manual approval', () => {
     const p = json(
       await call(`${localUrl}/api/projects`, {
         method: 'POST',
-        body: { name: 'P', path: project, memoryWorkspace: 'w', memoryProject: 'p' },
+        body: { name: 'P', path: project, memoryWorkspace: 'w', memoryProject: 'p', approvalMode: 'automatic' },
       }),
     );
     const session = json(
@@ -870,6 +870,24 @@ describe('internet runs use manual approval', () => {
         body: { projectId: p.id, providerId: 'codex', mode: 'fast' },
       }),
     );
+    expect(
+      (
+        await call(`${netUrl}/api/settings`, {
+          method: 'PATCH',
+          headers: { cookie, ...origin(netUrl) },
+          body: { approvalMode: 'automatic' },
+        })
+      ).status,
+    ).toBe(403);
+    expect(
+      (
+        await call(`${netUrl}/api/sessions`, {
+          method: 'POST',
+          headers: { cookie, ...origin(netUrl) },
+          body: { projectId: p.id, approvalMode: 'automatic' },
+        })
+      ).status,
+    ).toBe(403);
     const send = async (url: string, headers: Record<string, string>, text: string) => {
       const sent = await call(`${url}/api/sessions/${session.id}/messages`, {
         method: 'POST',
@@ -883,7 +901,7 @@ describe('internet runs use manual approval', () => {
     };
     await send(localUrl, {}, 'oi local');
     const remoteRun = await send(netUrl, { cookie, ...origin(netUrl) }, 'oi da internet');
-    expect(modes).toEqual(['auto-safe', 'manual']);
+    expect(modes).toEqual(['automatic', 'manual']);
     expect(store.getRun(remoteRun)?.manualApproval).toBe(true);
     // Queued and retried from the internet: still manual; approvals stay available there.
     const queued = await call(`${netUrl}/api/sessions/${session.id}/queue`, {
@@ -899,7 +917,7 @@ describe('internet runs use manual approval', () => {
     for (let i = 0; i < 100 && store.getSession(session.id)?.activeRunId; i++)
       await new Promise((r) => setTimeout(r, 20));
     // The local retry of an internet run keeps manual approval.
-    expect(modes).toEqual(['auto-safe', 'manual', 'manual', 'manual']);
+    expect(modes).toEqual(['automatic', 'manual', 'manual', 'manual']);
     const approval = await call(`${netUrl}/api/approvals/nao-existe`, {
       method: 'POST',
       headers: { cookie, ...origin(netUrl) },
@@ -909,7 +927,7 @@ describe('internet runs use manual approval', () => {
     // The setting can only be turned off locally; then internet runs follow the normal mode.
     await call(`${localUrl}/api/settings`, { method: 'PATCH', body: { internetManualApproval: false } });
     await send(netUrl, { cookie, ...origin(netUrl) }, 'de novo');
-    expect(modes.at(-1)).toBe('auto-safe');
+    expect(modes.at(-1)).toBe('automatic');
     // The global setting itself never changed.
     expect(store.getSettings()?.approvalMode).toBe('auto-safe');
   });

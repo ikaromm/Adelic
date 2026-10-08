@@ -1,3 +1,4 @@
+import { withObservation } from '../observability.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { chmod, link, lstat, mkdir, open, readFile, rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
@@ -513,7 +514,9 @@ export function RemoteHostService(dataDir: string, options: { configFile?: strin
         const requestedTimeout = typeof argsValue.timeoutMs === 'number' ? argsValue.timeoutMs : 300000;
         const deadline = tool === 'exec' ? Math.min(300000, Math.max(1, requestedTimeout)) + 15000 : 30000;
         const boundedSignal = AbortSignal.any([signal, AbortSignal.timeout(deadline)]);
-        return request('call', { tool, args: argsValue }, boundedSignal).then((result) => validateResult(tool, result));
+        return withObservation('ssh.tool', 'ssh', {}, () =>
+          request('call', { tool, args: argsValue }, boundedSignal).then((result) => validateResult(tool, result)),
+        );
       },
       info() {
         return request('info', {}, AbortSignal.timeout(5000)).then(validateInfo);
@@ -553,7 +556,7 @@ export function RemoteHostService(dataDir: string, options: { configFile?: strin
 
   const service: RemoteHostServiceInstance = {
     async probe(target, port = 22) {
-      return probe(target, port);
+      return withObservation('ssh.probe', 'ssh', {}, () => probe(target, port));
     },
     async test(host) {
       const connection = await connect(host, '/');
@@ -609,7 +612,7 @@ export function RemoteHostService(dataDir: string, options: { configFile?: strin
       }
     },
     async connect(host, cwd) {
-      return connect(host, cwd);
+      return withObservation('ssh.connect', 'ssh', {}, () => connect(host, cwd));
     },
     async call(host, cwd, tool, args, signal) {
       if (signal.aborted) throw signal.reason instanceof Error ? signal.reason : new Error('Remote call cancelled');

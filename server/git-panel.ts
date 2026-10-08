@@ -1,3 +1,4 @@
+import { withObservation } from './observability.js';
 // Git panel of a project: status, diffs, stage/unstage/discard, commit, push and a compare
 // URL for a pull request. See docs/specs/git-panel.md.
 //
@@ -68,6 +69,9 @@ async function filtersOff(repo: Repo): Promise<string[]> {
 
 /** Git with hooks, fsmonitor, filters and signing off; the user's identity is left as configured. */
 async function run(repo: Repo, args: string[], opts: GitOptions & { hooks?: boolean } = {}) {
+  return withObservation('git.operation', 'git', {}, () => runUnobserved(repo, args, opts));
+}
+async function runUnobserved(repo: Repo, args: string[], opts: GitOptions & { hooks?: boolean } = {}) {
   const config = [
     ...(opts.hooks ? HARDENED_BASE : HARDENED_CONFIG),
     ...(await filtersOff(repo)),

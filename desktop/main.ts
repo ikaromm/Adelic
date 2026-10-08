@@ -1,3 +1,4 @@
+import { desktopObservation, recentDesktopObservations } from './observability.js';
 import { DatabaseSync } from 'node:sqlite';
 import { existsSync, mkdirSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -313,6 +314,7 @@ async function startDesktop() {
     if (backendState.stopping) child.kill();
   });
   child.on('exit', (code) => {
+    desktopObservation(dataDir, 'desktop.backend.exit', shutdownRequested || code === 0 ? 'success' : 'error');
     backendState.exited = true;
     if (!shutdownRequested && backendUrl) void showBackendExitFailure(code);
   });
@@ -328,6 +330,8 @@ async function startDesktop() {
     throw new Error('O servidor local informou um endereço que não é loopback.');
   }
   backendUrl = ready.url;
+  for (const observation of recentDesktopObservations(dataDir)) child.postMessage({ type: 'observation', observation });
+  child.postMessage({ type: 'observation', observation: desktopObservation(dataDir, 'desktop.ready', 'success') });
   backendNodeVersion = ready.nodeVersion || process.versions.node;
   writeReport();
 
@@ -347,6 +351,10 @@ async function startDesktop() {
 
   const window = createWindow(resources.icon);
   await window.loadURL(backendUrl);
+  child.postMessage({
+    type: 'observation',
+    observation: desktopObservation(dataDir, 'desktop.window.ready', 'success'),
+  });
   if (isSmoke) {
     try {
       if (shutdownRequested) return;

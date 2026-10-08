@@ -1,5 +1,6 @@
 import type { ProviderEvent, RunInput } from '../../shared/contracts';
 import type { RemoteRuntime, RemoteToolName } from '../../shared/remote-hosts';
+import { blockedBy } from '../../shared/hooks';
 import { isRecord } from './process';
 
 const MAX_REMOTE_APPROVAL_DETAIL = 1024 * 1024;
@@ -10,7 +11,7 @@ export const REMOTE_TOOL_SPECS = [
   {
     name: 'adelic_remote_exec',
     remoteName: 'exec',
-    description: 'Execute a command on the configured remote host, inside the remote project.',
+    description: 'Execute a command with the configured project executor, inside the project root.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -25,7 +26,7 @@ export const REMOTE_TOOL_SPECS = [
   {
     name: 'adelic_remote_read_file',
     remoteName: 'read_file',
-    description: 'Read a file from the configured remote project.',
+    description: 'Read a file from the configured project executor.',
     inputSchema: {
       type: 'object',
       properties: { path: { type: 'string', maxLength: 4096 } },
@@ -36,7 +37,7 @@ export const REMOTE_TOOL_SPECS = [
   {
     name: 'adelic_remote_write_file',
     remoteName: 'write_file',
-    description: 'Write a file in the configured remote project.',
+    description: 'Write a file in the configured project root.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -50,7 +51,7 @@ export const REMOTE_TOOL_SPECS = [
   {
     name: 'adelic_remote_list',
     remoteName: 'list',
-    description: 'List entries in a directory of the configured remote project.',
+    description: 'List entries in a project directory.',
     inputSchema: {
       type: 'object',
       properties: { path: { type: 'string', maxLength: 4096 } },
@@ -60,7 +61,7 @@ export const REMOTE_TOOL_SPECS = [
   {
     name: 'adelic_remote_stat',
     remoteName: 'stat',
-    description: 'Inspect a path in the configured remote project.',
+    description: 'Inspect a path in the configured project root.',
     inputSchema: {
       type: 'object',
       properties: { path: { type: 'string', maxLength: 4096 } },
@@ -71,7 +72,7 @@ export const REMOTE_TOOL_SPECS = [
   {
     name: 'adelic_remote_search',
     remoteName: 'search',
-    description: 'Search text in the configured remote project.',
+    description: 'Search text in the configured project root.',
     inputSchema: {
       type: 'object',
       properties: { query: { type: 'string', maxLength: 4096 }, path: { type: 'string', maxLength: 4096 } },
@@ -82,7 +83,7 @@ export const REMOTE_TOOL_SPECS = [
   {
     name: 'adelic_remote_git',
     remoteName: 'git',
-    description: 'Read repository status and diff information on the configured remote host.',
+    description: 'Read repository status and diff information from the configured project executor.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -155,12 +156,31 @@ export function validateRemoteArguments(spec: RemoteToolSpec, raw: unknown): Rec
 
 /** Complete, bounded approval copy; oversized content is refused rather than hidden. */
 export function remoteApprovalDetail(runtime: RemoteRuntime, spec: RemoteToolSpec, args: Record<string, unknown>) {
-  const detail = `Host: ${runtime.label}\nDiretório remoto: ${runtime.root}\nFerramenta: ${spec.remoteName}\nArgumentos: ${JSON.stringify(args)}`;
+  const local = runtime.executionKind === 'isolated-local';
+  const detail = `${local ? 'Executor local isolado' : `Host: ${runtime.label}`}\n${local ? 'Diretório do projeto' : 'Diretório remoto'}: ${runtime.root}\nFerramenta: ${spec.remoteName}\nArgumentos: ${JSON.stringify(args)}`;
   return detail.length <= MAX_REMOTE_APPROVAL_DETAIL ? detail : undefined;
 }
 
-export function remoteToolTitle(spec: RemoteToolSpec) {
-  return `Permitir ferramenta remota: ${spec.remoteName}`;
+export function remoteToolTitle(spec: RemoteToolSpec, runtime?: RemoteRuntime) {
+  return `${runtime?.executionKind === 'isolated-local' ? 'Executar ferramenta local isolada' : 'Permitir ferramenta remota'}: ${spec.remoteName}`;
+}
+
+export function remoteRuntimeDescription(runtime: RemoteRuntime) {
+  return runtime.executionKind === 'isolated-local'
+    ? `Local isolado: ${runtime.root}`
+    : `${runtime.label}: ${runtime.root}`;
+}
+
+/** Return the command used by the exec tool, if this is an executable request. */
+export function remoteToolCommand(spec: RemoteToolSpec, args: Record<string, unknown>) {
+  return spec.remoteName === 'exec' && typeof args.command === 'string' ? args.command : undefined;
+}
+
+/** Project command blocks apply to fixed remote tools in every approval mode and runtime. */
+export function blockedRemoteTool(input: RunInput, spec: RemoteToolSpec, args: Record<string, unknown>) {
+  const command = remoteToolCommand(spec, args);
+  const blocked = blockedBy(input.blockedCommands, command);
+  return blocked && command !== undefined ? { command, blocked } : undefined;
 }
 
 /** Emit without the normal 1200-character local approval summary cap. */
@@ -170,17 +190,44 @@ export function emitRemoteApproval(
   id: string,
   spec: RemoteToolSpec,
   detail: string,
+  status: 'pending' | 'approved' | 'denied' = 'pending',
+  args?: Record<string, unknown>,
+  blocked?: { command: string; blocked: string },
 ) {
+  const command = blocked?.command ?? (status === 'pending' && args ? remoteToolCommand(spec, args) : undefined);
+  const auditDetail =
+    status !== 'pending'
+      ? detail.replace(/\nArgumentos: [\s\S]*/, '\nArgumentos: [redigidos no registro automático]')
+      : detail;
   emit({
     type: 'approval',
     approval: {
       id,
       runId: input.runId,
       sessionId: input.sessionId,
-      title: remoteToolTitle(spec),
-      detail,
+      title: blocked ? 'Comando bloqueado pelas regras do projeto' : remoteToolTitle(spec, input.remote),
+      detail: auditDetail,
       kind: 'tool',
-      status: 'pending',
+      status,
+      ...(blocked
+        ? {
+            command: blocked.command,
+            blocked: blocked.blocked,
+            decision: { source: 'project-rule' as const, rule: 'blocked-command' },
+          }
+        : {}),
+      ...(command ? { command } : {}),
+      ...(status === 'approved'
+        ? {
+            decision: {
+              source: 'automatic' as const,
+              rule:
+                input.remote?.executionKind === 'isolated-local'
+                  ? 'isolated-local-executor'
+                  : 'explicit-remote-project-opt-in',
+            },
+          }
+        : {}),
     },
   });
 }

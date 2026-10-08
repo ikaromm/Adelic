@@ -1,5 +1,6 @@
 import { Component, type ErrorInfo, type ReactNode } from 'react';
 import { getLocale, t as translate, useI18n, type Locale, type MessageKey } from './i18n';
+import { reportClientEvent } from './api';
 
 /** Scope names callers pass (pt-BR) and their catalog keys; an unknown scope is shown as given. */
 const SCOPES: Record<string, MessageKey> = {
@@ -81,6 +82,7 @@ export class ErrorBoundary extends Component<
   componentDidCatch(error: Error, info: ErrorInfo) {
     // Kept in the console for diagnosis; no data leaves the machine.
     console.error(`[Adelic] Falha ao exibir ${this.props.scope}:`, error, info.componentStack);
+    reportClientEvent('ui.error', 'error');
   }
 
   componentDidUpdate(previous: { resetKey?: unknown }) {

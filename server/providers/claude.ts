@@ -69,6 +69,10 @@ export class ClaudeProvider {
 
   async run(input: RunInput, emit: (event: ProviderEvent) => void, signal: AbortSignal): Promise<RunResult> {
     if (this.shuttingDown) throw new Error('Claude provider is shutting down');
+    if (input.approvalMode === 'automatic')
+      throw new Error(
+        'Modo automático isolado indisponível para Claude: esta integração não controla a superfície de ferramentas nativas.',
+      );
     this.binary ??= await findProviderBinary('claude');
     if (!this.binary) throw new Error(providerBinaryMissingDetail('claude'));
     const runtimeDirs = [path.join(os.homedir(), '.claude/projects'), path.join(os.homedir(), '.claude/sessions')];

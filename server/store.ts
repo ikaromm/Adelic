@@ -31,9 +31,63 @@ import type { SavedCommand } from '../shared/commands.js';
 import type { Automation } from '../shared/automations.js';
 import { EMPTY_HOOKS, type ProjectHooks } from '../shared/hooks.js';
 import type { McpServerRecord } from '../shared/mcp.js';
+import type { ObservationInput, ObservabilityEvent, ObservabilityRunSummary } from '../shared/observability.js';
 import { mcpServerView } from './mcp.js';
 import { migrate, type MigrationResult } from './migrations.js';
 import { httpError } from './i18n.js';
+
+const observabilityAttributeKeys = new Set([
+  'method',
+  'operation',
+  'statusCode',
+  'exitCode',
+  'tool',
+  'signal',
+  'reason',
+  'decision',
+  'source',
+  'rule',
+  'providerId',
+  'modelId',
+  'attempt',
+  'retryCount',
+  'route',
+  'code',
+  'outcome',
+  'toolName',
+]);
+const observabilityComponents = new Set([
+  'http',
+  'provider',
+  'process',
+  'memory',
+  'graph',
+  'git',
+  'terminal',
+  'ssh',
+  'desktop',
+  'ui',
+  'queue',
+  'orchestration',
+  'storage',
+]);
+const enumAttributes: Record<string, RegExp> = {
+  reason:
+    /^(timeout|cancelled|aborted|failed|blocked|unavailable|denied|interrupted|permission|unknown|completed|retryable|permanent|overloaded|rate_limit)$/,
+  decision: /^(approved|denied|manual|automatic|auto-safe|auto_safe|forced_manual|project-rule|user)$/,
+  source: /^(provider|runtime|automatic|auto-safe|auto_safe|project-rule|user|policy|desktop|renderer)$/,
+  rule: /^[a-z][a-z0-9_.-]{0,40}$/,
+  method: /^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)$/,
+  tool: /^[A-Za-z][A-Za-z0-9_.:-]{0,40}$/,
+  toolName: /^[A-Za-z][A-Za-z0-9_.:-]{0,40}$/,
+  operation: /^[a-z][A-Za-z0-9_.:-]{0,63}$/,
+  providerId: /^(codex|claude|kiro|opencode)$/,
+  modelId: /^[A-Za-z0-9._:/-]{1,64}$/,
+  signal: /^(SIG[A-Z]+|AbortError|Error|timeout)$/,
+  route: /^\/api\/[A-Za-z0-9/_:-]{1,100}$/,
+  code: /^[a-z][a-z0-9_.-]{0,40}$/,
+  outcome: /^(approved|denied|success|error|cancelled|queued|running|completed|failed|interrupted|skipped)$/,
+};
 
 const defaults: Settings = {
   defaultProviderId: 'codex',
@@ -79,6 +133,8 @@ export class Store {
   readonly dataDir: string;
   /** Result of the schema migration run at open time (applied versions, backup path). */
   readonly migration: MigrationResult;
+  private observabilityWrites = 0;
+  private observabilityEventCount = 0;
   constructor(dataDir = process.env.ADELIC_DATA_DIR || join(homedir(), '.local/share/adelic')) {
     this.dataDir = resolve(dataDir);
     mkdirSync(this.dataDir, { recursive: true });
@@ -90,11 +146,26 @@ export class Store {
       this.db.close();
       throw error;
     }
+    this.observabilityEventCount = Number(this.db.prepare('SELECT COUNT(*) n FROM observability_events').get()?.n ?? 0);
+    this.pruneObservability(true);
     if (!this.getSettings()) this.setSettings(defaults);
     if (!this.listSkills().length) for (const skill of seedSkills) this.put('skills', skill.id, skill);
-    this.db.exec(
-      "UPDATE runs SET data=json_set(data,'$.status','interrupted','$.completedAt',datetime('now'),'$.error','Servidor reiniciado durante a execução') WHERE json_extract(data,'$.status')='running'",
-    );
+    const interruptedRuns = this.rows<Run>('runs', "WHERE json_extract(data,'$.status')='running'");
+    this.db
+      .prepare(
+        "UPDATE runs SET data=json_set(data,'$.status','interrupted','$.completedAt',?,'$.error','Servidor reiniciado durante a execução') WHERE json_extract(data,'$.status')='running'",
+      )
+      .run(new Date().toISOString());
+    // Startup repair must also finish the telemetry mirror; otherwise a crash appears active forever.
+    for (const previous of interruptedRuns) {
+      const repaired = this.getRun(previous.id);
+      if (repaired) this.putRun(repaired);
+    }
+    this.db
+      .prepare(
+        "UPDATE observability_events SET status='error',duration_ms=COALESCE(duration_ms,max(0,(julianday(?) - julianday(at))*86400000)) WHERE status='running' AND kind='span'",
+      )
+      .run(new Date().toISOString());
     this.db.exec(
       "UPDATE messages SET data=json_set(data,'$.status','interrupted') WHERE json_extract(data,'$.status')='running'",
     );
@@ -246,9 +317,14 @@ export class Store {
     this.db.exec('BEGIN IMMEDIATE');
     try {
       this.db.prepare('DELETE FROM delegated_tasks WHERE session_id=?').run(id);
+      this.db.prepare('DELETE FROM observability_events WHERE session_id=?').run(id);
+      this.db.prepare('DELETE FROM observability_runs WHERE session_id=?').run(id);
       // attachments rows go with the session (ON DELETE CASCADE); the files are removed below.
       this.db.prepare('DELETE FROM sessions WHERE id=?').run(id);
       this.db.exec('COMMIT');
+      this.observabilityEventCount = Number(
+        this.db.prepare('SELECT COUNT(*) n FROM observability_events').get()?.n ?? 0,
+      );
     } catch (error) {
       this.db.exec('ROLLBACK');
       throw error;
@@ -463,6 +539,37 @@ export class Store {
         'INSERT INTO runs(id,session_id,data) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET session_id=excluded.session_id,data=excluded.data',
       )
       .run(r.id, r.sessionId, JSON.stringify(r));
+    const session = this.getSession(r.sessionId);
+    try {
+      if (session)
+        this.upsertObservabilityRun({
+          runId: r.id,
+          traceId: r.id,
+          sessionId: r.sessionId,
+          projectId: session.projectId ?? null,
+          providerId: r.providerId,
+          status:
+            r.status === 'completed'
+              ? 'success'
+              : r.status === 'failed' || r.status === 'interrupted'
+                ? 'error'
+                : r.status === 'cancelled'
+                  ? 'cancelled'
+                  : 'running',
+          startedAt: r.startedAt,
+          completedAt: r.completedAt ?? null,
+          durationMs: r.durationMs ?? null,
+          firstTokenMs: r.firstTokenMs ?? null,
+          usage: {
+            inputTokens: r.inputTokens ?? null,
+            outputTokens: r.outputTokens ?? null,
+            costUsd: r.costUsd ?? null,
+          },
+          error: r.status === 'failed' || r.status === 'interrupted' ? 'A execução falhou' : null,
+        });
+    } catch {
+      /* observability must not block run persistence */
+    }
   }
   getRun(id: string) {
     return this.get<Run>('runs', id);
@@ -525,6 +632,138 @@ export class Store {
         'INSERT INTO events(id,session_id,data) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET session_id=excluded.session_id,data=excluded.data',
       )
       .run(e.id, e.sessionId, JSON.stringify(e));
+    // Event text, error detail, tool arguments, and command output can contain user data.
+    // Only stable metadata is copied to the dedicated observability store.
+    const session = this.getSession(e.sessionId);
+    try {
+      if (session)
+        this.recordObservabilityEvent({
+          id: e.id,
+          traceId: e.runId,
+          runId: e.runId,
+          sessionId: e.sessionId,
+          projectId: session.projectId ?? null,
+          at: e.createdAt,
+          name: e.type,
+          component: 'orchestration',
+          kind: 'event',
+          status:
+            e.type === 'error' || ['denied', 'blocked', 'failed', 'error'].includes(e.status ?? '')
+              ? 'error'
+              : e.status === 'cancelled' || e.status === 'aborted'
+                ? 'cancelled'
+                : e.status === 'running'
+                  ? 'running'
+                  : e.status === 'pending' || e.status === 'queued'
+                    ? 'queued'
+                    : 'success',
+          durationMs: null,
+          attributes: {
+            ...(e.toolName ? { toolName: e.toolName } : {}),
+            ...(e.status ? { outcome: e.status } : {}),
+            ...(e.decision
+              ? {
+                  decision: e.decision.source,
+                  ...(e.decision.rule ? { rule: e.decision.rule } : {}),
+                }
+              : e.type === 'approval' && e.status
+                ? { decision: e.status }
+                : {}),
+            ...(e.attempt !== undefined ? { attempt: e.attempt } : {}),
+          },
+        });
+    } catch {
+      /* observability must not block event persistence */
+    }
+  }
+
+  upsertObservabilityRun(run: ObservabilityRunSummary) {
+    this.db
+      .prepare(
+        `INSERT INTO observability_runs(run_id,trace_id,session_id,project_id,provider_id,status,started_at,completed_at,duration_ms,first_token_ms,input_tokens,output_tokens,cost_usd,error_kind)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(run_id) DO UPDATE SET trace_id=excluded.trace_id,session_id=excluded.session_id,project_id=excluded.project_id,provider_id=excluded.provider_id,status=excluded.status,started_at=excluded.started_at,completed_at=excluded.completed_at,duration_ms=excluded.duration_ms,first_token_ms=excluded.first_token_ms,input_tokens=excluded.input_tokens,output_tokens=excluded.output_tokens,cost_usd=excluded.cost_usd,error_kind=excluded.error_kind`,
+      )
+      .run(
+        run.runId,
+        run.traceId,
+        run.sessionId,
+        run.projectId,
+        run.providerId,
+        run.status,
+        run.startedAt,
+        run.completedAt,
+        run.durationMs,
+        run.firstTokenMs,
+        run.usage?.inputTokens ?? null,
+        run.usage?.outputTokens ?? null,
+        run.usage?.costUsd ?? null,
+        run.error ? 'failed' : null,
+      );
+    this.recordObservabilityEvent({
+      id: `run:${run.runId}`,
+      traceId: run.traceId,
+      runId: run.runId,
+      sessionId: run.sessionId,
+      projectId: run.projectId,
+      at: run.completedAt ?? run.startedAt,
+      name: 'run',
+      component: 'orchestration',
+      kind: 'span',
+      status: run.status,
+      durationMs: run.durationMs,
+      attributes: run.providerId ? { providerId: run.providerId } : {},
+    });
+    this.pruneObservability();
+  }
+
+  recordObservabilityEvent(event: ObservationInput & { runId: string; sessionId: string; at: string }) {
+    const attributes = Object.fromEntries(
+      Object.entries(event.attributes ?? {}).filter(
+        ([key, value]) =>
+          observabilityAttributeKeys.has(key) &&
+          (typeof value === 'string'
+            ? enumAttributes[key]
+              ? enumAttributes[key].test(value) && !/(token|secret|password|credential|api[_-]?key)/i.test(value)
+              : /^[a-zA-Z0-9_.:/-]{1,80}$/.test(value) && !/(token|secret|password|credential|api[_-]?key)/i.test(value)
+            : typeof value === 'number'
+              ? Number.isFinite(value)
+              : typeof value === 'boolean' || value === null),
+      ),
+    ) as ObservabilityEvent['attributes'];
+    const name = /^[a-z][a-z0-9_.-]{0,63}$/.test(event.name) ? event.name : 'operation';
+    this.db
+      .prepare(
+        `INSERT INTO observability_events(id,trace_id,parent_id,run_id,session_id,project_id,at,name,component,kind,status,duration_ms,attributes)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET trace_id=excluded.trace_id,parent_id=excluded.parent_id,run_id=excluded.run_id,session_id=excluded.session_id,project_id=excluded.project_id,at=excluded.at,name=excluded.name,component=excluded.component,kind=excluded.kind,status=excluded.status,duration_ms=excluded.duration_ms,attributes=excluded.attributes`,
+      )
+      .run(
+        event.id ?? randomUUID(),
+        event.traceId ?? event.runId,
+        event.parentId ?? null,
+        event.runId,
+        event.sessionId,
+        event.projectId ?? null,
+        event.at,
+        name,
+        observabilityComponents.has(event.component) ? event.component : 'storage',
+        event.kind ?? 'event',
+        event.status ?? 'success',
+        event.durationMs ?? null,
+        JSON.stringify(attributes),
+      );
+    this.observabilityEventCount++;
+    this.pruneObservability();
+  }
+
+  private pruneObservability(force = false) {
+    this.observabilityWrites++;
+    if (!force && this.observabilityWrites % 100 !== 0 && this.observabilityEventCount <= 10000) return;
+    const cutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+    this.db.prepare('DELETE FROM observability_events WHERE at < ?').run(cutoff);
+    this.db.exec(
+      `DELETE FROM observability_events WHERE id IN (SELECT id FROM observability_events ORDER BY at DESC,rowid DESC LIMIT -1 OFFSET 10000);`,
+    );
+    this.observabilityEventCount = Number(this.db.prepare('SELECT COUNT(*) n FROM observability_events').get()?.n ?? 0);
   }
   listEvents(sessionId: string) {
     return this.rows<RunEvent>('events', "WHERE json_extract(data,'$.sessionId')=? ORDER BY rowid", [sessionId]);

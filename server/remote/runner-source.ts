@@ -382,7 +382,12 @@ def watchdog():
 
 def main():
     global ROOT, last_heartbeat
-    if len(sys.argv) != 3 or sys.argv[1] != "--root":
+    runtime_path = ""
+    if len(sys.argv) == 5 and sys.argv[3] == "--runtime-path" and sys.argv[4] == "/opt/adelic-runtimes/node/bin":
+        runtime_path = "/opt/adelic-runtimes/node/bin:"
+    elif len(sys.argv) != 3:
+        raise SystemExit("usage: runner.py --root ABSOLUTE_PATH [--runtime-path /opt/adelic-runtimes/node/bin]")
+    if sys.argv[1] != "--root":
         raise SystemExit("usage: runner.py --root ABSOLUTE_PATH")
     raw_root = Path(sys.argv[2])
     if not raw_root.is_absolute():
@@ -400,7 +405,7 @@ def main():
         os.makedirs(path, mode=0o700, exist_ok=True)
         os.environ[name] = path
     os.environ.clear()
-    os.environ.update({"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": os.path.join(temp, "home"), "TMPDIR": os.path.join(temp, "tmp"), "CODEX_HOME": os.path.join(temp, "codex_home"), "KIRO_HOME": os.path.join(temp, "kiro_home"), "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"})
+    os.environ.update({"PATH": runtime_path + "/usr/local/bin:/usr/bin:/bin", "HOME": os.path.join(temp, "home"), "TMPDIR": os.path.join(temp, "tmp"), "CODEX_HOME": os.path.join(temp, "codex_home"), "KIRO_HOME": os.path.join(temp, "kiro_home"), "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"})
     for key in ("HOME", "TMPDIR", "CODEX_HOME", "KIRO_HOME"):
         os.makedirs(os.environ[key], mode=0o700, exist_ok=True)
     last_heartbeat = time.monotonic()

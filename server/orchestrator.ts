@@ -1,5 +1,7 @@
 import { RemoteHostService } from './remote/transport.js';
 import type { RemoteRuntime } from '../shared/remote-hosts.js';
+import type { Observability } from './observability.js';
+import { createObservability } from './observability.js';
 import { rankFiles } from '../shared/mentions.js';
 import { inlineTextBlock } from './attachments.js';
 import { randomUUID } from 'node:crypto';
@@ -7,6 +9,7 @@ import { existsSync, mkdirSync, realpathSync } from 'node:fs';
 import { join, sep } from 'node:path';
 import type {
   Approval,
+  ApprovalMode,
   Compaction,
   DelegatedTask,
   Message,
@@ -38,6 +41,7 @@ import { expandMessage } from './commands.js';
 import { resolveMentions } from './mentions.js';
 import { parseMentions } from '../shared/mentions.js';
 import { Store } from './store.js';
+import { createLocalExecutor } from './local-executor.js';
 import { runMcpServers } from './mcp.js';
 import {
   boundedCoordinatorContext,
@@ -115,6 +119,21 @@ type SpecialRun = { ref: RunPlanRef; prompt: string };
 
 const cancelledError = (key: ServerKey) => httpError(409, key, undefined, { cancelled: true });
 
+/** Resolve policy at run start; SSH projects require a local, explicit automatic override. */
+function effectiveApprovalMode(
+  settings: Settings,
+  session: Session,
+  project: Project,
+  forceManual = false,
+): ApprovalMode {
+  if (forceManual) return 'manual';
+  if (project.remote) {
+    const explicit = session.approvalMode ?? project.approvalMode;
+    return explicit === 'automatic' ? 'automatic' : 'manual';
+  }
+  return session.approvalMode ?? project.approvalMode ?? settings.approvalMode ?? 'auto-safe';
+}
+
 interface StartingRun {
   clientMessageId?: string;
   controller: AbortController;
@@ -142,6 +161,7 @@ export class Orchestrator {
   /** An app update is running (docs/specs/self-update.md): nothing new may start. */
   private updating = false;
   private deciding = new Set<string>();
+  private readonly observations: Observability;
   private listeners = new Set<(event: StreamEvent) => void>();
   private writingProjects = new Set<string>();
   private writeQueues = new Map<string, Promise<void>>();
@@ -168,7 +188,9 @@ export class Orchestrator {
     private readonly retryOverrides?: Partial<RetryPolicy>,
     /** Test hook: the after-edit check runner (production: bubblewrap). */
     checkRunner?: typeof runCheck,
+    observations?: Observability,
   ) {
+    this.observations = observations ?? createObservability(store);
     this.remoteHosts = RemoteHostService(store.dataDir, { configFile: process.env.ADELIC_SSH_CONFIG });
     this.hookChecks = new HookChecks({
       runner: checkRunner,
@@ -289,7 +311,7 @@ export class Orchestrator {
       if (controller.signal.aborted) throw cancelledError('orchestrator.cancelledBeforeStart');
       const initialThinking = session.thinking;
       const hasImages = attachments.some((a) => a.kind === 'image');
-      const catalog =
+      let catalog =
         (initialThinking && initialThinking !== 'auto') || hasImages ? await this.providerList() : undefined;
       if (this.shuttingDown) throw httpError(503, 'orchestrator.shuttingDown');
       this.assertNotUpdating();
@@ -383,6 +405,56 @@ export class Orchestrator {
         plan.effort = session.thinking;
         this.validateCoordinatorThinking(session.providerId, session.model, session.thinking, catalog!);
       } else plan.effort = undefined;
+      const approvalMode = effectiveApprovalMode(settings, session, projectSnapshot, options.manualApproval === true);
+      if (approvalMode === 'automatic' && !['codex', 'kiro'].includes(session.providerId)) {
+        throw httpError(409, 'orchestrator.automaticUnsupportedProvider', { provider: session.providerId });
+      }
+      const orchestration = projectSnapshot.orchestration ?? { enabled: true, maxWorkers: 2, review: true };
+      const automaticWorkerNeedsTools = plan.tools || plan.level === 'fast';
+      const automaticReviewWillRun =
+        plan.level !== 'fast' &&
+        !(plan.memory && !plan.tools) &&
+        !(plan.tools && isSimpleInspectionRequest(content)) &&
+        orchestration.review;
+      if (
+        approvalMode === 'automatic' &&
+        orchestration.enabled &&
+        !special &&
+        (automaticWorkerNeedsTools || automaticReviewWillRun)
+      ) {
+        catalog ??= await this.providerList();
+        const validateAutomaticDelegate = (role: 'executor' | 'reviewer', providerId: ProviderId) => {
+          const target = catalog!.find((item) => item.id === providerId);
+          if (!target?.capabilities.tools || !['codex', 'kiro'].includes(providerId)) {
+            throw httpError(409, 'orchestrator.automaticUnsupportedDelegate', {
+              role: role === 'executor' ? 'executor' : 'revisor',
+              provider: target?.name ?? providerId,
+            });
+          }
+        };
+        if (automaticWorkerNeedsTools) {
+          const worker = resolveAgent(
+            catalog,
+            orchestration.workerProviderId,
+            orchestration.workerModel,
+            'worker',
+            session.providerId,
+            session.model,
+          );
+          validateAutomaticDelegate('executor', worker.providerId);
+        }
+        if (automaticReviewWillRun) {
+          const reviewer = resolveAgent(
+            catalog,
+            orchestration.reviewerProviderId,
+            orchestration.reviewerModel,
+            'reviewer',
+            session.providerId,
+            session.model,
+          );
+          validateAutomaticDelegate('reviewer', reviewer.providerId);
+        }
+      }
       const runId = randomUUID(),
         userId = randomUUID(),
         assistantId = randomUUID(),
@@ -418,6 +490,7 @@ export class Orchestrator {
         status: 'running',
         route: plan,
         startedAt: now,
+        approvalMode,
         ...(special ? { plan: special.ref } : {}),
         ...(options.hookFix ? { hookFix: { sourceRunId: options.hookFix.sourceRunId } } : {}),
         ...(options.manualApproval ? { manualApproval: true } : {}),
@@ -465,24 +538,36 @@ export class Orchestrator {
             ...(expanded.mode ? { mode: { key: `event.mode.${expanded.mode}` } } : {}),
           },
         );
-      active.done = this.execute(
-        session,
-        projectSnapshot,
-        prompt,
-        history,
-        plan,
-        run,
-        assistant,
-        controller,
-        structuredClone(settings),
-        attachments,
-        reserveProject,
-        special,
-        // `@path` mentions come from what the user typed (or the task text), never from a
-        // command template, and are read when the run starts (docs/specs/mentions.md).
-        options.hookFix ? [] : parseMentions(content),
-        context.summary,
-        session.projectId === null ? structuredClone(EMPTY_HOOKS) : this.store.getHooks(project.id),
+      active.done = this.observations.withObservation(
+        'run.execute',
+        'orchestration',
+        {
+          traceId: run.id,
+          runId: run.id,
+          sessionId: session.id,
+          projectId: projectSnapshot.id,
+          providerId: session.providerId,
+        },
+        () =>
+          this.execute(
+            session,
+            projectSnapshot,
+            prompt,
+            history,
+            plan,
+            run,
+            assistant,
+            controller,
+            structuredClone(settings),
+            attachments,
+            reserveProject,
+            special,
+            // `@path` mentions come from what the user typed (or the task text), never from a
+            // command template, and are read when the run starts (docs/specs/mentions.md).
+            options.hookFix ? [] : parseMentions(content),
+            context.summary,
+            session.projectId === null ? structuredClone(EMPTY_HOOKS) : this.store.getHooks(project.id),
+          ),
       );
       reservation.result = { runId, messageId: userId };
       return reservation.result;
@@ -565,6 +650,7 @@ export class Orchestrator {
       status: 'running',
       route: { level: 'fast', reason: 'Compactação da conversa', tools: false, memory: false, contextBudget: 0 },
       startedAt: now,
+      approvalMode: 'manual',
       compaction: { auto: false },
     };
     const controller = new AbortController();
@@ -579,43 +665,54 @@ export class Orchestrator {
     this.emit({ type: 'run', run });
     this.emit({ type: 'session', session: running });
     const usage = new UsageMeter();
-    active.done = (async () => {
-      try {
-        this.publishKeyed(sessionId, run.id, 'status', 'event.compacting');
-        await this.summarise(running, project, run.id, run, compactions, pending, settings, controller.signal, {
-          auto: false,
-          usage,
-        });
-        run.status = 'completed';
-        this.publishKeyed(sessionId, run.id, 'status', 'event.compacted');
-      } catch (e) {
-        if (controller.signal.aborted) run.status = 'cancelled';
-        else {
-          run.status = 'failed';
-          run.error = errorText(e);
-          run.failure = failureOf(e);
-          this.publishKeyed(sessionId, run.id, 'error', 'event.compactFailed', { error: run.error });
+    active.done = this.observations.withObservation(
+      'run.execute',
+      'orchestration',
+      {
+        traceId: run.id,
+        runId: run.id,
+        sessionId,
+        projectId: session.projectId ?? null,
+        providerId: session.providerId,
+      },
+      async () => {
+        try {
+          this.publishKeyed(sessionId, run.id, 'status', 'event.compacting');
+          await this.summarise(running, project, run.id, run, compactions, pending, settings, controller.signal, {
+            auto: false,
+            usage,
+          });
+          run.status = 'completed';
+          this.publishKeyed(sessionId, run.id, 'status', 'event.compacted');
+        } catch (e) {
+          if (controller.signal.aborted) run.status = 'cancelled';
+          else {
+            run.status = 'failed';
+            run.error = errorText(e);
+            run.failure = failureOf(e);
+            this.publishKeyed(sessionId, run.id, 'error', 'event.compactFailed', { error: run.error });
+          }
+        } finally {
+          // Recorded on failure and cancel too: tokens already used still count (spend limits).
+          applyUsage(run, usage.totals());
+          run.completedAt = new Date().toISOString();
+          run.durationMs = Date.now() - Date.parse(run.startedAt);
+          this.store.putRun(run);
+          const latest = this.store.getSession(sessionId);
+          if (latest && latest.activeRunId === run.id) {
+            delete latest.activeRunId;
+            latest.updatedAt = run.completedAt;
+            this.store.putSession(latest);
+            this.emit({ type: 'session', session: latest });
+          }
+          this.active.delete(sessionId);
+          this.emit({ type: 'run', run });
+          // A failed summary must not hold queued messages: they run without it, as in the
+          // automatic fallback. A cancel still pauses the queue like any other run.
+          this.afterRun(sessionId, run.status === 'failed' ? { ...run, status: 'completed' } : run);
         }
-      } finally {
-        // Recorded on failure and cancel too: tokens already used still count (spend limits).
-        applyUsage(run, usage.totals());
-        run.completedAt = new Date().toISOString();
-        run.durationMs = Date.now() - Date.parse(run.startedAt);
-        this.store.putRun(run);
-        const latest = this.store.getSession(sessionId);
-        if (latest && latest.activeRunId === run.id) {
-          delete latest.activeRunId;
-          latest.updatedAt = run.completedAt;
-          this.store.putSession(latest);
-          this.emit({ type: 'session', session: latest });
-        }
-        this.active.delete(sessionId);
-        this.emit({ type: 'run', run });
-        // A failed summary must not hold queued messages: they run without it, as in the
-        // automatic fallback. A cancel still pauses the queue like any other run.
-        this.afterRun(sessionId, run.status === 'failed' ? { ...run, status: 'completed' } : run);
-      }
-    })();
+      },
+    );
     return { runId: run.id, messageId: '' };
   }
   /**
@@ -709,19 +806,25 @@ export class Orchestrator {
       async (effects) => {
         text = '';
         options.usage?.attempt();
-        const attempt = await this.providers.run(
-          input,
-          (event) => {
-            // The summary is shown only once complete, so partial text does not block a retry.
-            if (event.type === 'delta') {
-              text += event.text;
-            } else if (event.type === 'approval') {
-              // Tools are off; anything that still asks is refused without the user.
-              effects.note('approval');
-              void this.providers.approve(event.approval.id, 'deny').catch(() => undefined);
-            } else if (event.type === 'usage') options.usage?.event(event);
-          },
-          signal,
+        const attempt = await this.observations.withObservation(
+          'provider.run',
+          'provider',
+          { providerId: input.providerId },
+          () =>
+            this.providers.run(
+              input,
+              (event) => {
+                // The summary is shown only once complete, so partial text does not block a retry.
+                if (event.type === 'delta') {
+                  text += event.text;
+                } else if (event.type === 'approval') {
+                  // Tools are off; anything that still asks is refused without the user.
+                  effects.note('approval');
+                  void this.providers.approve(event.approval.id, 'deny').catch(() => undefined);
+                } else if (event.type === 'usage') options.usage?.event(event);
+              },
+              signal,
+            ),
         );
         options.usage?.result(attempt);
         return attempt;
@@ -993,8 +1096,43 @@ export class Orchestrator {
     sandbox: RunInput['sandbox'],
     signal: AbortSignal,
     runId: string,
+    approvalMode: RunInput['approvalMode'] = 'manual',
+    providerId?: ProviderId,
   ): Pick<RunInput, 'remote'> {
-    if (!project.remote) return {};
+    if (!project.remote) {
+      if (approvalMode !== 'automatic') return {};
+      if (providerId !== 'codex' && providerId !== 'kiro')
+        throw new Error('O modo automático local está disponível somente para Codex e Kiro.');
+      let executor: Promise<Awaited<ReturnType<typeof createLocalExecutor>>> | undefined;
+      const remote: RemoteRuntime = {
+        label: 'Local isolado',
+        root: '/workspace',
+        executionKind: 'isolated-local',
+        call: async (tool, args, callSignal) => {
+          if (signal.aborted || callSignal.aborted) throw new Error('Execução local isolada cancelada');
+          if (sandbox === 'read-only' && (tool === 'exec' || tool === 'write_file'))
+            throw httpError(409, 'remotehosts.readOnly');
+          executor ??= createLocalExecutor(project.path, sandbox);
+          this.remoteConnections.set(runId, executor);
+          const activeExecutor = await executor;
+          if (signal.aborted) {
+            await activeExecutor.close();
+            throw new Error('Execução local isolada cancelada');
+          }
+          return activeExecutor.call(
+            tool,
+            { ...args, ...(tool === 'exec' || tool === 'write_file' ? { readOnly: sandbox === 'read-only' } : {}) },
+            callSignal,
+          );
+        },
+      };
+      signal.addEventListener(
+        'abort',
+        () => void executor?.then((instance) => instance.close()).catch(() => undefined),
+        { once: true },
+      );
+      return { remote };
+    }
     const host = this.store.getRemoteHost(project.remote.hostId);
     if (!host) throw httpError(404, 'remotehosts.notFound');
     const root = project.remote.path;
@@ -1006,6 +1144,7 @@ export class Orchestrator {
     const remote: RemoteRuntime = {
       label: `${host.name}:${root}`,
       root,
+      executionKind: 'ssh',
       call: async (tool, args, callSignal) => {
         if (signal.aborted || callSignal.aborted) throw new Error('Execução SSH cancelada');
         if (sandbox === 'read-only' && (tool === 'exec' || tool === 'write_file'))
@@ -1260,8 +1399,15 @@ export class Orchestrator {
           history: boundedHistory(history, plan.contextBudget),
           plan,
           sandbox: settings.sandbox,
-          approvalMode: project.remote ? 'manual' : (settings.approvalMode ?? 'auto-safe'),
-          ...this.remoteFor(project, readOnlyPlan ? 'read-only' : settings.sandbox, controller.signal, run.id),
+          approvalMode: run.approvalMode ?? 'auto-safe',
+          ...this.remoteFor(
+            project,
+            readOnlyPlan ? 'read-only' : settings.sandbox,
+            controller.signal,
+            run.id,
+            run.approvalMode,
+            session.providerId,
+          ),
           memoryContext: boundedMemory,
           ...(hooks.blockedCommands.length ? { blockedCommands: hooks.blockedCommands } : {}),
           ...(summary ? { summary } : {}),
@@ -1283,63 +1429,72 @@ export class Orchestrator {
       // its native session must not replace the conversation's.
       const performOnce = async (effects: EffectTracker, input: RunInput = directInput, fallback = false) => {
         directUsage.attempt();
-        const attempt = await this.providers.run(
-          input,
-          (event: ProviderEvent) => {
-            if (event.type === 'delta' || event.type === 'tool' || event.type === 'approval')
-              effects.note(event.type === 'delta' ? 'text' : event.type);
-            if (event.type === 'delta') {
-              if (!firstTokenAt) {
-                firstTokenAt = Date.now();
-                run.firstTokenMs = firstTokenAt - started;
-                assistant.firstTokenMs = run.firstTokenMs;
-              }
-              response += event.text;
-              assistant.content = response;
-              this.store.updateMessage(assistant);
-              this.emit({
-                type: 'delta',
-                sessionId: session.id,
-                runId: run.id,
-                messageId: assistant.id,
-                text: event.text,
-              });
-            } else if (event.type === 'status') this.publishEvent(session.id, run.id, 'status', event.text);
-            else if (event.type === 'tool')
-              this.publishEvent(session.id, run.id, 'tool', event.description, {
-                toolName: event.name,
-                status: event.status,
-                ...(event.toolCallId ? { toolCallId: `${directInput.runId}:${event.toolCallId}` } : {}),
-              });
-            else if (event.type === 'approval') {
-              const a: Approval = { ...event.approval, runId: run.id, sessionId: session.id };
-              if (this.screenApproval(a, hooks.blockedCommands)) return;
-              if (readOnlyPlan && a.kind === 'file') {
-                // Planning is read-only: a file change is refused without asking the user.
-                a.status = 'denied';
-                this.store.putApproval(a);
-                this.emit({ type: 'approval', approval: a });
-                this.publishEvent(
-                  session.id,
-                  run.id,
-                  'approval',
-                  `Alteração negada: o planejamento é somente leitura (${a.title})`,
-                  { status: a.status },
-                );
-                void this.providers.approve(a.id, 'deny').catch(() => undefined);
-                return;
-              }
-              this.store.putApproval(a);
-              this.emit({ type: 'approval', approval: a });
-              this.publishEvent(session.id, run.id, 'approval', a.title, { status: a.status });
-            } else if (event.type === 'session') {
-              if (fallback) return;
-              session.nativeSessionId = event.nativeSessionId;
-              this.store.putSession(session);
-              this.emit({ type: 'session', session });
-            } else if (event.type === 'usage') directUsage.event(event);
-          },
-          controller.signal,
+        const attempt = await this.observations.withObservation(
+          'provider.run',
+          'provider',
+          { providerId: input.providerId },
+          () =>
+            this.providers.run(
+              input,
+              (event: ProviderEvent) => {
+                if (event.type === 'delta' || event.type === 'tool' || event.type === 'approval')
+                  effects.note(event.type === 'delta' ? 'text' : event.type);
+                if (event.type === 'delta') {
+                  if (!firstTokenAt) {
+                    firstTokenAt = Date.now();
+                    run.firstTokenMs = firstTokenAt - started;
+                    assistant.firstTokenMs = run.firstTokenMs;
+                  }
+                  response += event.text;
+                  assistant.content = response;
+                  this.store.updateMessage(assistant);
+                  this.emit({
+                    type: 'delta',
+                    sessionId: session.id,
+                    runId: run.id,
+                    messageId: assistant.id,
+                    text: event.text,
+                  });
+                } else if (event.type === 'status') this.publishEvent(session.id, run.id, 'status', event.text);
+                else if (event.type === 'tool')
+                  this.publishEvent(session.id, run.id, 'tool', event.description, {
+                    toolName: event.name,
+                    status: event.status,
+                    ...(event.toolCallId ? { toolCallId: `${directInput.runId}:${event.toolCallId}` } : {}),
+                  });
+                else if (event.type === 'approval') {
+                  const a: Approval = { ...event.approval, runId: run.id, sessionId: session.id };
+                  if (this.screenApproval(a, hooks.blockedCommands)) return;
+                  if (readOnlyPlan && a.kind === 'file') {
+                    // Planning is read-only: a file change is refused without asking the user.
+                    a.status = 'denied';
+                    this.store.putApproval(a);
+                    this.emit({ type: 'approval', approval: a });
+                    this.publishEvent(
+                      session.id,
+                      run.id,
+                      'approval',
+                      `Alteração negada: o planejamento é somente leitura (${a.title})`,
+                      { status: a.status },
+                    );
+                    void this.providers.approve(a.id, 'deny').catch(() => undefined);
+                    return;
+                  }
+                  this.store.putApproval(a);
+                  this.emit({ type: 'approval', approval: a });
+                  this.publishEvent(session.id, run.id, 'approval', a.title, {
+                    status: a.status,
+                    ...(a.decision ? { decision: a.decision } : {}),
+                  });
+                } else if (event.type === 'session') {
+                  if (fallback) return;
+                  session.nativeSessionId = event.nativeSessionId;
+                  this.store.putSession(session);
+                  this.emit({ type: 'session', session });
+                } else if (event.type === 'usage') directUsage.event(event);
+              },
+              controller.signal,
+            ),
         );
         directUsage.result(attempt);
         return attempt;
@@ -1536,7 +1691,7 @@ export class Orchestrator {
       level?: 'fast' | 'deep',
       taskImages: RunInput['attachments'] = [],
     ) => {
-      if (project.remote && providerId !== 'codex' && providerId !== 'kiro')
+      if (tools && project.remote && providerId !== 'codex' && providerId !== 'kiro')
         throw httpError(409, 'remotehosts.provider');
       const taskLevel = level || (tools ? 'deep' : 'fast');
       return {
@@ -1560,8 +1715,10 @@ export class Orchestrator {
           contextBudget: taskLevel === 'deep' && tools ? 9000 : 3500,
         },
         sandbox,
-        approvalMode: project.remote ? 'manual' : (settings.approvalMode ?? 'auto-safe'),
-        ...this.remoteFor(project, sandbox, controller.signal, childRun(task)),
+        approvalMode: tools ? (run.approvalMode ?? 'auto-safe') : 'manual',
+        ...(tools
+          ? this.remoteFor(project, sandbox, controller.signal, childRun(task), run.approvalMode, task.providerId)
+          : {}),
         memoryContext: taskMemory,
         ...(blockedCommands.length ? { blockedCommands } : {}),
         // The conversation summary goes where the conversation goes; review and synthesis
@@ -1601,45 +1758,54 @@ export class Orchestrator {
         task.output = startOutput;
         if (streamDirect) assistant.content = startContent;
         usage.attempt();
-        const attemptResult = await this.providers.run(
-          attemptInput,
-          (event: ProviderEvent) => {
-            if (event.type === 'delta' || event.type === 'tool' || event.type === 'approval')
-              effects.note(event.type === 'delta' ? 'text' : event.type);
-            if (event.type === 'approval') {
-              const owned: Approval = { ...event.approval, runId: run.id, sessionId: session.id };
-              if (this.screenApproval(owned, blockedCommands)) return;
-              this.store.putApproval(owned);
-              this.emit({ type: 'approval', approval: owned });
-              this.publishEvent(session.id, run.id, 'approval', owned.title, { status: owned.status });
-            } else if (event.type === 'delta') {
-              task.output = (task.output || '') + event.text;
-              this.store.putTask(task);
-              if (streamDirect) {
-                if (!assistant.firstTokenMs) {
-                  run.firstTokenMs = Date.now() - Date.parse(run.startedAt);
-                  assistant.firstTokenMs = run.firstTokenMs;
-                }
-                assistant.content += event.text;
-                this.store.updateMessage(assistant);
-                this.emit({
-                  type: 'delta',
-                  sessionId: session.id,
-                  runId: run.id,
-                  messageId: assistant.id,
-                  text: event.text,
-                });
-              }
-            } else if (event.type === 'status') this.publishEvent(session.id, run.id, 'status', event.text);
-            else if (event.type === 'tool')
-              this.publishEvent(session.id, run.id, 'tool', event.description, {
-                toolName: event.name,
-                status: event.status,
-                ...(event.toolCallId ? { toolCallId: `${input.runId}:${event.toolCallId}` } : {}),
-              });
-            else if (event.type === 'usage') usage.event(event);
-          },
-          controller.signal,
+        const attemptResult = await this.observations.withObservation(
+          'provider.run',
+          'provider',
+          { providerId: attemptInput.providerId },
+          () =>
+            this.providers.run(
+              attemptInput,
+              (event: ProviderEvent) => {
+                if (event.type === 'delta' || event.type === 'tool' || event.type === 'approval')
+                  effects.note(event.type === 'delta' ? 'text' : event.type);
+                if (event.type === 'approval') {
+                  const owned: Approval = { ...event.approval, runId: run.id, sessionId: session.id };
+                  if (this.screenApproval(owned, blockedCommands)) return;
+                  this.store.putApproval(owned);
+                  this.emit({ type: 'approval', approval: owned });
+                  this.publishEvent(session.id, run.id, 'approval', owned.title, {
+                    status: owned.status,
+                    ...(owned.decision ? { decision: owned.decision } : {}),
+                  });
+                } else if (event.type === 'delta') {
+                  task.output = (task.output || '') + event.text;
+                  this.store.putTask(task);
+                  if (streamDirect) {
+                    if (!assistant.firstTokenMs) {
+                      run.firstTokenMs = Date.now() - Date.parse(run.startedAt);
+                      assistant.firstTokenMs = run.firstTokenMs;
+                    }
+                    assistant.content += event.text;
+                    this.store.updateMessage(assistant);
+                    this.emit({
+                      type: 'delta',
+                      sessionId: session.id,
+                      runId: run.id,
+                      messageId: assistant.id,
+                      text: event.text,
+                    });
+                  }
+                } else if (event.type === 'status') this.publishEvent(session.id, run.id, 'status', event.text);
+                else if (event.type === 'tool')
+                  this.publishEvent(session.id, run.id, 'tool', event.description, {
+                    toolName: event.name,
+                    status: event.status,
+                    ...(event.toolCallId ? { toolCallId: `${input.runId}:${event.toolCallId}` } : {}),
+                  });
+                else if (event.type === 'usage') usage.event(event);
+              },
+              controller.signal,
+            ),
         );
         usage.result(attemptResult);
         return attemptResult;
@@ -2239,6 +2405,7 @@ export class Orchestrator {
     const providerDenied = Boolean(approval.blocked);
     approval.status = 'denied';
     approval.blocked = pattern;
+    approval.decision = { source: 'project-rule', rule: 'blocked-command-pattern' };
     this.store.putApproval(approval);
     this.emit({ type: 'approval', approval });
     this.publishEvent(
@@ -2246,7 +2413,7 @@ export class Orchestrator {
       approval.runId,
       'approval',
       `Comando bloqueado pelas regras do projeto: ${normalizeCommand(command ?? approval.title).slice(0, 300)}`,
-      { status: 'blocked', error: `Padrão: ${pattern}` },
+      { status: 'blocked', error: `Padrão: ${pattern}`, decision: approval.decision },
     );
     if (!providerDenied) void this.providers.approve(approval.id, 'deny').catch(() => undefined);
     return true;
@@ -2328,9 +2495,14 @@ export class Orchestrator {
       if (!current || current.status !== 'pending' || this.active.get(sessionId)?.runId !== approval.runId)
         throw httpError(409, 'orchestrator.approvalRunEnded');
       current.status = decision === 'approve' ? 'approved' : 'denied';
+      current.decision = { source: 'user' };
       this.store.putApproval(current);
       this.emit({ type: 'approval', approval: current });
-      if (note) this.publishEvent(sessionId, approval.runId, 'approval', note, { status: current.status });
+      if (note)
+        this.publishEvent(sessionId, approval.runId, 'approval', note, {
+          status: current.status,
+          decision: current.decision,
+        });
       else
         this.publishKeyed(
           sessionId,
@@ -2338,7 +2510,7 @@ export class Orchestrator {
           'approval',
           decision === 'approve' ? 'event.approved' : 'event.denied',
           undefined,
-          { status: current.status },
+          { status: current.status, decision: current.decision },
         );
     } finally {
       this.deciding.delete(approvalId);
@@ -2593,7 +2765,7 @@ export class Orchestrator {
       catalog: ProviderInfo[];
       signal: AbortSignal;
       current: ModelRef;
-      input: Pick<RunInput, 'plan' | 'attachments' | 'remote'>;
+      input: Pick<RunInput, 'plan' | 'attachments' | 'remote' | 'approvalMode'>;
       taskTitle?: string;
     },
     attempt: (target: Required<ModelRef>, effects: EffectTracker) => Promise<T>,
@@ -2666,7 +2838,7 @@ export class Orchestrator {
   private fallbackUsable(
     catalog: ProviderInfo[],
     target: Required<ModelRef>,
-    input: Pick<RunInput, 'plan' | 'attachments' | 'remote'>,
+    input: Pick<RunInput, 'plan' | 'attachments' | 'remote' | 'approvalMode'>,
   ) {
     if (
       !availableModel(catalog, target) ||
@@ -2677,6 +2849,8 @@ export class Orchestrator {
     )
       return false;
     if (input.remote && target.providerId !== 'codex' && target.providerId !== 'kiro') return false;
+    if (input.plan.tools && input.approvalMode === 'automatic' && !['codex', 'kiro'].includes(target.providerId))
+      return false;
     const caps = catalog.find((p) => p.id === target.providerId)!.capabilities;
     if (input.plan.tools && !caps.tools) return false;
     if (input.plan.level === 'fast' && !caps.fast) return false;

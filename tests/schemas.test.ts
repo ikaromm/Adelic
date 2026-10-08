@@ -30,6 +30,20 @@ describe('request schemas', () => {
       message: 'memoryEnabled deve ser booleano',
     });
   });
+  it('accepts automatic policy and nullable session overrides', () => {
+    expect(parseBody(CreateSessionSchema, { approvalMode: 'automatic' }, 'x')).toMatchObject({
+      ok: true,
+      data: { approvalMode: 'automatic' },
+    });
+    expect(parseBody(PatchSessionSchema, { approvalMode: null }, 'x')).toMatchObject({
+      ok: true,
+      data: { approvalMode: null },
+    });
+    expect(parseBody(SettingsPatchSchema, { approvalMode: 'automatic' }, 'x')).toMatchObject({
+      ok: true,
+      data: { approvalMode: 'automatic' },
+    });
+  });
   it('reports the first invalid field in declaration order', () => {
     expect(parseBody(PatchSessionSchema, { mode: 'x', title: '' }, 'x')).toEqual({
       ok: false,

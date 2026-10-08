@@ -153,12 +153,14 @@ export const CreateProjectSchema = z.object({
     .optional(),
   memoryWorkspace: text(100),
   memoryProject: text(100),
+  approvalMode: optional(z.enum(['auto-safe', 'manual', 'automatic']), invalid('approvalMode')),
 });
 export const PatchProjectSchema = z.object({
   name: optional(text(), vmsg('validation.projectFields')),
   git: optional(z.object({ runHooks: z.boolean() }).strict(), invalid('git')),
   memoryWorkspace: optional(text(100), vmsg('validation.projectFields')),
   memoryProject: optional(text(100), vmsg('validation.projectFields')),
+  approvalMode: optional(z.union([z.null(), z.enum(['auto-safe', 'manual', 'automatic'])]), invalid('approvalMode')),
   spendLimits: optional(ProjectSpendLimitsPatchSchema, vmsg('validation.projectSpendLimits')),
 });
 
@@ -169,6 +171,7 @@ export const CreateSessionSchema = z.object({
   mode: optional(ModeSchema, invalid('mode')),
   model: optional(text(120), invalid('model')),
   thinking: optional(effort, invalid('thinking')),
+  approvalMode: optional(z.enum(['auto-safe', 'manual', 'automatic']), invalid('approvalMode')),
 });
 export const PatchSessionSchema = z.object({
   projectId: optional(projectRef, invalid('projectId')),
@@ -178,6 +181,7 @@ export const PatchSessionSchema = z.object({
   mode: optional(ModeSchema, invalid('mode')),
   thinking: optional(effort, invalid('thinking')),
   planFirst: optional(z.boolean(), boolean('planFirst')),
+  approvalMode: optional(z.union([z.null(), z.enum(['auto-safe', 'manual', 'automatic'])]), invalid('approvalMode')),
 });
 /** POST /api/sessions/:id/handoff (docs/specs/provider-handoff.md). */
 export const HandoffSchema = z.object({
@@ -290,7 +294,7 @@ export const SettingsPatchSchema = z.object({
   detachedMemory: optional(z.union([z.null(), MemoryScopeSchema]), vmsg('validation.detachedMemory')),
   sandbox: optional(z.enum(['read-only', 'workspace-write']), invalid('sandbox')),
   responseStyle: optional(z.enum(['concise', 'balanced']), invalid('responseStyle')),
-  approvalMode: optional(z.enum(['auto-safe', 'manual']), invalid('approvalMode')),
+  approvalMode: optional(z.enum(['auto-safe', 'manual', 'automatic']), invalid('approvalMode')),
   updateCheck: optional(z.boolean(), boolean('updateCheck')),
   updateChannel: optional(
     UpdateChannelSchema,

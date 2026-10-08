@@ -2,7 +2,8 @@
 
 ## Não publicado
 
-_Nada ainda._
+- Autonomia explícita por conversa/projeto: Automático executa solicitações elegíveis sem perguntas, com bloqueios, sandbox e política manual da internet preservados. SSH exige escolha explícita; configurações anteriores continuam como antes.
+- Observabilidade geral local com filtros, histórico paginado, consumo conhecido, eventos recentes e timeline por execução. Instrumentação de memória, processos, Git, Graphify, terminal, SSH e desktop; telemetria sem prompts, comandos ou saídas. Veja [contrato](docs/specs/autonomy-observability.md).
 
 ## 0.5.2 — 2026-10-08
 

@@ -32,7 +32,7 @@ test('switches to English in Settings, persists across reloads and switches back
   await expect(page.getByRole('heading', { name: 'Settings', exact: true })).toBeVisible();
   await expect(page.locator('html')).toHaveAttribute('lang', 'en');
   const nav = page.getByRole('navigation', { name: 'Main navigation' });
-  await expect(nav.getByRole('button', { name: 'Activity' })).toBeVisible();
+  await expect(nav.getByRole('button', { name: 'Observability' })).toBeVisible();
   await expect(nav.getByRole('button', { name: 'Automations' })).toBeVisible();
   await expect(page.getByRole('button', { name: /^New conversation/ }).first()).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Standalone conversations' })).toBeVisible();

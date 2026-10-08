@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { memoryAppPort } from '../../playwright.config';
 
-// Activity, Automations, Memory and the update toast in English (docs/i18n.md). The language is
+// Observability, Automations, Memory and the update toast in English (docs/i18n.md). The language is
 // saved on the server (Settings.language) before each test and set back to `auto` after it, so the
 // other specs keep their pt-BR text.
 const memoryApp = `http://127.0.0.1:${memoryAppPort}`;
@@ -30,7 +30,7 @@ test.afterEach(async ({ request }) => {
   expect((await request.patch('/api/settings', { data: { automations: false } })).ok()).toBe(true);
 });
 
-test('Activity page in English, with a finished run', async ({ page }) => {
+test('Observability page in English, with a finished run', async ({ page }) => {
   await page.goto('/');
   await page
     .getByRole('button', { name: /^New conversation/ })
@@ -41,23 +41,20 @@ test('Activity page in English, with a finished run', async ({ page }) => {
   await input.press('Enter');
   await expect(page.getByRole('button', { name: 'Send message' })).toBeVisible({ timeout: 15_000 });
 
-  await nav(page).getByRole('button', { name: 'Activity' }).click();
-  await expect(page.getByRole('heading', { name: 'Activity', level: 1 })).toBeVisible();
+  await nav(page).getByRole('button', { name: 'Observability' }).click();
+  await expect(page.getByRole('heading', { name: 'Observability', level: 1 })).toBeVisible();
   const content = page.locator('.page-content');
-  await expect(content).toContainText('USAGE AND RUNS');
-  await expect(content).toContainText('All time');
-  await expect(content).toContainText('Avg. first response');
-  await expect(content).toContainText('Avg. duration');
-  await expect(content).toContainText(/\d+ completed/);
+  await expect(content).toContainText('SYSTEM HEALTH');
+  await expect(page.locator('.observability-filters')).toHaveAttribute('aria-label', 'Observability filters');
+  await expect(content).toContainText('Available providers');
+  await expect(content).toContainText('Component health');
   await expect(page.getByRole('heading', { name: 'Recent runs' })).toBeVisible();
-  await expect(content).toContainText('AGENT / MODE');
-  await expect(content).toContainText('TOKENS / COST');
-  const row = page.locator('.run-table-row').first();
-  // The status name comes from src/labels.ts (statusName), converted in its own change.
-  await expect(row).toContainText(/(Fast|Thorough) · /);
-  await expect(row).toContainText(/[A-Z][a-z]{2} \d{2}, \d{1,2}:\d{2}\s[AP]M/);
+  const row = page.locator('.observability-run').first();
+  await expect(row).toContainText('Completed');
+  await row.locator('.observability-run-head').click();
+  await expect(row.locator('.observability-trace')).toBeVisible();
   // Route reasons are persisted run data (pt-BR): only the page chrome is checked.
-  for (const text of await page.locator('.page-heading, .metrics-grid, .run-table-head').allInnerTexts())
+  for (const text of await page.locator('.page-heading, .metrics-grid, .observability-filters').allInnerTexts())
     expect(text).not.toMatch(PORTUGUESE);
 });
 

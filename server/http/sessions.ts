@@ -23,7 +23,7 @@ import {
   text,
   vmsg,
 } from '../../shared/schemas.js';
-import { forceManualApproval } from './auth.js';
+import { forceManualApproval, LOCAL_ONLY, requestKind } from './auth.js';
 import { error, errorStatus, errorText, failure } from './common.js';
 import { localeOf, tr, type ServerKey } from '../i18n.js';
 
@@ -88,6 +88,7 @@ export function sessionsRoutes({ store, orchestrator, providerList }: BackendCon
   app.post('/api/sessions', async (req, res) => {
     const parsed = parseBody(CreateSessionSchema, req.body, 'sessions.invalid', req.locale);
     if (!parsed.ok) return error(res, 400, parsed.message);
+    if (parsed.data.approvalMode === 'automatic' && requestKind(req) !== 'local') return error(res, 403, LOCAL_ONLY);
     const { projectId, model, thinking } = parsed.data;
     const project = projectId ? store.getProject(projectId) : undefined;
     if (projectId && !project) return error(res, 404, 'common.projectNotFound');
@@ -119,6 +120,7 @@ export function sessionsRoutes({ store, orchestrator, providerList }: BackendCon
       model,
       mode,
       thinking,
+      ...(parsed.data.approvalMode ? { approvalMode: parsed.data.approvalMode } : {}),
       createdAt: now,
       updatedAt: now,
     };
@@ -161,6 +163,7 @@ export function sessionsRoutes({ store, orchestrator, providerList }: BackendCon
     const parsed = parseBody(PatchSessionSchema, req.body, 'sessions.invalid', req.locale);
     if (!parsed.ok) return error(res, 400, parsed.message);
     const body = parsed.data;
+    if (body.approvalMode === 'automatic' && requestKind(req) !== 'local') return error(res, 403, LOCAL_ONLY);
     let projectId = snapshot.projectId;
     if (body.projectId !== undefined) {
       if (body.projectId && !store.getProject(body.projectId)) return error(res, 404, 'common.projectNotFound');
@@ -213,6 +216,8 @@ export function sessionsRoutes({ store, orchestrator, providerList }: BackendCon
       thinking,
       updatedAt: new Date().toISOString(),
     };
+    if (body.approvalMode === null) delete next.approvalMode;
+    else if (body.approvalMode !== undefined) next.approvalMode = body.approvalMode;
     if (body.planFirst !== undefined) {
       if (body.planFirst) next.planFirst = true;
       else delete next.planFirst;

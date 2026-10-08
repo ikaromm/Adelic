@@ -41,7 +41,7 @@ export function emitApproval(
   detail: string,
   kind: Approval['kind'] = 'tool',
   status: Approval['status'] = 'pending',
-  extra: Pick<Approval, 'command' | 'blocked'> = {},
+  extra: Pick<Approval, 'command' | 'blocked' | 'decision'> = {},
 ) {
   emit({
     type: 'approval',
@@ -55,6 +55,7 @@ export function emitApproval(
       status,
       ...(extra.command ? { command: extra.command.slice(0, 4000) } : {}),
       ...(extra.blocked ? { blocked: extra.blocked } : {}),
+      ...(extra.decision ? { decision: extra.decision } : {}),
     },
   });
 }

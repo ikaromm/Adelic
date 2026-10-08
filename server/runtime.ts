@@ -1,3 +1,5 @@
+import type { ObservationInput } from '../shared/observability.js';
+import { monitorEventLoopDelay } from 'node:perf_hooks';
 import type { ViteDevServer } from 'vite';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync, realpathSync } from 'node:fs';
@@ -47,6 +49,7 @@ export interface StartServerOptions {
 }
 
 export interface RunningServer {
+  recordObservation?(input: ObservationInput): void;
   url: string;
   port: number;
   /** Set only when remote access is enabled. */
@@ -157,6 +160,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Run
   let funnelHttp: HttpServer | undefined;
   let vite: ViteDevServer | undefined;
   let closePromise: Promise<void> | undefined;
+  let stopHealth: (() => void) | undefined;
   try {
     store = new Store(realDataDir);
     if (options.seedProject && !store.listProjects().length) store.putProject(options.seedProject);
@@ -226,6 +230,23 @@ export async function startServer(options: StartServerOptions = {}): Promise<Run
     orchestrator = backend.orchestrator;
     terminal = backend.terminal;
     automations = backend.automations;
+    const eventLoop = monitorEventLoopDelay({ resolution: 20 });
+    eventLoop.enable();
+    const healthTimer = setInterval(() => {
+      const delayMs = eventLoop.max / 1e6;
+      backend.observations.recordObservation({
+        name: 'runtime.event-loop',
+        component: 'process',
+        status: delayMs > 2000 ? 'error' : 'success',
+        durationMs: delayMs,
+      });
+      eventLoop.reset();
+    }, 30000);
+    healthTimer.unref();
+    stopHealth = () => {
+      clearInterval(healthTimer);
+      eventLoop.disable();
+    };
 
     if (options.development) {
       const { createServer: createViteServer } = await import('vite');
@@ -265,6 +286,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Run
           }
         };
         // No automation may start while the server shuts down.
+        stopHealth?.();
         automations?.stop();
         backend.access.stop();
         await attempt(async () => {
@@ -308,8 +330,10 @@ export async function startServer(options: StartServerOptions = {}): Promise<Run
         : {}),
       funnelUrl: () => (funnelHttp?.listening ? `http://127.0.0.1:${funnelPort}` : undefined),
       close,
+      recordObservation: backend.observations.recordObservation,
     };
   } catch (error) {
+    stopHealth?.();
     automations?.stop();
     await Promise.allSettled(
       [orchestrator?.shutdown(), graphifyService?.shutdown(), terminal?.shutdown()].filter(

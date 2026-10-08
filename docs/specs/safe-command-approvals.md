@@ -1,8 +1,14 @@
 # Aprovações automáticas de comandos seguros
 
+## Evolução de 2026-10-08: Automático explícito
+
+Além dos modos anteriores, `automatic` permite executar solicitações elegíveis sem perguntas, com a barreira externa de sandbox preservada. A política de conversa substitui a de projeto, que substitui a global; a decisão é capturada no começo do turno. Os modos antigos continuam com seu comportamento anterior. A alteração é autorizada pela interface local. Bloqueios explícitos, planejamento sem ferramentas/escrita, grants fora do projeto e aprovação de elevação/rede permanecem restritos. No SSH, exige escolha explícita no projeto ou conversa, e nunca copia autenticação ao executor. A política manual forçada pela internet tem precedência. Consulte [autonomia e observabilidade](autonomy-observability.md).
+
+Os requisitos históricos abaixo sobre a allowlist e confirmação de comandos desconhecidos descrevem `auto-safe`, e não o novo Automático. A execução não usa uma chamada de modelo auxiliar para classificar permissões.
+
 ## Pedido e contrato
 
-2026-10-05: aceitar comandos comuns automaticamente; perguntar para ações destrutivas, sensíveis ou ambíguas. Nenhuma chamada de modelo extra para classificar. Preservar sandbox local, ações de aprovar/negar/cancelar e auditoria. Adicionar Settings.approvalMode = auto-safe | manual, default auto-safe ao ler configurações antigas, sem alterar o sandbox já escolhido. RunInput.approvalMode opcional normalizado, passado a todas as fases pela configuração capturada no início do turno. UI permite escolher Automático seguro ou Confirmar solicitações; não criar modo irrestrito.
+2026-10-05: aceitar comandos comuns automaticamente; perguntar para ações destrutivas, sensíveis ou ambíguas. Nenhuma chamada de modelo extra para classificar. Preservar sandbox local, ações de aprovar/negar/cancelar e auditoria. Adicionar Settings.approvalMode = auto-safe | manual, default auto-safe ao ler configurações antigas, sem alterar o sandbox já escolhido. RunInput.approvalMode opcional normalizado, passado a todas as fases pela configuração capturada no início do turno. UI original permite escolher Automático seguro ou Confirmar solicitações; a evolução de 2026-10-08 acrescenta o Automático explícito sem remover o sandbox.
 
 ## Codex
 

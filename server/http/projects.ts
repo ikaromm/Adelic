@@ -14,6 +14,7 @@ import {
 } from '../../shared/schemas.js';
 import { searchProjectFiles } from '../mentions.js';
 import { error, errorStatus, errorText } from './common.js';
+import { LOCAL_ONLY, requestKind } from './auth.js';
 import { graphifyConfig, mergeLimits, orchestrationConfig, projectPath } from './validation.js';
 import type { BackendContext } from './context.js';
 
@@ -22,7 +23,8 @@ export function projectsRoutes({ store, orchestrator }: BackendContext) {
   app.post('/api/projects', async (req, res) => {
     const parsed = parseBody(CreateProjectSchema, req.body, 'projects.createRequired', req.locale);
     if (!parsed.ok) return error(res, 400, parsed.message);
-    const { name, path, remote, memoryWorkspace, memoryProject } = parsed.data;
+    const { name, path, remote, memoryWorkspace, memoryProject, approvalMode } = parsed.data;
+    if (approvalMode === 'automatic' && requestKind(req) !== 'local') return error(res, 403, LOCAL_ONLY);
     try {
       const id = randomUUID();
       if (remote && req.body?.orchestration?.enabled) return error(res, 409, 'remotehosts.unsupported');
@@ -51,6 +53,7 @@ export function projectsRoutes({ store, orchestrator }: BackendContext) {
         createdAt: new Date().toISOString(),
         memoryWorkspace,
         memoryProject,
+        ...(approvalMode ? { approvalMode } : {}),
         orchestration: remote ? { enabled: false, maxWorkers: 1, review: false } : config,
         graphify: remote ? { enabled: false } : graphify,
         ...(remote ? { remote } : {}),
@@ -114,6 +117,8 @@ export function projectsRoutes({ store, orchestrator }: BackendContext) {
       return error(res, 409, 'remotehosts.unsupported');
     // Orchestration/graphify are checked before name and scope, as before.
     const fields = parseBody(PatchProjectSchema, req.body, 'validation.projectFields', req.locale);
+    if (fields.ok && fields.data.approvalMode === 'automatic' && requestKind(req) !== 'local')
+      return error(res, 403, LOCAL_ONLY);
     if (req.body?.orchestration !== undefined) {
       const c = orchestrationConfig(req.body.orchestration, p.orchestration);
       if (!c) return error(res, 400, 'projects.invalidOrchestration');
@@ -128,6 +133,8 @@ export function projectsRoutes({ store, orchestrator }: BackendContext) {
     p.name = fields.data.name ?? p.name;
     p.memoryWorkspace = fields.data.memoryWorkspace ?? p.memoryWorkspace;
     p.memoryProject = fields.data.memoryProject ?? p.memoryProject;
+    if (fields.data.approvalMode === null) delete p.approvalMode;
+    else if (fields.data.approvalMode !== undefined) p.approvalMode = fields.data.approvalMode;
     // Monthly usage limits of the project: merged field by field; `null` clears one or all.
     const limits = fields.data.spendLimits;
     if (limits === null) delete p.spendLimits;

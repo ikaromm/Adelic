@@ -1,3 +1,6 @@
+import { randomUUID } from 'node:crypto';
+import { createObservability } from './observability.js';
+import { observabilityRoutes } from './http/observability.js';
 import { remoteHostsRoutes } from './http/remote-hosts.js';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import { execFileSync } from 'node:child_process';
@@ -57,6 +60,7 @@ export function createBackend(
   // "Atualizar Adelic" (server/self-update.ts); the runtime passes one with a restart function.
   selfUpdater: SelfUpdater = new SelfUpdateService(),
 ) {
+  const observations = createObservability(store);
   const app = express();
   app.disable('x-powered-by');
   // Every request is classified (local, tailnet or internet) before anything else.
@@ -82,6 +86,7 @@ export function createBackend(
     providerList,
     retryOverrides,
     checkRunner,
+    observations,
   );
   // Worktree records whose folder is gone (docs/specs/worktrees.md).
   void orchestrator.pruneWorktrees().catch(() => undefined);
@@ -139,6 +144,34 @@ export function createBackend(
   }
   app.use(access.routes());
   app.use(access.guard(originGuard));
+  app.use('/api', (req, res, next) => {
+    const segments = req.path.split('/').filter(Boolean);
+    const sessionId = segments[0] === 'sessions' ? segments[1] : undefined;
+    const session = sessionId ? store.getSession(sessionId) : undefined;
+    const project = segments[0] === 'projects' && segments[1] ? store.getProject(segments[1]) : undefined;
+    const context = {
+      traceId: randomUUID(),
+      sessionId: session?.id,
+      projectId: session?.projectId ?? project?.id,
+    };
+    const started = performance.now();
+    let recorded = false;
+    const finish = (cancelled = false) => {
+      if (recorded || segments[0] === 'observability' || segments.at(-1) === 'events') return;
+      recorded = true;
+      observations.recordObservation({
+        name: 'http.request',
+        component: 'http',
+        ...context,
+        status: cancelled ? 'cancelled' : res.statusCode >= 400 ? 'error' : 'success',
+        durationMs: performance.now() - started,
+        attributes: { method: req.method, statusCode: res.statusCode },
+      });
+    };
+    res.once('finish', () => finish());
+    res.once('close', () => finish(!res.writableFinished));
+    observations.withObservationContext(context, next);
+  });
   const funnel = new FunnelControl(
     store,
     access,
@@ -188,6 +221,7 @@ export function createBackend(
   app.use(memoryRoutes(context));
   app.use(mcpRoutes(context));
   app.use(diagnosticsRoutes(context));
+  app.use(observabilityRoutes(context));
   app.use(updateRoutes(context, selfUpdater));
   app.use(voiceRoutes(context, voice));
   app.use(terminalRoutes(context, terminal));
@@ -206,7 +240,7 @@ export function createBackend(
     error(res, 400, e instanceof Error ? e : String(e)),
   );
   automations.start();
-  return { app, orchestrator, graphify: graphifyService, terminal, automations, access, funnel };
+  return { app, orchestrator, graphify: graphifyService, terminal, automations, access, funnel, observations };
 }
 
 export interface RemoteOptions {

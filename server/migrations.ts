@@ -207,6 +207,47 @@ export const migrations: Migration[] = [
       db.exec('CREATE TABLE IF NOT EXISTS ssh_hosts(id TEXT PRIMARY KEY, data TEXT NOT NULL);');
     },
   },
+  {
+    version: 14,
+    description: 'Traces locais de observabilidade com retenção limitada',
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS observability_runs(
+          run_id TEXT PRIMARY KEY, trace_id TEXT NOT NULL, session_id TEXT NOT NULL,
+          project_id TEXT, provider_id TEXT, status TEXT NOT NULL, started_at TEXT NOT NULL,
+          completed_at TEXT, duration_ms INTEGER, first_token_ms INTEGER,
+          input_tokens INTEGER, output_tokens INTEGER, cost_usd REAL, error_kind TEXT
+        );
+        CREATE INDEX IF NOT EXISTS observability_runs_started ON observability_runs(started_at DESC);
+        CREATE INDEX IF NOT EXISTS observability_runs_project_started ON observability_runs(project_id,started_at DESC);
+        CREATE INDEX IF NOT EXISTS observability_runs_session_started ON observability_runs(session_id,started_at DESC);
+        CREATE INDEX IF NOT EXISTS observability_runs_provider_started ON observability_runs(provider_id,started_at DESC);
+        CREATE INDEX IF NOT EXISTS observability_runs_status_started ON observability_runs(status,started_at DESC);
+        CREATE TABLE IF NOT EXISTS observability_events(
+          id TEXT PRIMARY KEY, trace_id TEXT NOT NULL, parent_id TEXT, run_id TEXT NOT NULL,
+          session_id TEXT NOT NULL, project_id TEXT, at TEXT NOT NULL, name TEXT NOT NULL,
+          component TEXT NOT NULL, kind TEXT NOT NULL, status TEXT NOT NULL,
+          duration_ms INTEGER, attributes TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS observability_events_trace_at ON observability_events(trace_id,at);
+        CREATE INDEX IF NOT EXISTS observability_events_run_component ON observability_events(run_id,component,status);
+        CREATE INDEX IF NOT EXISTS observability_events_at ON observability_events(at);
+        INSERT INTO observability_runs(run_id,trace_id,session_id,project_id,provider_id,status,started_at,completed_at,duration_ms,first_token_ms,input_tokens,output_tokens,cost_usd,error_kind)
+          SELECT r.id,r.id,r.session_id,s.project_id,json_extract(r.data,'$.providerId'),
+            CASE json_extract(r.data,'$.status') WHEN 'completed' THEN 'success' WHEN 'failed' THEN 'error' WHEN 'interrupted' THEN 'error' WHEN 'cancelled' THEN 'cancelled' ELSE 'running' END,
+            COALESCE(json_extract(r.data,'$.startedAt'),'1970-01-01T00:00:00.000Z'),json_extract(r.data,'$.completedAt'),json_extract(r.data,'$.durationMs'),json_extract(r.data,'$.firstTokenMs'),
+            json_extract(r.data,'$.inputTokens'),json_extract(r.data,'$.outputTokens'),json_extract(r.data,'$.costUsd'),
+            CASE WHEN json_extract(r.data,'$.status') IN ('failed','interrupted') THEN 'failed' ELSE NULL END
+          FROM runs r JOIN sessions s ON s.id=r.session_id;
+        INSERT INTO observability_events(id,trace_id,parent_id,run_id,session_id,project_id,at,name,component,kind,status,duration_ms,attributes)
+          SELECT 'run:'||r.id,r.id,NULL,r.id,r.session_id,s.project_id,
+            COALESCE(json_extract(r.data,'$.completedAt'),json_extract(r.data,'$.startedAt'),'1970-01-01T00:00:00.000Z'),'run','orchestration','span',
+            CASE json_extract(r.data,'$.status') WHEN 'completed' THEN 'success' WHEN 'failed' THEN 'error' WHEN 'interrupted' THEN 'error' WHEN 'cancelled' THEN 'cancelled' ELSE 'running' END,
+            json_extract(r.data,'$.durationMs'),json_object('providerId',json_extract(r.data,'$.providerId'))
+          FROM runs r JOIN sessions s ON s.id=r.session_id;
+      `);
+    },
+  },
 ];
 
 export const schemaVersion = migrations.at(-1)!.version;

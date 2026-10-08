@@ -16,6 +16,7 @@ export function settingsRoutes({ store, automations }: BackendContext) {
     // Remote-access options cannot be changed from the remote side itself; from the internet
     // the global automations switch is refused too (docs/specs/remote-access.md).
     const kind = requestKind(req);
+    if (kind !== 'local' && parsed.data.approvalMode === 'automatic') return error(res, 403, LOCAL_ONLY);
     if (
       kind !== 'local' &&
       (parsed.data.terminalRemote !== undefined || parsed.data.internetManualApproval !== undefined)

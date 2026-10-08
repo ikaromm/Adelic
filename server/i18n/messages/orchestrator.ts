@@ -57,6 +57,10 @@ export default defineMessages(
     'orchestrator.modelSwitchChanged': 'A conversa mudou durante a troca de modelo',
     'orchestrator.updating': 'O Adelic está sendo atualizado; tente de novo depois de reiniciar',
     'orchestrator.providerUnavailable': 'Provedor indisponível',
+    'orchestrator.automaticUnsupportedProvider':
+      'Modo automático isolado disponível somente para Codex e Kiro (selecionado: {provider}).',
+    'orchestrator.automaticUnsupportedDelegate':
+      'Modo automático exige um {role} Codex ou Kiro com ferramentas habilitadas (selecionado: {provider}).',
     'orchestrator.queueFull': 'A fila já tem o máximo de {max} mensagens',
     'orchestrator.branchWaitAnswer': 'Aguarde a resposta terminar para ramificar a partir dela',
     // Why git panel mutations are refused (gitBlock) and why an update cannot start (updateBlock).
@@ -124,6 +128,10 @@ export default defineMessages(
     'orchestrator.modelSwitchChanged': 'The conversation changed while switching models',
     'orchestrator.updating': 'Adelic is being updated; try again after it restarts',
     'orchestrator.providerUnavailable': 'Provider unavailable',
+    'orchestrator.automaticUnsupportedProvider':
+      'Isolated automatic mode is available only for Codex and Kiro (selected: {provider}).',
+    'orchestrator.automaticUnsupportedDelegate':
+      'Automatic mode requires a tool-enabled Codex or Kiro {role} (selected: {provider}).',
     'orchestrator.queueFull': 'The queue already has the maximum of {max} messages',
     'orchestrator.branchWaitAnswer': 'Wait for the answer to finish before branching from it',
     'orchestrator.gitBlock.writing': 'A run is changing files in this project; wait for it to finish',

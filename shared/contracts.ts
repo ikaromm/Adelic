@@ -6,6 +6,8 @@ export type Mode = 'auto' | 'fast' | 'deep';
 export type ReasoningEffort = string;
 export type Thinking = 'auto' | ReasoningEffort;
 export type Sandbox = 'read-only' | 'workspace-write';
+/** How provider approval requests are handled for a run. */
+export type ApprovalMode = 'auto-safe' | 'manual' | 'automatic';
 export type RunStatus = 'running' | 'completed' | 'cancelled' | 'failed' | 'interrupted';
 
 export interface Project {
@@ -14,6 +16,8 @@ export interface Project {
   path: string;
   /** path remains an operational local directory; remote.path is the SSH workspace. */
   remote?: RemoteProject;
+  /** Optional approval policy override. Remote projects need this explicit opt-in for automatic. */
+  approvalMode?: ApprovalMode;
   createdAt: string;
   memoryWorkspace: string;
   memoryProject: string;
@@ -181,6 +185,8 @@ export interface Session {
   model?: string;
   mode: Mode;
   thinking?: Thinking;
+  /** Optional approval policy override for this conversation. */
+  approvalMode?: ApprovalMode;
   createdAt: string;
   updatedAt: string;
   activeRunId?: string;
@@ -319,6 +325,8 @@ export interface Run {
   handoff?: { toProviderId: ProviderId };
   /** Started from an internet session: approvals were forced to manual for this run. */
   manualApproval?: boolean;
+  /** Effective approval policy captured at the beginning of this run. */
+  approvalMode?: ApprovalMode;
   /** "Corrigir automaticamente": the run started because checks of `sourceRunId` failed. */
   hookFix?: { sourceRunId: string };
 }
@@ -416,6 +424,8 @@ export interface Approval {
   detail: string;
   kind: 'command' | 'file' | 'tool';
   status: 'pending' | 'approved' | 'denied';
+  /** How a non-pending decision was made, for the activity audit. */
+  decision?: { source: 'automatic' | 'auto-safe' | 'project-rule' | 'user'; rule?: string };
   /** Full command text, when the runtime sent one (matched against the project's blocked commands). */
   command?: string;
   /** The project's blocked-command pattern that denied it (docs/specs/project-hooks.md). */
@@ -472,6 +482,8 @@ export interface RunEvent {
   error?: string;
   /** 'check' events: one after-edit check of the project, updated while it runs. */
   check?: CheckResult;
+  /** Approval audit metadata; never includes the command or permission payload. */
+  decision?: Approval['decision'];
 }
 export interface Settings {
   defaultProviderId: ProviderId;
@@ -484,7 +496,7 @@ export interface Settings {
   detachedMemory?: MemoryScope | null;
   sandbox: Sandbox;
   responseStyle: 'concise' | 'balanced';
-  approvalMode?: 'auto-safe' | 'manual';
+  approvalMode?: ApprovalMode;
   /** Automatic retry of transient failures that had no visible effect (default on). */
   autoRetry?: boolean;
   /**
@@ -660,7 +672,7 @@ export interface RunInput {
   history: Message[];
   plan: RoutePlan;
   sandbox: Sandbox;
-  approvalMode?: 'auto-safe' | 'manual';
+  approvalMode?: ApprovalMode;
   memoryContext?: string;
   /**
    * Latest conversation summary (docs/specs/compaction.md). It replaces the messages it

@@ -463,11 +463,15 @@ def run_process(command, cwd, timeout, request_id):
 def diagnose_capabilities():
     names = ("git", "node", "npm", "python3", "pytest", "ssh", "bwrap", "chromium", "chromium-browser", "google-chrome", "firefox")
     binaries = {name: shutil.which(name) is not None for name in names}
+    deadline = time.monotonic() + 2.0
     git_marker = (ROOT / ".git").exists()
     git_state = "unavailable" if not binaries["git"] else "binary-only"
     if binaries["git"]:
         try:
-            check = subprocess.run(["git", "-C", str(ROOT), "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", "--no-optional-locks", "rev-parse", "--show-toplevel"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=3, check=False, env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"})
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired("git rev-parse", 0)
+            check = subprocess.run(["git", "-C", str(ROOT), "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", "--no-optional-locks", "rev-parse", "--show-toplevel"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=remaining, check=False, env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"})
             top = Path(check.stdout.decode("utf-8", errors="strict").strip()).resolve(strict=True) if check.returncode == 0 else None
             if top is not None and top.is_dir():
                 git_state = "repository"
@@ -478,8 +482,11 @@ def diagnose_capabilities():
     browsers = [name for name in ("chromium", "chromium-browser", "google-chrome", "firefox") if binaries[name]]
     browser_functional = []
     for name in browsers:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
         try:
-            result = subprocess.run([shutil.which(name), "--version"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3, check=False)
+            result = subprocess.run([shutil.which(name), "--version"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=remaining, check=False)
             if result.returncode == 0:
                 browser_functional.append(name)
         except (OSError, subprocess.TimeoutExpired):

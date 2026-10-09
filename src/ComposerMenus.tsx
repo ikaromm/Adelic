@@ -365,11 +365,7 @@ export function ModelMenu({
       key={`${sessionId || ''}:${providerId}`}
       className="model-pill"
       label={t('composer.model.label')}
-      icon={
-        <span className="provider-glyph" aria-hidden="true">
-          ✦
-        </span>
-      }
+      icon={<Sparkles className="provider-glyph" size={14} aria-hidden="true" />}
       summary={summary}
       compactSummary={compactSummary}
       title={summary}

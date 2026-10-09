@@ -8,13 +8,13 @@ import { REMOTE_RUNNER_SOURCE } from '../server/remote/runner-source.js';
 
 const roots: string[] = [];
 const execFileAsync = promisify(execFile);
-const createHarness = async (projectRoot?: string) => {
+const createHarness = async (projectRoot?: string, runnerSource = REMOTE_RUNNER_SOURCE) => {
   const base = await mkdtemp(join(tmpdir(), 'adelic-remote-runner-'));
   roots.push(base);
   const root = projectRoot ?? join(base, 'project');
   if (!projectRoot) await mkdir(root);
   const runner = join(base, 'runner.py');
-  await writeFile(runner, REMOTE_RUNNER_SOURCE, { mode: 0o700 });
+  await writeFile(runner, runnerSource, { mode: 0o700 });
   const child = spawn('python3', ['-u', runner, '--root', root], { stdio: ['pipe', 'pipe', 'pipe'] });
   let data = '';
   let stderr = '';
@@ -77,6 +77,57 @@ describe('credential-free remote runner', () => {
     }
   });
 
+  it('keeps slow Git and browser probes within one diagnostic budget', async () => {
+    const instrumentedSource = REMOTE_RUNNER_SOURCE.replace(
+      'if __name__ == "__main__":\n    main()\n',
+      `_real_run = subprocess.run
+_git_timeout = None
+_browser_timeouts = []
+
+def _slow_probe_run(args, **kwargs):
+    global _git_timeout
+    if args[0] == "git":
+        _git_timeout = kwargs["timeout"]
+        time.sleep(1.25)
+        return type("Result", (), {"returncode": 1, "stdout": b""})()
+    timeout = kwargs["timeout"]
+    _browser_timeouts.append(timeout)
+    # Consume the remaining budget so the next browser must not be started.
+    time.sleep(timeout)
+    raise subprocess.TimeoutExpired(args, timeout)
+
+subprocess.run = _slow_probe_run
+shutil.which = lambda name: "/deterministic/" + name
+_real_diagnose = diagnose_capabilities
+
+def _checked_diagnose():
+    result = _real_diagnose()
+    assert 1.8 < _git_timeout <= 2
+    assert len(_browser_timeouts) == 1
+    assert 0 < _browser_timeouts[0] < 1
+    assert result["browserFunctional"] == []
+    return result
+
+diagnose_capabilities = _checked_diagnose
+
+if __name__ == "__main__":
+    main()`,
+    );
+    const harness = await createHarness(undefined, instrumentedSource);
+    const started = Date.now();
+    try {
+      const response = await harness.send({ id: 'slow-diagnose', method: 'call', tool: 'diagnose', args: {} });
+      const elapsed = Date.now() - started;
+      expect(response.ok).toBe(true);
+      const result = response.result as { browsers: string[]; browserFunctional: string[] };
+      expect(result.browsers).toEqual(['chromium', 'chromium-browser', 'google-chrome', 'firefox']);
+      expect(result.browserFunctional).toEqual([]);
+      expect(elapsed).toBeLessThan(3500);
+    } finally {
+      await harness.close();
+    }
+  });
+
   it('verifies worktree Git reachability through external gitdir metadata and leaves broken metadata unverified', async () => {
     const base = await mkdtemp(join(tmpdir(), 'adelic-diagnose-worktree-'));
     roots.push(base);
@@ -111,7 +162,7 @@ describe('credential-free remote runner', () => {
     } finally {
       await broken.close();
     }
-  });
+  }, 10000);
 
   it('exposes protocol info and performs bounded file operations under its root', async () => {
     const harness = await createHarness();

@@ -69,3 +69,11 @@ Os campos de token são somente os reportados em runtime. A contabilização do 
 ## Fontes e insights de harness
 
 As fontes, inferências e limites de evidência estão reunidos no documento canônico [Leituras sobre harness e eficiência — 2026-10-09](harness-source-insights-2026-10-09.md).
+
+## Adendo pós-publicação — acompanhamento
+
+Este adendo complementa o snapshot-fonte23 acima, sem alterar seu estado histórico. O CI **37961354701** do commit **6c4a41e** falhou no timeout de diagnose e em dois testes visuais do Composer. Em verificações posteriores, package/AppImage nas três distros e os dois testes ai-memory passaram. As correções posteriores abrangeram o orçamento de 2 segundos, o SVG do Composer e o estado de criação pendente com fixture independente.
+
+Segundo as verificações focadas relatadas pelo executor, foi atualizado somente `tests/e2e/visual-regression.spec.ts-snapshots/access-1280-linux.png`; em comparação com `HEAD 6c4a41e`, a diferença ficou em 14 pixels no bbox `(4,0)–(13,2)`, junto ao canto arredondado. Os outros sete snapshots, excluindo Access 1280 e Composer 1280/390, permaneceram byteidênticos àquele HEAD. O build passou, a spec visual de 1280/390 passou (4 testes) e `tests/e2e/session-create-composer.spec.ts` passou isoladamente (1 teste). Isso não confirma a causa final da trace da primeira mensagem: a reprodução e o lifecycle são compatíveis com o problema, e o teste com retenção determinística cobre o comportamento futuro, mas não prova a causa histórica.
+
+Os novos checks completos de host e o CI do commit complementar seguem **pendentes**, sob responsabilidade do root. O benchmark Luna/high profile lite já havia obtido **4/4 passes**; não foi repetido porque essas mudanças não alteram a lógica da tarefa mini.

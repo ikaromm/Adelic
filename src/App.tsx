@@ -148,6 +148,7 @@ export default function App() {
   const [eventsConnected, setEventsConnected] = useState(true);
   const [notice, setNotice] = useState('');
   const [busy, setBusy] = useState(false);
+  const [sessionCreationPending, setSessionCreationPending] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
@@ -756,6 +757,7 @@ export default function App() {
     projectForm,
     handoff,
     palette.open,
+    sessionCreationPending,
   ]);
 
   useGlobalShortcuts({
@@ -808,6 +810,7 @@ export default function App() {
       return;
     }
     setBusy(true);
+    setSessionCreationPending(true);
     setNotice('');
     try {
       const created = await api.createSession({
@@ -825,6 +828,7 @@ export default function App() {
     } catch (error) {
       setNotice((error as Error).message);
     } finally {
+      setSessionCreationPending(false);
       setBusy(false);
     }
   }
@@ -832,6 +836,7 @@ export default function App() {
   async function startSuggestedPrompt(text: string) {
     if (!data || busy || settingsPendingRef.current) return;
     setBusy(true);
+    setSessionCreationPending(true);
     setNotice('');
     try {
       const created = await api.createSession({
@@ -851,6 +856,7 @@ export default function App() {
     } catch (error) {
       setNotice((error as Error).message);
     } finally {
+      setSessionCreationPending(false);
       setBusy(false);
     }
   }
@@ -2419,7 +2425,7 @@ export default function App() {
                                     : t('composer.placeholder')
                             }
                             aria-label={t('composer.input')}
-                            disabled={Boolean(session.archivedAt)}
+                            disabled={Boolean(session.archivedAt) || sessionCreationPending}
                             rows={1}
                           />
                         </>

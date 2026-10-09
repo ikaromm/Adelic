@@ -5,7 +5,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createBackend } from '../server/index.js';
 import { Store } from '../server/store.js';
-import { branchName, removeWorktree } from '../server/worktrees.js';
+import {
+  branchName,
+  createExecutorWorktree,
+  executorIsolation,
+  integrateExecutorWorktree,
+  inspectExecutorWorktree,
+  removeWorktree,
+} from '../server/worktrees.js';
 import type { ProviderRegistry, Run, RunInput, Session, WorktreeStatus } from '../shared/contracts.js';
 import { gitIn } from './git-fixtures.js';
 
@@ -152,6 +159,285 @@ function setup(projectPath: string, opts: { dataDir?: string } = {}) {
   return { store, orchestrator, finished, session, api, inputs, waiting, release, send, enable, dataDir, close };
 }
 
+describe('automatic executor worktrees', () => {
+  it('inspects pending task worktree changes against the persisted base before showing them', async () => {
+    const root = makeRepo();
+    const fixture = setup(root);
+    const project = fixture.store.getProject('p')!;
+    const session = fixture.session('Inspect pending checkout');
+    const taskId = 'inspect-live-worktree';
+    writeFileSync(join(root, 'README.md'), 'staged baseline\\n');
+    gitIn(root, 'add', 'README.md');
+    writeFileSync(join(root, 'README.md'), 'staged and unstaged baseline\\n');
+    writeFileSync(join(root, 'user-work.txt'), 'untracked baseline\\n');
+    const worktree = await createExecutorWorktree(
+      project,
+      { id: taskId, title: 'Inspect live worktree' },
+      fixture.dataDir,
+    );
+    try {
+      writeFileSync(join(worktree.path, 'pending-change.txt'), 'observed change\\n');
+      const now = new Date().toISOString();
+      fixture.store.putRun({
+        id: 'inspect-live-run',
+        sessionId: session.id,
+        providerId: 'codex',
+        status: 'completed',
+        route: { level: 'fast', reason: 'test', tools: false, memory: false, contextBudget: 6000 },
+        startedAt: now,
+      });
+      fixture.store.putTask({
+        id: taskId,
+        agentId: 'inspect-live-agent',
+        projectId: project.id,
+        sessionId: session.id,
+        runId: 'inspect-live-run',
+        role: 'worker',
+        title: 'Inspect live worktree',
+        instructions: 'Inspect',
+        scope: [],
+        dependsOn: [],
+        providerId: 'codex',
+        status: 'completed',
+        createdAt: now,
+        recoveryWorktree: worktree,
+        delivery: {
+          status: 'partial',
+          reason: 'Pending changes require inspection.',
+          evidence: [],
+          recovery: { action: 'recover_worktree', reason: 'Inspect pending changes.' },
+          recordedAt: now,
+        },
+      });
+
+      const inspected = await fixture.api<{ artifacts: { worktree?: { status: string; files: { path: string }[] } } }>(
+        `/api/tasks/${taskId}/inspect`,
+      );
+      expect(inspected.status).toBe(200);
+      expect(inspected.body.artifacts.worktree).toMatchObject({ status: 'available' });
+      expect(inspected.body.artifacts.worktree?.files.map((file) => file.path)).toEqual(['pending-change.txt']);
+    } finally {
+      await removeWorktree(project, worktree, fixture.dataDir);
+      await fixture.close();
+    }
+  });
+
+  it('inspects task changes against its captured dirty baseline, excluding inherited and sibling changes', async () => {
+    const repo = makeRepo();
+    const t = setup(repo);
+    const project = t.store.getProject('p')!;
+
+    // Capture all three forms of pre-existing user state: staged, unstaged, and untracked.
+    writeFileSync(join(repo, 'README.md'), 'linha 1\\nstaged\\nlinha 3\\n');
+    gitIn(repo, 'add', 'README.md');
+    writeFileSync(join(repo, 'README.md'), 'linha 1\\nstaged + unstaged\\nlinha 3\\n');
+    writeFileSync(join(repo, 'user-work.txt'), 'herdado\\n');
+    const headBefore = head(repo);
+    const indexBefore = gitIn(repo, 'write-tree').trim();
+    const stagedBefore = gitIn(repo, 'show', ':README.md');
+
+    // A previous sibling has already integrated its own file before this task starts.
+    const sibling = await createExecutorWorktree(project, { id: 'sibling-task-12345678', title: 'Sibling' }, t.dataDir);
+    writeFileSync(join(sibling.path, 'sibling-owned.txt'), 'sibling\\n');
+    expect(await integrateExecutorWorktree(project, sibling)).toMatchObject({
+      changed: true,
+      files: ['sibling-owned.txt'],
+    });
+
+    const task = await createExecutorWorktree(project, { id: 'inspect-task-12345678', title: 'Inspect' }, t.dataDir);
+    expect(task.snapshotTree).toMatch(/^[a-f0-9]+$/);
+    expect(readFileSync(join(task.path, 'README.md'), 'utf8')).toBe('linha 1\\nstaged + unstaged\\nlinha 3\\n');
+    expect(readFileSync(join(task.path, 'user-work.txt'), 'utf8')).toBe('herdado\\n');
+    expect(readFileSync(join(task.path, 'sibling-owned.txt'), 'utf8')).toBe('sibling\\n');
+
+    writeFileSync(join(task.path, 'task-owned.txt'), 'task\\n');
+    const changes = await inspectExecutorWorktree(project, task);
+    expect(changes.map((change) => change.path)).toEqual(['task-owned.txt']);
+
+    // Inspection is read-only with respect to the user's checkout, index and inherited contents.
+    expect(head(repo)).toBe(headBefore);
+    expect(gitIn(repo, 'write-tree').trim()).toBe(indexBefore);
+    expect(gitIn(repo, 'show', ':README.md')).toBe(stagedBefore);
+    expect(status(repo)).toBe('MM README.md\n?? sibling-owned.txt\n?? user-work.txt\n');
+    expect(readFileSync(join(repo, 'README.md'), 'utf8')).toBe('linha 1\\nstaged + unstaged\\nlinha 3\\n');
+    expect(readFileSync(join(repo, 'user-work.txt'), 'utf8')).toBe('herdado\\n');
+    expect(readFileSync(join(repo, 'sibling-owned.txt'), 'utf8')).toBe('sibling\\n');
+
+    await removeWorktree(project, sibling, t.dataDir);
+    await removeWorktree(project, task, t.dataDir);
+  });
+
+  it('allows parallel executors in distinct checkouts and integrates diffs without commits', async () => {
+    const repo = makeRepo();
+    const t = setup(repo);
+    const project = t.store.getProject('p')!;
+    const before = head(repo);
+    const [a, b] = await Promise.all([
+      createExecutorWorktree(project, { id: 'task-a-12345678', title: 'Executor A' }, t.dataDir),
+      createExecutorWorktree(project, { id: 'task-b-12345678', title: 'Executor B' }, t.dataDir),
+    ]);
+    expect(a).toBeDefined();
+    expect(b).toBeDefined();
+    expect(a!.path).not.toBe(b!.path);
+    writeFileSync(join(a!.path, 'README.md'), 'linha 1\nalteração A\nlinha 3\n');
+    const applied = await integrateExecutorWorktree(project, a!);
+    expect(applied).toMatchObject({ changed: true, files: ['README.md'] });
+    expect(readFileSync(join(repo, 'README.md'), 'utf8')).toBe('linha 1\nalteração A\nlinha 3\n');
+    expect(head(repo)).toBe(before);
+    expect(status(repo)).toContain('README.md');
+    await removeWorktree(project, a!, t.dataDir);
+    await removeWorktree(project, b!, t.dataDir);
+  });
+
+  it('delivers artifacts larger than the bounded artifact reader from two real executor worktrees', async () => {
+    const repo = makeRepo();
+    const t = setup(repo);
+    const project = t.store.getProject('p')!;
+    const originalHead = head(repo);
+    const originalIndex = gitIn(repo, 'write-tree').trim();
+    const [a, b] = await Promise.all([
+      createExecutorWorktree(project, { id: 'large-task-a-12345678', title: 'Large A' }, t.dataDir),
+      createExecutorWorktree(project, { id: 'large-task-b-12345678', title: 'Large B' }, t.dataDir),
+    ]);
+    expect(a.path).not.toBe(b.path);
+    const payloadA = Buffer.alloc(2_097_153, 0x61);
+    const payloadB = Buffer.alloc(2_097_153, 0x62);
+    writeFileSync(join(a.path, 'large-a.bin'), payloadA);
+    writeFileSync(join(b.path, 'large-b.bin'), payloadB);
+
+    expect(await integrateExecutorWorktree(project, a)).toMatchObject({ changed: true, files: ['large-a.bin'] });
+    expect(await integrateExecutorWorktree(project, b)).toMatchObject({ changed: true, files: ['large-b.bin'] });
+    expect(readFileSync(join(repo, 'large-a.bin'))).toEqual(payloadA);
+    expect(readFileSync(join(repo, 'large-b.bin'))).toEqual(payloadB);
+    expect(head(repo)).toBe(originalHead);
+    expect(gitIn(repo, 'write-tree').trim()).toBe(originalIndex);
+    expect(status(repo)).toContain('large-a.bin');
+    expect(status(repo)).toContain('large-b.bin');
+
+    await removeWorktree(project, a, t.dataDir);
+    await removeWorktree(project, b, t.dataDir);
+  }, 30_000);
+
+  it('preserves an eligible baseline file when the task changes .gitignore, but applies real deletions', async () => {
+    const repo = makeRepo();
+    const t = setup(repo);
+    const project = t.store.getProject('p')!;
+    writeFileSync(join(repo, 'untracked.keep'), 'baseline user data\n');
+    const ignoredBefore = 'segredo pré-existente\n';
+    writeFileSync(join(repo, 'ignored.log'), ignoredBefore);
+    const worktree = await createExecutorWorktree(project, { id: 'task-ignore-12345678', title: 'Ignore' }, t.dataDir);
+    expect(readFileSync(join(worktree.path, 'untracked.keep'), 'utf8')).toBe('baseline user data\n');
+    expect(existsSync(join(worktree.path, 'ignored.log'))).toBe(false);
+
+    writeFileSync(join(worktree.path, '.gitignore'), 'ignored.log\nuntracked.keep\n');
+    const applied = await integrateExecutorWorktree(project, worktree);
+    expect(applied).toMatchObject({ changed: true, files: ['.gitignore'] });
+    expect(readFileSync(join(repo, 'untracked.keep'), 'utf8')).toBe('baseline user data\n');
+    expect(readFileSync(join(repo, 'ignored.log'), 'utf8')).toBe(ignoredBefore);
+    expect(readFileSync(join(repo, '.gitignore'), 'utf8')).toBe('ignored.log\nuntracked.keep\n');
+    const failedCleanup = await removeWorktree(undefined, worktree, join(t.dataDir, 'wrong-root'));
+    expect(failedCleanup.removed).toBe(false);
+    expect(existsSync(worktree.path)).toBe(true);
+    expect(await integrateExecutorWorktree(project, worktree)).toMatchObject({
+      changed: false,
+      alreadyApplied: true,
+      files: ['.gitignore'],
+    });
+    expect(readFileSync(join(repo, 'untracked.keep'), 'utf8')).toBe('baseline user data\n');
+    await removeWorktree(project, worktree, t.dataDir);
+
+    const deleted = await createExecutorWorktree(project, { id: 'task-delete-12345678', title: 'Delete' }, t.dataDir);
+    rmSync(join(deleted.path, 'README.md'));
+    const deletion = await integrateExecutorWorktree(project, deleted);
+    expect(deletion).toMatchObject({ changed: true, files: ['README.md'] });
+    expect(existsSync(join(repo, 'README.md'))).toBe(false);
+    await removeWorktree(project, deleted, t.dataDir);
+  });
+
+  it('recognizes exact reapplication of a created file but blocks a different-content collision', async () => {
+    const repo = makeRepo();
+    const t = setup(repo);
+    const project = t.store.getProject('p')!;
+    const created = await createExecutorWorktree(project, { id: 'task-new-12345678', title: 'New file' }, t.dataDir);
+    writeFileSync(join(created.path, 'synthetic-result.txt'), 'synthetic task output\\n');
+    expect(await integrateExecutorWorktree(project, created)).toMatchObject({
+      changed: true,
+      files: ['synthetic-result.txt'],
+    });
+    expect(await integrateExecutorWorktree(project, created)).toMatchObject({
+      changed: false,
+      alreadyApplied: true,
+      files: ['synthetic-result.txt'],
+    });
+    expect(readFileSync(join(repo, 'synthetic-result.txt'), 'utf8')).toBe('synthetic task output\\n');
+    await removeWorktree(project, created, t.dataDir);
+
+    const collided = await createExecutorWorktree(project, { id: 'task-clash-12345678', title: 'Clash' }, t.dataDir);
+    writeFileSync(join(collided.path, 'synthetic-clash.txt'), 'expected patch content\\n');
+    writeFileSync(join(repo, 'synthetic-clash.txt'), 'different pre-existing content\\n');
+    await expect(integrateExecutorWorktree(project, collided)).rejects.toThrow();
+    expect(readFileSync(join(repo, 'synthetic-clash.txt'), 'utf8')).toBe('different pre-existing content\\n');
+    await removeWorktree(project, collided, t.dataDir);
+  });
+
+  it('snapshots a dirty tracked and eligible untracked workspace without touching the index, HEAD, branch or ignored files', async () => {
+    const repo = makeRepo();
+    const t = setup(repo);
+    const project = t.store.getProject('p')!;
+    writeFileSync(join(repo, 'README.md'), 'linha 1\nuser dirty\nlinha 3\n');
+    writeFileSync(join(repo, 'user-work.txt'), 'preservar\n');
+    writeFileSync(join(repo, 'ignored.log'), 'segredo não copiar\n');
+    gitIn(repo, 'add', 'README.md');
+    const beforeHead = head(repo);
+    const beforeBranch = gitIn(repo, 'branch', '--show-current').trim();
+    const beforeIndex = readFileSync(join(repo, '.git', 'index'));
+    const worktree = await createExecutorWorktree(project, { id: 'task-dirty-12345678', title: 'Dirty' }, t.dataDir);
+    expect(worktree.snapshotTree).toMatch(/^[a-f0-9]+$/);
+    expect(readFileSync(join(worktree.path, 'README.md'), 'utf8')).toContain('user dirty');
+    expect(readFileSync(join(worktree.path, 'user-work.txt'), 'utf8')).toBe('preservar\n');
+    expect(existsSync(join(worktree.path, 'ignored.log'))).toBe(false);
+    expect(head(repo)).toBe(beforeHead);
+    expect(gitIn(repo, 'branch', '--show-current').trim()).toBe(beforeBranch);
+    expect(readFileSync(join(repo, '.git', 'index'))).toEqual(beforeIndex);
+    expect(readFileSync(join(repo, 'ignored.log'), 'utf8')).toContain('segredo');
+    await removeWorktree(project, worktree, t.dataDir);
+  });
+
+  it('integrates disjoint task changes over a dirty baseline and retains conflicts for retry', async () => {
+    const repo = makeRepo();
+    const t = setup(repo);
+    const project = t.store.getProject('p')!;
+    writeFileSync(join(repo, 'README.md'), 'linha 1\nuser baseline\nlinha 3\n');
+    writeFileSync(join(repo, 'user-work.txt'), 'preservar\n');
+    const [a, b] = await Promise.all([
+      createExecutorWorktree(project, { id: 'task-a-dirty-123', title: 'A' }, t.dataDir),
+      createExecutorWorktree(project, { id: 'task-b-dirty-123', title: 'B' }, t.dataDir),
+    ]);
+    writeFileSync(join(a.path, 'alpha.txt'), 'A\n');
+    writeFileSync(join(b.path, 'beta.txt'), 'B\n');
+    expect(await integrateExecutorWorktree(project, a)).toMatchObject({ changed: true, files: ['alpha.txt'] });
+    expect(await integrateExecutorWorktree(project, b)).toMatchObject({ changed: true, files: ['beta.txt'] });
+    expect(readFileSync(join(repo, 'README.md'), 'utf8')).toContain('user baseline');
+    expect(readFileSync(join(repo, 'user-work.txt'), 'utf8')).toBe('preservar\n');
+    expect(readFileSync(join(repo, 'alpha.txt'), 'utf8')).toBe('A\n');
+    expect(readFileSync(join(repo, 'beta.txt'), 'utf8')).toBe('B\n');
+    await Promise.all([removeWorktree(project, a, t.dataDir), removeWorktree(project, b, t.dataDir)]);
+
+    const c = await createExecutorWorktree(project, { id: 'task-conflict-dirty', title: 'Conflict' }, t.dataDir);
+    writeFileSync(join(c.path, 'README.md'), 'linha 1\nworker edit\nlinha 3\n');
+    writeFileSync(join(repo, 'README.md'), 'linha 1\nconcurrent user edit\nlinha 3\n');
+    await expect(integrateExecutorWorktree(project, c)).rejects.toThrow();
+    expect(readFileSync(join(repo, 'README.md'), 'utf8')).toContain('concurrent user edit');
+    expect(readFileSync(join(c.path, 'README.md'), 'utf8')).toContain('worker edit');
+    expect(existsSync(c.path)).toBe(true);
+    // Once the user returns the conflicting file to the recorded baseline, retry is safe.
+    writeFileSync(join(repo, 'README.md'), 'linha 1\nuser baseline\nlinha 3\n');
+    expect(await integrateExecutorWorktree(project, c)).toMatchObject({ changed: true, files: ['README.md'] });
+    expect(readFileSync(join(repo, 'README.md'), 'utf8')).toContain('worker edit');
+    await removeWorktree(project, c, t.dataDir);
+  });
+});
+
 describe('worktree per conversation', () => {
   it('creates the worktree outside the repository and runs there, leaving the main checkout untouched', async () => {
     const repo = makeRepo();
@@ -234,6 +520,7 @@ describe('worktree per conversation', () => {
     const plain = realpathSync(mkdtempSync(join(tmpdir(), 'adelic-wt-plain-')));
     cleanup.push(() => rmSync(plain, { recursive: true, force: true }));
     const t = setup(plain);
+    expect(await executorIsolation(t.store.getProject('p')!)).toMatchObject({ mode: 'serial' });
     const s = t.session();
     expect((await t.api(`/api/sessions/${s.id}/worktree`)).body).toMatchObject({
       enabled: false,
@@ -261,6 +548,7 @@ describe('worktree per conversation', () => {
     const { mkdirSync } = await import('node:fs');
     mkdirSync(nested);
     t.store.putProject({ ...t.store.getProject('p')!, id: 'q', path: nested });
+    expect(await executorIsolation(t.store.getProject('q')!)).toMatchObject({ mode: 'blocked' });
     const inSub = t.session('Sub', 'q');
     expect((await t.api(`/api/sessions/${inSub.id}/worktree`)).body).toMatchObject({
       available: false,
@@ -270,8 +558,26 @@ describe('worktree per conversation', () => {
     cleanup.push(() => rmSync(empty, { recursive: true, force: true }));
     gitIn(empty, 'init', '-q', '-b', 'main');
     t.store.putProject({ ...t.store.getProject('p')!, id: 'e', path: empty });
+    expect(await executorIsolation(t.store.getProject('e')!)).toMatchObject({ mode: 'blocked' });
     expect((await t.api(`/api/sessions/${t.session('E', 'e').id}/worktree`)).body).toMatchObject({
       reason: 'o repositório ainda não tem commits',
+    });
+
+    const malformed = makeRepo();
+    writeFileSync(join(malformed, '.git', 'HEAD'), 'not-a-symbolic-ref\n');
+    t.store.putProject({ ...t.store.getProject('p')!, id: 'm', path: malformed });
+    expect(await executorIsolation(t.store.getProject('m')!)).toMatchObject({
+      mode: 'blocked',
+      reason: 'Metadados Git inválidos ou inacessíveis; execução bloqueada.',
+    });
+
+    const invalid = realpathSync(mkdtempSync(join(tmpdir(), 'adelic-wt-invalid-git-')));
+    cleanup.push(() => rmSync(invalid, { recursive: true, force: true }));
+    writeFileSync(join(invalid, '.git'), 'gitdir: /path/does/not/exist\\n');
+    t.store.putProject({ ...t.store.getProject('p')!, id: 'i', path: invalid });
+    expect(await executorIsolation(t.store.getProject('i')!)).toMatchObject({
+      mode: 'blocked',
+      reason: 'Metadados Git inválidos ou inacessíveis; execução bloqueada.',
     });
   });
 

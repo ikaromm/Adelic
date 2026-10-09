@@ -19,6 +19,8 @@ body {
   font-size: var(--text-md);
   line-height: var(--leading);
   font-weight: 400;
+  font-synthesis: none;
+  font-optical-sizing: none;
   color: var(--text);
   background: var(--app-bg);
   -webkit-font-smoothing: antialiased;

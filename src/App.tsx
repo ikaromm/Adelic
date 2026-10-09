@@ -1,3 +1,7 @@
+import { RunProgressBanner } from './components/RunProgressBanner';
+import { ComposerSurface } from './components/ComposerSurface';
+import { ComposerAccessMenu } from './components/ComposerAccessMenu';
+import { ExecutionProfile } from './components/ExecutionProfile';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import {
   ArrowDown,
@@ -25,7 +29,6 @@ import {
   CornerDownRight,
   SquareTerminal,
   GitBranch,
-  Lock,
   Archive,
   ArchiveRestore,
 } from 'lucide-react';
@@ -94,7 +97,14 @@ import { HandoffDialog, type HandoffTarget } from './components/HandoffDialog';
 import { LimitNotice, SpendWarningBanner } from './components/SpendLimits';
 import { isLimitError, useUsage } from './hooks/useUsage';
 import type { ApiError, SpendLimitsPatch } from './api';
-import { SIDEBAR_LIMIT, SessionItem, SidebarNav, UpdateNotice, type Page } from './components/Sidebar';
+import {
+  SIDEBAR_LIMIT,
+  SessionItem,
+  SidebarNav,
+  UpdateNotice,
+  type Page,
+  type SessionSidebarPatch,
+} from './components/Sidebar';
 import { ToolsPanel, type ToolsTab } from './components/ToolsPanel';
 import { WorktreePanel } from './components/WorktreePanel';
 import { ProjectFolders } from './components/ProjectFolders';
@@ -143,6 +153,8 @@ export default function App() {
   const [helpOpen, setHelpOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [projectForm, setProjectForm] = useState(false);
+  const [projectSetupPaused, setProjectSetupPaused] = useState(false);
+  const [settingsSearchRequest, setSettingsSearchRequest] = useState<{ id: number; query: string }>();
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [projectQuery, setProjectQuery] = useState('');
   const [graphQueryResult, setGraphQueryResult] = useState<GraphifyQueryResult | null>(null);
@@ -205,6 +217,7 @@ export default function App() {
   const plans = usePlans(selectedSession, setNotice, (error, retry) => blockedByLimit(error, retry));
   const { apply: applyPlan, reload: reloadPlans } = plans;
   const selectSession = (id: string) => {
+    if (id !== selectedSessionRef.current) setToolsTab(null);
     selectedSessionRef.current = id;
     setSelectedSession(id);
   };
@@ -218,6 +231,7 @@ export default function App() {
   };
   const selectProject = (id: string) => {
     if (id !== selectedProjectRef.current) {
+      setToolsTab(null);
       selectedProjectRef.current = id;
       graphActionRef.current++;
       setProjectBusy(false);
@@ -589,6 +603,9 @@ export default function App() {
   // The Git page follows the selected project (a linked conversation selects its project).
   const projectIsGit = useGitRepo(project?.remote ? undefined : project?.id);
   const messages = currentDetail?.messages || [];
+  const activeConversationRun = [...(currentDetail?.runs || []), ...(data?.runs || [])].find(
+    (run) => run.id === session?.activeRunId,
+  );
   const activityEvents = currentDetail?.events || [];
   const activityTasks = currentDetail?.tasks || [];
   // "Tentar de novo" is offered only on the latest answer, and only if it failed.
@@ -669,13 +686,6 @@ export default function App() {
     element.focus();
     element.setSelectionRange(pending.caret, pending.caret);
   }, [composer, selectedSession, composerRef]);
-  useEffect(() => {
-    if (!focusComposerRef.current || page !== 'chat') return;
-    const element = composerRef.current;
-    if (!element || element.disabled) return;
-    focusComposerRef.current = false;
-    element.focus();
-  }, [selectedSession, page, currentDetail?.session.id, composerRef]);
 
   const palette = useCommandPalette({
     projectId: session?.projectId,
@@ -727,6 +737,27 @@ export default function App() {
     },
   });
 
+  useEffect(() => {
+    if (!focusComposerRef.current || page !== 'chat') return;
+    // Keep the pending composer focus until the topmost dialog closes. In particular,
+    // creating a conversation can resolve after the search dialog has already opened.
+    if (searchOpen || helpOpen || projectForm || handoff || palette.open) return;
+    const element = composerRef.current;
+    if (!element || element.disabled) return;
+    focusComposerRef.current = false;
+    element.focus();
+  }, [
+    selectedSession,
+    page,
+    currentDetail?.session.id,
+    composerRef,
+    searchOpen,
+    helpOpen,
+    projectForm,
+    handoff,
+    palette.open,
+  ]);
+
   useGlobalShortcuts({
     newConversation: () => void newConversation(),
     search: () => setSearchOpen(true),
@@ -740,6 +771,8 @@ export default function App() {
       if (palette.open) palette.close();
       setSearchOpen(false);
       setProjectForm(false);
+      setProjectSetupPaused(false);
+      setSettingsSearchRequest(undefined);
       setHelpOpen(false);
       setSidebarOpen(false);
     },
@@ -752,6 +785,8 @@ export default function App() {
       const created = await api.createProject(fields);
       invalidateBootstrapRefreshes();
       setProjectForm(false);
+      setProjectSetupPaused(false);
+      setSettingsSearchRequest(undefined);
       await refreshBootstrap(false);
       selectProject(created.id);
       selectSession('');
@@ -1056,7 +1091,11 @@ export default function App() {
   }
 
   /** "Tentar com outro modelo": the server switches the conversation and starts the new run. */
-  async function retryWithModel(runId: string, target: { providerId: string; model: string }, overrideLimit = false) {
+  async function retryWithModel(
+    runId: string,
+    target: { providerId?: string; model?: string } = {},
+    overrideLimit = false,
+  ) {
     if (!session || busy || session.activeRunId) return;
     const sessionId = session.id;
     setBusy(true);
@@ -1166,6 +1205,26 @@ export default function App() {
     );
   }
 
+  async function updateSidebarConversation(id: string, patch: SessionSidebarPatch) {
+    if (busy) throw new Error(t('sidebarActions.busy'));
+    setBusy(true);
+    setNotice('');
+    try {
+      const updated = await api.updateSession(id, patch);
+      invalidateBootstrapRefreshes();
+      applySession(updated);
+      if (selectedSessionRef.current === id) {
+        if (Object.hasOwn(patch, 'projectId')) selectProject(updated.projectId || '');
+        await refreshDetail(id);
+      }
+    } catch (error) {
+      setNotice((error as Error).message);
+      throw error;
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function setConversationArchived(archived: boolean) {
     if (!session || busy || session.activeRunId || Boolean(session.archivedAt) === archived) return;
     setBusy(true);
@@ -1206,6 +1265,18 @@ export default function App() {
             }
           : current,
       );
+      setNotice('');
+    } catch (error) {
+      setNotice((error as Error).message);
+      throw error;
+    }
+  }
+
+  async function deleteProjectFolder(id: string) {
+    try {
+      await api.deleteProjectFolder(id);
+      await refreshBootstrap();
+      if (selectedSessionRef.current) await refreshDetail(selectedSessionRef.current);
       setNotice('');
     } catch (error) {
       setNotice((error as Error).message);
@@ -1417,23 +1488,6 @@ export default function App() {
     await enqueueSettingsPatch({ sandbox, approvalMode });
   }
 
-  async function updateChatPermissions(sandbox: 'read-only' | 'workspace-write', approvalMode: ApprovalMode) {
-    if (!data) return;
-    // In an override context, sandbox remains a global setting while approval changes belong to
-    // this conversation. Preserve an inherited Automatic mode when only the sandbox is changed.
-    if (configuredApprovalMode != null) {
-      await enqueueSettingsPatch({ sandbox });
-      if (approvalMode !== 'automatic' && approvalMode !== effectiveApprovalMode) await changeSession({ approvalMode });
-      return;
-    }
-    // Automatic can be inherited globally; selecting its matching entry only changes sandbox.
-    if (approvalMode === 'automatic') {
-      await enqueueSettingsPatch({ sandbox });
-      return;
-    }
-    await updatePermissions(sandbox, approvalMode);
-  }
-
   async function changeSpendLimits(patch: SpendLimitsPatch) {
     await enqueueSettingsPatch({ spendLimits: patch });
   }
@@ -1496,7 +1550,6 @@ export default function App() {
   const localApprovalControls = accessKind === 'local';
   const supportsAutomaticApproval =
     (provider?.id === 'codex' || provider?.id === 'kiro') && provider.capabilities.tools;
-  const automaticApprovalUnavailable = !supportsAutomaticApproval;
   // Settings.language is the source of truth; localStorage mirrors it for the login screen.
   const serverLanguage = data?.settings.language;
   const hasData = Boolean(data);
@@ -1575,6 +1628,8 @@ export default function App() {
   /** One message of the conversation, with its retry notice and activity panel. */
   function renderTimelineMessage(message: Message) {
     if (!data || !session) return null;
+    const timelineRun = currentDetail?.runs.find((run) => run.id === message.runId);
+    const sameProjectRoot = Boolean(conversationProject && timelineRun?.artifactRoot === conversationProject.path);
     return (
       <div className="timeline-message" key={message.id}>
         <MessageCard
@@ -1619,10 +1674,7 @@ export default function App() {
           <RetryNotice
             run={currentDetail?.runs.find((run) => run.id === message.runId)}
             disabled={busy || Boolean(session.activeRunId)}
-            onRetry={() => {
-              const prompt = messages.find((m) => m.role === 'user' && m.runId === message.runId);
-              if (prompt) void sendMessage(prompt.content, prompt.attachments ?? []);
-            }}
+            onRetry={() => message.runId && void retryWithModel(message.runId)}
             alternatives={retryAlternatives(
               data.providers,
               currentDetail?.runs.find((run) => run.id === message.runId),
@@ -1644,7 +1696,31 @@ export default function App() {
             taskOutputs={taskOutputs.outputs}
             loadingTaskOutputs={taskOutputs.loading}
             onLoadTaskOutput={taskOutputs.load}
+            onRecoveryRefresh={() => refreshDetail(selectedSession)}
             busy={Boolean(session.activeRunId)}
+            onOpenTerminal={sameProjectRoot ? () => setToolsTab('terminal') : undefined}
+            onOpenPreview={sameProjectRoot ? () => setToolsTab('preview') : undefined}
+            onOpenProject={() =>
+              setNotice(
+                currentDetail?.runs.find((run) => run.id === message.runId)?.artifactRoot ||
+                  conversationProject?.path ||
+                  '',
+              )
+            }
+            onInitializeGit={
+              conversationProject && sameProjectRoot && !session.activeRunId && !conversationProject.remote
+                ? async () => {
+                    try {
+                      await api.initProjectGit(conversationProject.id);
+                      setNotice(t('delivery.gitInitialized'));
+                      await refreshDetail(session.id);
+                    } catch (e) {
+                      setNotice((e as Error).message);
+                      throw e;
+                    }
+                  }
+                : undefined
+            }
           />
         )}
       </div>
@@ -1709,6 +1785,10 @@ export default function App() {
                   session={itemSession}
                   selected={itemSession.id === selectedSession}
                   now={now}
+                  projects={data?.projects || []}
+                  folders={data?.projectFolders || []}
+                  disabled={busy}
+                  onUpdate={(patch) => updateSidebarConversation(itemSession.id, patch)}
                   onSelect={() => openConversation(itemSession.id)}
                 />
               ))}
@@ -1745,6 +1825,10 @@ export default function App() {
                           session={itemSession}
                           selected={itemSession.id === selectedSession}
                           now={now}
+                          projects={data?.projects || []}
+                          folders={data?.projectFolders || []}
+                          disabled={busy}
+                          onUpdate={(patch) => updateSidebarConversation(itemSession.id, patch)}
                           onSelect={() => openConversation(itemSession.id)}
                         />
                       ))}
@@ -1761,7 +1845,11 @@ export default function App() {
                 className="icon-button sidebar-add"
                 aria-label={t('sidebar.addProject')}
                 title={t('sidebar.addProject')}
-                onClick={() => setProjectForm(true)}
+                onClick={() => {
+                  setProjectForm(true);
+                  setProjectSetupPaused(false);
+                  setNotice('');
+                }}
               >
                 <Plus size={15} />
               </button>
@@ -1821,7 +1909,12 @@ export default function App() {
                           now={now}
                           onSelect={openConversation}
                           onCreate={(name, parentId) => createProjectFolder(item.id, name, parentId)}
+                          projects={data?.projects || []}
+                          allFolders={data?.projectFolders || []}
+                          onSessionUpdate={updateSidebarConversation}
                           onRename={renameProjectFolder}
+                          onDelete={deleteProjectFolder}
+                          disabled={busy}
                         />
                         {projectList.hidden > 0 && (
                           <button type="button" className="sidebar-more" onClick={() => toggleList(item.id, true)}>
@@ -1857,6 +1950,10 @@ export default function App() {
                                     session={itemSession}
                                     selected={itemSession.id === selectedSession}
                                     now={now}
+                                    projects={data?.projects || []}
+                                    folders={data?.projectFolders || []}
+                                    disabled={busy}
+                                    onUpdate={(patch) => updateSidebarConversation(itemSession.id, patch)}
                                     onSelect={() => openConversation(itemSession.id)}
                                   />
                                 ))}
@@ -2188,6 +2285,21 @@ export default function App() {
                   </div>
                 </section>
                 <div className="composer-wrap">
+                  {activeConversationRun && (
+                    <RunProgressBanner
+                      run={activeConversationRun}
+                      events={activityEvents}
+                      tasks={activityTasks}
+                      approvals={currentDetail?.approvals || []}
+                      streamUpdatedAt={stream?.runId === activeConversationRun.id ? stream.updatedAt : undefined}
+                      eventsConnected={eventsConnected}
+                      onShowActivity={() => {
+                        const activity = document.getElementById(`run-activity-${activeConversationRun.id}`);
+                        activity?.querySelector('details')?.setAttribute('open', '');
+                        activity?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+                      }}
+                    />
+                  )}
                   {conversationScroll.showJump && (
                     <button
                       type="button"
@@ -2241,359 +2353,295 @@ export default function App() {
                     className={`composer-box ${session.activeRunId ? 'is-running' : ''} ${attachments.dragging ? 'is-dragging' : ''}`}
                     {...attachments.dropHandlers}
                   >
-                    <PendingAttachments
-                      items={attachments.items}
-                      disabled={busy || Boolean(session.archivedAt)}
-                      onRemove={attachments.remove}
-                    />
-                    {slash.open && (
-                      <CommandPopup
-                        id={slash.listboxId}
-                        items={slash.items}
-                        activeIndex={slash.activeIndex}
-                        optionId={slash.optionId}
-                        onSelect={slash.select}
-                        onHover={slash.setActiveIndex}
-                      />
-                    )}
-                    <MentionPopup
-                      id={mentions.listboxId}
-                      state={mentions.state}
-                      items={mentions.items}
-                      activeIndex={mentions.activeIndex}
-                      optionId={mentions.optionId}
-                      onSelect={mentions.select}
-                      onHover={mentions.setActiveIndex}
-                    />
-                    <textarea
-                      ref={composerRef}
-                      className="composer-input"
-                      value={composer}
-                      onChange={(event) => {
-                        mentions.trackCaret(event);
-                        setDrafts((current) => ({ ...current, [session.id]: event.target.value }));
-                      }}
-                      onSelect={mentions.trackCaret}
-                      onPaste={attachments.onPaste}
-                      {...(mentions.open ? mentions.inputProps : slash.inputProps)}
-                      onKeyDown={(event) => {
-                        // An open list (commands or files) owns Enter, Tab, arrows and Escape.
-                        if (slash.onKeyDown(event)) return;
-                        if (mentions.onKeyDown(event)) return;
-                        const action = composerKeyAction(
-                          { ...event, isComposing: event.nativeEvent.isComposing },
-                          Boolean(session.activeRunId),
-                        );
-                        if (!action) return;
-                        event.preventDefault();
-                        if (action === 'send') void sendMessage();
-                        else if (action === 'queue') void queueMessage();
-                        else if (composer.trim() && !attachments.uploading)
-                          messageQueue.askSendNow({
-                            content: composer.trim(),
-                            attachmentIds: attachments.ready.map((item) => item.id),
-                          });
-                      }}
-                      placeholder={
-                        session.archivedAt
-                          ? t('app.archivedBanner')
-                          : session.activeRunId
-                            ? t('composer.placeholder.running')
-                            : session.planFirst
-                              ? t('composer.placeholder.planFirst')
-                              : t('composer.placeholder')
+                    <ComposerSurface
+                      input={
+                        <>
+                          <PendingAttachments
+                            items={attachments.items}
+                            disabled={busy || Boolean(session.archivedAt)}
+                            onRemove={attachments.remove}
+                          />
+                          {slash.open && (
+                            <CommandPopup
+                              id={slash.listboxId}
+                              items={slash.items}
+                              activeIndex={slash.activeIndex}
+                              optionId={slash.optionId}
+                              onSelect={slash.select}
+                              onHover={slash.setActiveIndex}
+                            />
+                          )}
+                          <MentionPopup
+                            id={mentions.listboxId}
+                            state={mentions.state}
+                            items={mentions.items}
+                            activeIndex={mentions.activeIndex}
+                            optionId={mentions.optionId}
+                            onSelect={mentions.select}
+                            onHover={mentions.setActiveIndex}
+                          />
+                          <textarea
+                            ref={composerRef}
+                            className="composer-input"
+                            value={composer}
+                            onChange={(event) => {
+                              mentions.trackCaret(event);
+                              setDrafts((current) => ({ ...current, [session.id]: event.target.value }));
+                            }}
+                            onSelect={mentions.trackCaret}
+                            onPaste={attachments.onPaste}
+                            {...(mentions.open ? mentions.inputProps : slash.inputProps)}
+                            onKeyDown={(event) => {
+                              // An open list (commands or files) owns Enter, Tab, arrows and Escape.
+                              if (slash.onKeyDown(event)) return;
+                              if (mentions.onKeyDown(event)) return;
+                              const action = composerKeyAction(
+                                { ...event, isComposing: event.nativeEvent.isComposing },
+                                Boolean(session.activeRunId),
+                              );
+                              if (!action) return;
+                              event.preventDefault();
+                              if (action === 'send') void sendMessage();
+                              else if (action === 'queue') void queueMessage();
+                              else if (composer.trim() && !attachments.uploading)
+                                messageQueue.askSendNow({
+                                  content: composer.trim(),
+                                  attachmentIds: attachments.ready.map((item) => item.id),
+                                });
+                            }}
+                            placeholder={
+                              session.archivedAt
+                                ? t('app.archivedBanner')
+                                : session.activeRunId
+                                  ? t('composer.placeholder.running')
+                                  : session.planFirst
+                                    ? t('composer.placeholder.planFirst')
+                                    : t('composer.placeholder')
+                            }
+                            aria-label={t('composer.input')}
+                            disabled={Boolean(session.archivedAt)}
+                            rows={1}
+                          />
+                        </>
                       }
-                      aria-label={t('composer.input')}
-                      disabled={Boolean(session.archivedAt)}
-                      rows={1}
-                    />
-                    <div className="composer-toolbar">
-                      <div className="composer-controls">
-                        <AttachButton
-                          disabled={busy || Boolean(session.archivedAt)}
-                          full={attachments.full}
-                          onFiles={attachments.add}
-                        />
-                        {voiceEnabled && (
-                          <VoiceButton
-                            state={voice.state}
-                            elapsed={voice.elapsed}
-                            level={voice.level}
-                            blocker={voice.blocker}
-                            disabled={(busy || Boolean(session.archivedAt)) && voice.state === 'idle'}
-                            onToggle={() => {
-                              if (voice.blocker) return setNotice(voice.blocker);
-                              if (voice.state === 'idle') dictationTargetRef.current = session.id;
-                              voice.toggle();
+                      primaryControls={
+                        <>
+                          <ModelMenu
+                            providers={
+                              conversationProject?.remote
+                                ? data.providers.filter((item) => item.id === 'codex' || item.id === 'kiro')
+                                : data.providers
+                            }
+                            providerId={session.providerId}
+                            sessionId={session.id}
+                            modelId={session.model}
+                            disabled={busy || Boolean(session.activeRunId)}
+                            onChange={(providerId, model) => {
+                              // A different agent in a conversation with messages asks about a summary first.
+                              if (providerId !== session.providerId && messages.some((m) => m.content.trim()))
+                                return openHandoff({ providerId, ...(model ? { model } : {}) });
+                              void changeSession(
+                                providerId === session.providerId
+                                  ? { model: model || null }
+                                  : { providerId, model: model || null },
+                              );
                             }}
                           />
-                        )}
-                        <ModelMenu
-                          providers={
-                            conversationProject?.remote
-                              ? data.providers.filter((item) => item.id === 'codex' || item.id === 'kiro')
-                              : data.providers
-                          }
-                          providerId={session.providerId}
-                          sessionId={session.id}
-                          modelId={session.model}
-                          disabled={busy || Boolean(session.activeRunId)}
-                          onChange={(providerId, model) => {
-                            // A different agent in a conversation with messages asks about a summary first.
-                            if (providerId !== session.providerId && messages.some((m) => m.content.trim()))
-                              return openHandoff({ providerId, ...(model ? { model } : {}) });
-                            void changeSession(
-                              providerId === session.providerId
-                                ? { model: model || null }
-                                : { providerId, model: model || null },
-                            );
-                          }}
-                        />
-                        <ChoiceMenu
-                          label={t('composer.thinking.label')}
-                          icon={<Brain size={14} />}
-                          value={session.thinking || 'auto'}
-                          options={thinkingOptions.map((value) => ({
-                            value,
-                            label: thinkingLabel(value),
-                            detail:
-                              value === 'auto'
-                                ? thinkingOptions.length === 1
-                                  ? reasoningUnavailable
-                                    ? t('composer.thinking.autoUnavailable')
-                                    : t('composer.thinking.autoNoLevels')
-                                  : t('composer.thinking.autoRoute')
-                                : undefined,
-                          }))}
-                          hint={thinkingOptions.length > 1 ? t('composer.thinking.hint') : undefined}
-                          disabled={busy || Boolean(session.activeRunId)}
-                          onChange={(value) => void changeSession({ thinking: value })}
-                        />
-                        <ChoiceMenu
-                          label={t('composer.autonomy.label')}
-                          icon={<Sparkles size={14} />}
-                          width={310}
-                          value={session.approvalMode || 'inherit'}
-                          disabled={!localApprovalControls || busy || Boolean(session.activeRunId)}
-                          title={
-                            !localApprovalControls
-                              ? t('composer.autonomy.localOnly')
-                              : automaticApprovalUnavailable
-                                ? t('composer.autonomy.automaticUnavailable')
-                                : undefined
-                          }
-                          options={[
-                            {
-                              value: 'inherit',
-                              label: t('composer.autonomy.inherit'),
-                              detail: t('composer.autonomy.effective', {
-                                mode: t(
-                                  effectiveApprovalMode === 'automatic'
-                                    ? 'composer.autonomy.mode.automatic'
-                                    : effectiveApprovalMode === 'manual'
-                                      ? 'composer.autonomy.mode.manual'
-                                      : 'composer.autonomy.mode.autoSafe',
-                                ),
-                              }),
-                            },
-                            {
-                              value: 'auto-safe',
-                              label: t('composer.autonomy.mode.autoSafe'),
-                              detail: project?.remote
-                                ? t('composer.autonomy.remoteSafeDetail')
-                                : t('composer.autonomy.autoSafeDetail'),
-                            },
-                            {
-                              value: 'manual',
-                              label: t('composer.autonomy.mode.manual'),
-                              detail: t('composer.autonomy.manualDetail'),
-                            },
-                            {
-                              value: 'automatic',
-                              label: t('composer.autonomy.mode.automatic'),
-                              detail: automaticApprovalUnavailable
-                                ? t('composer.autonomy.automaticUnavailable')
-                                : project?.remote
-                                  ? t('composer.autonomy.remoteAutomaticDetail')
-                                  : t('composer.autonomy.automaticDetail'),
-                              disabled: automaticApprovalUnavailable,
-                            },
-                          ]}
-                          hint={
-                            automaticApprovalUnavailable
-                              ? t('composer.autonomy.automaticUnavailable')
-                              : project?.remote
-                                ? t('composer.autonomy.remoteHint')
-                                : t('composer.autonomy.hint')
-                          }
-                          onChange={(value) =>
-                            void changeSession({ approvalMode: value === 'inherit' ? null : (value as ApprovalMode) })
-                          }
-                        />
-                        <ChoiceMenu
-                          label={t('composer.permissions')}
-                          icon={internetForcesManual ? <Lock size={14} /> : <Shield size={14} />}
-                          width={340}
-                          value={`${data.settings.sandbox}|${effectiveApprovalMode}`}
-                          disabled={settingsPending}
-                          title={internetForcesManual ? t('composer.permissions.internetForced') : undefined}
-                          options={[
-                            {
-                              value: 'read-only|auto-safe',
-                              label: t('composer.permissions.readAuto'),
-                              detail: internetForcesManual
-                                ? t('composer.permissions.internetForced')
-                                : t('composer.permissions.autoDetail'),
-                              disabled: internetForcesManual,
-                            },
-                            {
-                              value: 'read-only|manual',
-                              label: t('composer.permissions.readManual'),
-                              detail: t('composer.permissions.manualDetail'),
-                            },
-                            ...(effectiveApprovalMode === 'automatic'
-                              ? [
-                                  {
-                                    value: 'read-only|automatic',
-                                    label: t('composer.permissions.readAutomatic'),
-                                    detail: t('composer.permissions.automaticDetail'),
-                                  },
-                                ]
-                              : []),
-                            {
-                              value: 'workspace-write|auto-safe',
-                              label: t('composer.permissions.writeAuto'),
-                              detail: internetForcesManual
-                                ? t('composer.permissions.internetForced')
-                                : t('composer.permissions.writeAutoDetail'),
-                              disabled: internetForcesManual,
-                            },
-                            {
-                              value: 'workspace-write|manual',
-                              label: t('composer.permissions.writeManual'),
-                              detail: t('composer.permissions.manualDetail'),
-                            },
-                            ...(effectiveApprovalMode === 'automatic'
-                              ? [
-                                  {
-                                    value: 'workspace-write|automatic',
-                                    label: t('composer.permissions.writeAutomatic'),
-                                    detail: t('composer.permissions.automaticDetail'),
-                                  },
-                                ]
-                              : []),
-                          ]}
-                          hint={t('composer.permissions.hint')}
-                          onChange={(value) => {
-                            const [sandbox, approvalMode] = value.split('|') as [
-                              'read-only' | 'workspace-write',
-                              ApprovalMode,
-                            ];
-                            void updateChatPermissions(sandbox, approvalMode);
-                          }}
-                        />
-                        <ConversationMenu
-                          projects={data.projects}
-                          projectId={session.projectId}
-                          mode={session.mode}
-                          disabled={busy || Boolean(session.activeRunId)}
-                          context={conversationContext}
-                          memoryScope={session.projectId === null ? detachedMemoryScope : undefined}
-                          onProject={(projectId) => {
-                            const destination = data.projects.find((item) => item.id === projectId);
-                            if (!destination?.remote) return void changeSession({ projectId });
-                            const providerId = providerForRemoteProject(session.providerId, data.providers);
-                            if (!providerId) return setNotice(t('remoteHosts.providerRequired'));
-                            void changeSession({
-                              projectId,
-                              ...(providerId !== session.providerId ? { providerId } : {}),
-                            });
-                          }}
-                          onMode={(mode) => void changeSession({ mode })}
-                          onConfigure={
-                            conversationProject
-                              ? () => {
-                                  selectProject(conversationProject.id);
-                                  setPage('settings');
-                                  setSidebarOpen(false);
-                                }
-                              : undefined
-                          }
-                        />
-                        {!conversationProject?.remote && (
-                          <button
-                            type="button"
-                            className={`composer-pill plan-first-toggle ${session.planFirst ? 'active' : ''}`}
-                            aria-pressed={Boolean(session.planFirst)}
-                            title={t('composer.planFirstTitle')}
+                          <ChoiceMenu
+                            label={t('composer.thinking.label')}
+                            icon={<Brain size={14} />}
+                            value={session.thinking || 'auto'}
+                            options={thinkingOptions.map((value) => ({
+                              value,
+                              label: thinkingLabel(value),
+                              detail:
+                                value === 'auto'
+                                  ? thinkingOptions.length === 1
+                                    ? reasoningUnavailable
+                                      ? t('composer.thinking.autoUnavailable')
+                                      : t('composer.thinking.autoNoLevels')
+                                    : t('composer.thinking.autoRoute')
+                                  : undefined,
+                            }))}
+                            hint={thinkingOptions.length > 1 ? t('composer.thinking.hint') : undefined}
                             disabled={busy || Boolean(session.activeRunId)}
-                            onClick={() => void changeSession({ planFirst: !session.planFirst })}
-                          >
-                            <ClipboardList size={14} />
-                            <span className="composer-pill-label">{t('composer.planFirst')}</span>
-                          </button>
-                        )}
-                      </div>
-                      {session.activeRunId && composer.trim() && (
+                            onChange={(value) => void changeSession({ thinking: value })}
+                          />
+                          <ComposerAccessMenu
+                            sandbox={data.settings.sandbox}
+                            remote={Boolean(conversationProject?.remote)}
+                            approval={effectiveApprovalMode}
+                            configuredApprovalMode={session.approvalMode}
+                            approvalScope={
+                              internetForcesManual
+                                ? 'forced'
+                                : session.approvalMode
+                                  ? 'session'
+                                  : conversationProject?.approvalMode
+                                    ? 'project'
+                                    : 'settings'
+                            }
+                            supportsAutomatic={supportsAutomaticApproval}
+                            sandboxDisabled={
+                              settingsPending || busy || Boolean(session.activeRunId) || Boolean(session.archivedAt)
+                            }
+                            approvalDisabled={
+                              !localApprovalControls ||
+                              busy ||
+                              Boolean(session.activeRunId) ||
+                              Boolean(session.archivedAt)
+                            }
+                            onPermissions={(sandbox) => void enqueueSettingsPatch({ sandbox })}
+                            onApproval={(mode) => void changeSession({ approvalMode: mode })}
+                          />
+                        </>
+                      }
+                      actions={
                         <>
-                          {provider?.capabilities.steer && attachments.ready.length === 0 && (
-                            <button
-                              type="button"
-                              className="composer-steer-button"
-                              aria-label={t('composer.steer')}
-                              title={t('composer.steerTitle')}
-                              disabled={busy || Boolean(session.archivedAt) || attachments.uploading}
-                              onClick={() => void steerComposer()}
-                            >
-                              <CornerDownRight size={15} />
-                              <span>{t('composer.steer')}</span>
-                            </button>
+                          <AttachButton
+                            disabled={busy || Boolean(session.archivedAt)}
+                            full={attachments.full}
+                            onFiles={attachments.add}
+                          />
+                          {voiceEnabled && (
+                            <VoiceButton
+                              state={voice.state}
+                              elapsed={voice.elapsed}
+                              level={voice.level}
+                              blocker={voice.blocker}
+                              disabled={(busy || Boolean(session.archivedAt)) && voice.state === 'idle'}
+                              onToggle={() => {
+                                if (voice.blocker) return setNotice(voice.blocker);
+                                if (voice.state === 'idle') dictationTargetRef.current = session.id;
+                                voice.toggle();
+                              }}
+                            />
+                          )}
+                          {session.activeRunId && composer.trim() && (
+                            <>
+                              {provider?.capabilities.steer && attachments.ready.length === 0 && (
+                                <button
+                                  type="button"
+                                  className="composer-steer-button"
+                                  aria-label={t('composer.steer')}
+                                  title={t('composer.steerTitle')}
+                                  disabled={busy || Boolean(session.archivedAt) || attachments.uploading}
+                                  onClick={() => void steerComposer()}
+                                >
+                                  <CornerDownRight size={15} />
+                                  <span>{t('composer.steer')}</span>
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                className="queue-button"
+                                aria-label={t('composer.queue')}
+                                title={t('composer.queueTitle')}
+                                onClick={() => void queueMessage()}
+                                disabled={busy || Boolean(session.archivedAt) || attachments.uploading}
+                              >
+                                <ListPlus size={16} />
+                              </button>
+                            </>
                           )}
                           <button
-                            type="button"
-                            className="queue-button"
-                            aria-label={t('composer.queue')}
-                            title={t('composer.queueTitle')}
-                            onClick={() => void queueMessage()}
-                            disabled={busy || Boolean(session.archivedAt) || attachments.uploading}
+                            className={`send-button ${canCancelCurrentSend ? 'stop' : ''}`}
+                            aria-label={canCancelCurrentSend ? t('composer.cancel') : t('composer.send')}
+                            title={canCancelCurrentSend ? t('composer.cancel') : t('composer.sendTitle')}
+                            onClick={() =>
+                              session.activeRunId
+                                ? void api
+                                    .cancel(session.id)
+                                    .then(() => refreshDetail(session.id))
+                                    .catch((e: Error) => setNotice(e.message))
+                                : pendingSendForSession
+                                  ? void cancelPendingSend(session.id)
+                                  : void sendMessage()
+                            }
+                            disabled={
+                              canCancelCurrentSend
+                                ? false
+                                : !composer.trim() ||
+                                  busy ||
+                                  settingsPending ||
+                                  attachments.uploading ||
+                                  Boolean(session.archivedAt)
+                            }
                           >
-                            <ListPlus size={16} />
+                            {canCancelCurrentSend ? (
+                              <Square size={12} fill="currentColor" />
+                            ) : busy ? (
+                              <LoaderCircle className="spin" size={16} />
+                            ) : (
+                              <ArrowUp size={17} />
+                            )}
                           </button>
                         </>
-                      )}
-                      <button
-                        className={`send-button ${canCancelCurrentSend ? 'stop' : ''}`}
-                        aria-label={canCancelCurrentSend ? t('composer.cancel') : t('composer.send')}
-                        title={canCancelCurrentSend ? t('composer.cancel') : t('composer.sendTitle')}
-                        onClick={() =>
-                          session.activeRunId
-                            ? void api
-                                .cancel(session.id)
-                                .then(() => refreshDetail(session.id))
-                                .catch((e: Error) => setNotice(e.message))
-                            : pendingSendForSession
-                              ? void cancelPendingSend(session.id)
-                              : void sendMessage()
-                        }
-                        disabled={
-                          canCancelCurrentSend
-                            ? false
-                            : !composer.trim() ||
-                              busy ||
-                              settingsPending ||
-                              attachments.uploading ||
-                              Boolean(session.archivedAt)
-                        }
-                      >
-                        {canCancelCurrentSend ? (
-                          <Square size={12} fill="currentColor" />
-                        ) : busy ? (
-                          <LoaderCircle className="spin" size={16} />
-                        ) : (
-                          <ArrowUp size={17} />
-                        )}
-                      </button>
-                    </div>
+                      }
+                      context={
+                        <>
+                          <ConversationMenu
+                            projects={data.projects}
+                            projectId={session.projectId}
+                            mode={session.mode}
+                            disabled={busy || Boolean(session.activeRunId)}
+                            context={conversationContext}
+                            memoryScope={session.projectId === null ? detachedMemoryScope : undefined}
+                            onProject={(projectId) => {
+                              const destination = data.projects.find((item) => item.id === projectId);
+                              if (!destination?.remote) return void changeSession({ projectId });
+                              const providerId = providerForRemoteProject(session.providerId, data.providers);
+                              if (!providerId) return setNotice(t('remoteHosts.providerRequired'));
+                              void changeSession({
+                                projectId,
+                                ...(providerId !== session.providerId ? { providerId } : {}),
+                              });
+                            }}
+                            onMode={(mode) => void changeSession({ mode })}
+                            onConfigure={
+                              conversationProject
+                                ? () => {
+                                    selectProject(conversationProject.id);
+                                    setPage('settings');
+                                    setSidebarOpen(false);
+                                  }
+                                : undefined
+                            }
+                          />
+                          {!conversationProject?.remote && (
+                            <button
+                              type="button"
+                              className={`composer-pill plan-first-toggle ${session.planFirst ? 'active' : ''}`}
+                              aria-pressed={Boolean(session.planFirst)}
+                              title={t('composer.planFirstTitle')}
+                              disabled={busy || Boolean(session.activeRunId)}
+                              onClick={() => void changeSession({ planFirst: !session.planFirst })}
+                            >
+                              <ClipboardList size={14} />
+                              <span className="composer-pill-label">{t('composer.planFirst')}</span>
+                            </button>
+                          )}
+                          <ExecutionProfile
+                            provider={provider?.name || session.providerId}
+                            model={session.model}
+                            thinking={thinkingLabel(session.thinking || 'auto')}
+                            sandbox={data.settings.sandbox}
+                            approval={effectiveApprovalMode}
+                            delegation={Boolean(
+                              !conversationProject?.remote && conversationProject?.orchestration?.enabled !== false,
+                            )}
+                            graph={Boolean(
+                              conversationProject &&
+                              !conversationProject.remote &&
+                              conversationProject.graphify?.enabled !== false,
+                            )}
+                            memory={Boolean(
+                              data.settings.memoryEnabled && (conversationProject || detachedMemoryScope),
+                            )}
+                          />
+                        </>
+                      }
+                    />
                     {reasoningUnavailable && <span className="visually-hidden">{t('composer.noThinking')}</span>}
                   </div>
                 </div>
@@ -2608,6 +2656,9 @@ export default function App() {
               key={toolsProject.id}
               projectId={toolsProject.id}
               projectName={toolsProject.name}
+              projectPath={toolsProject.remote?.path ?? toolsProject.path}
+              remote={Boolean(toolsProject.remote)}
+              sandbox={data.settings.sandbox}
               tab={toolsTab}
               onTab={setToolsTab}
               onClose={() => setToolsTab(null)}
@@ -2656,7 +2707,10 @@ export default function App() {
               data={data}
               version={automationsVersion}
               onOpenConversation={openConversation}
-              onOpenSettings={() => goTo('settings')}
+              onOpenSettings={() => {
+                goTo('settings');
+                setSettingsSearchRequest({ id: Date.now(), query: t('settings.automations.label') });
+              }}
             />
           </ErrorBoundary>
         )}
@@ -2672,6 +2726,15 @@ export default function App() {
               key={project?.id || 'global'}
               data={data}
               project={project}
+              searchRequest={settingsSearchRequest}
+              onResumeProject={
+                projectSetupPaused
+                  ? () => {
+                      setProjectSetupPaused(false);
+                      setSettingsSearchRequest(undefined);
+                    }
+                  : undefined
+              }
               coordination={coordination}
               graphifyStatus={graphifyStatus}
               graphQueryResult={graphQueryResult}
@@ -2733,9 +2796,19 @@ export default function App() {
       {projectForm && (
         <ProjectForm
           busy={busy}
+          hidden={projectSetupPaused}
+          onConfigureSSH={() => {
+            setProjectSetupPaused(true);
+            setPage('settings');
+            setSettingsSearchRequest({ id: Date.now(), query: 'SSH' });
+          }}
           error={notice}
           onSubmit={(fields) => void createProject(fields)}
-          onClose={() => setProjectForm(false)}
+          onClose={() => {
+            setProjectForm(false);
+            setProjectSetupPaused(false);
+            setSettingsSearchRequest(undefined);
+          }}
         />
       )}
       {searchOpen && (

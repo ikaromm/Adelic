@@ -2,7 +2,7 @@ import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { Router } from 'express';
 import { randomUUID } from 'node:crypto';
-import type { Project, ProjectFolder } from '../../shared/contracts.js';
+import type { Project, ProjectFolder, RunArtifactsSnapshot } from '../../shared/contracts.js';
 import {
   CreateProjectSchema,
   CreateProjectFolderSchema,
@@ -10,18 +10,64 @@ import {
   PatchProjectSchema,
   PatchProjectFolderSchema,
   ProjectFilesQuerySchema,
+  RetryTaskSchema,
   ProjectHooksSchema,
   parseBody,
   vmsg,
 } from '../../shared/schemas.js';
 import { searchProjectFiles } from '../mentions.js';
 import { error, errorStatus, errorText } from './common.js';
-import { LOCAL_ONLY, requestKind } from './auth.js';
+import { LOCAL_ONLY, forceManualApproval, requestKind } from './auth.js';
 import { graphifyConfig, mergeLimits, orchestrationConfig, projectPath } from './validation.js';
 import type { BackendContext } from './context.js';
+import {
+  createLocalProjectFolder,
+  listLocalProjectFolders,
+  LocalProjectFolderError,
+} from '../local-project-folders.js';
 
 export function projectsRoutes({ store, orchestrator }: BackendContext) {
   const app = Router();
+  app.get('/api/local-directories', (req, res) => {
+    if (requestKind(req) !== 'local') return error(res, 403, LOCAL_ONLY);
+    try {
+      res.json(listLocalProjectFolders(req.query.path));
+    } catch (e) {
+      if (e instanceof LocalProjectFolderError)
+        return error(
+          res,
+          e.code === 'invalid-path' ? 400 : e.code === 'not-directory' ? 400 : 404,
+          localFolderErrorKey(e),
+        );
+      error(res, 404, 'projects.localFolderUnavailable');
+    }
+  });
+  app.post('/api/local-directories', (req, res) => {
+    if (requestKind(req) !== 'local') return error(res, 403, LOCAL_ONLY);
+    if (
+      !req.body ||
+      typeof req.body.parentPath !== 'string' ||
+      req.body.parentPath.length > 4096 ||
+      typeof req.body.name !== 'string' ||
+      req.body.name.length > 120
+    )
+      return error(res, 400, 'projects.localFolderInvalidName');
+    try {
+      res.status(201).json(createLocalProjectFolder(req.body.parentPath, req.body.name));
+    } catch (e) {
+      if (e instanceof LocalProjectFolderError)
+        return error(
+          res,
+          e.code === 'invalid-name' || e.code === 'invalid-path' || e.code === 'not-directory'
+            ? 400
+            : e.code === 'exists'
+              ? 409
+              : 404,
+          localFolderErrorKey(e),
+        );
+      error(res, 404, 'projects.localFolderUnavailable');
+    }
+  });
   app.get('/api/projects/:id/folders', (req, res) => {
     if (!store.getProject(req.params.id)) return error(res, 404, 'common.projectNotFound');
     res.json({ folders: store.listProjectFolders(req.params.id) });
@@ -177,6 +223,79 @@ export function projectsRoutes({ store, orchestrator }: BackendContext) {
     if (!task) return error(res, 404, 'projects.taskNotFound');
     res.json(task);
   });
+  app.get('/api/tasks/:id/inspect', async (req, res) => {
+    const task = store.getTask(req.params.id);
+    if (!task) return error(res, 404, 'projects.taskNotFound');
+    const retryRun = task.retryRunId ? store.getRun(task.retryRunId) : undefined;
+    const runIds = new Set([task.runId, ...(task.retryRunId ? [task.retryRunId] : [])]);
+    const retryTaskIds = new Set(
+      task.retryRunId
+        ? store
+            .listSessionTasks(task.sessionId, 100)
+            .filter((candidate) => candidate.runId === task.retryRunId)
+            .map((candidate) => candidate.id)
+        : [],
+    );
+    const events = store
+      .listEvents(task.sessionId)
+      .filter(
+        (event) =>
+          runIds.has(event.runId) &&
+          (event.taskId === task.id ||
+            (event.runId === task.retryRunId &&
+              (retryTaskIds.has(event.taskId ?? '') ||
+                (event.taskId === undefined && retryRun?.retryOfTaskId === task.id)))),
+      );
+    const unavailable = (reason: string): RunArtifactsSnapshot => ({ status: 'unknown', reason, files: [] });
+    const project = task.projectId ? store.getProject(task.projectId) : undefined;
+    const artifacts = {
+      project: unavailable('Artifacts from a shared delegated run cannot be assigned to this task.'),
+      worktree: task.recoveryWorktree
+        ? unavailable('The pending worktree has not been independently verified.')
+        : undefined,
+    };
+    // A retry is task-exclusive; use its persisted artifact root to distinguish project-root
+    // evidence from a recovery worktree. Scope is a plan, not proof of file ownership.
+    if (retryRun?.retryOfTaskId === task.id && retryRun.artifacts && retryRun.artifactRoot) {
+      if (task.recoveryWorktree?.path === retryRun.artifactRoot) {
+        artifacts.worktree = retryRun.artifacts;
+      } else if (project?.path === retryRun.artifactRoot) {
+        artifacts.project = retryRun.artifacts;
+      }
+    }
+    if (task.recoveryWorktree)
+      artifacts.worktree =
+        (await orchestrator.inspectTaskWorktree(task.id)) ??
+        unavailable('The pending worktree has not been independently verified.');
+    res.json({ task, events, artifacts });
+  });
+  app.post('/api/tasks/:id/retry', async (req, res) => {
+    const parsed = parseBody(RetryTaskSchema, req.body, 'common.invalidRequest', req.locale);
+    if (!parsed.ok) return error(res, 400, parsed.message);
+    const task = store.getTask(req.params.id);
+    if (!task) return error(res, 404, 'projects.taskNotFound');
+    try {
+      res.status(202).json(await orchestrator.retryTask(req.params.id, forceManualApproval(req, store)));
+    } catch (e) {
+      error(res, errorStatus(e) ?? 500, e as Error);
+    }
+  });
+  app.post('/api/tasks/:id/worktree', async (req, res) => {
+    if (req.body?.action !== 'apply') return error(res, 400, 'validation.invalidField', { field: 'action' });
+    try {
+      res.json(await orchestrator.recoverTaskWorktree(req.params.id, 'apply'));
+    } catch (e) {
+      error(res, errorStatus(e) ?? 500, e as Error);
+    }
+  });
+  app.delete('/api/tasks/:id/worktree', async (req, res) => {
+    if (req.body?.confirm !== true) return error(res, 400, 'validation.invalidField', { field: 'confirm' });
+    try {
+      res.json(await orchestrator.recoverTaskWorktree(req.params.id, 'discard'));
+    } catch (e) {
+      error(res, errorStatus(e) ?? 500, e as Error);
+    }
+  });
   app.patch('/api/projects/:id', (req, res) => {
     const p = store.getProject(req.params.id);
     if (!p) return error(res, 404, 'common.projectNotFound');
@@ -214,4 +333,19 @@ export function projectsRoutes({ store, orchestrator }: BackendContext) {
     res.json(store.updateProject(p));
   });
   return app;
+}
+
+function localFolderErrorKey(error: LocalProjectFolderError) {
+  switch (error.code) {
+    case 'invalid-name':
+      return 'projects.localFolderInvalidName';
+    case 'invalid-path':
+      return 'projects.localFolderInvalidPath';
+    case 'not-directory':
+      return 'projects.localFolderNotDirectory';
+    case 'exists':
+      return 'projects.localFolderExists';
+    case 'unavailable':
+      return 'projects.localFolderUnavailable';
+  }
 }

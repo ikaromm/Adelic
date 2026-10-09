@@ -22,8 +22,8 @@ async function conversationWithOneAnswer(page: Page, text: string) {
 
 async function pickKiroInModelMenu(page: Page) {
   await page.getByRole('button', { name: 'Escolher modelo e provedor' }).click();
-  await page.getByRole('button', { name: 'Kiro (E2E)' }).click();
-  await page.getByRole('option', { name: /Kiro E2E Model/ }).click();
+  await page.getByRole('list', { name: 'Provedores' }).getByRole('button', { name: 'Kiro (E2E)', exact: true }).click();
+  await page.getByRole('button', { name: /Kiro E2E Model/ }).click();
 }
 
 test('picking another agent asks about a summary, shows the handoff card and the new agent gets it', async ({

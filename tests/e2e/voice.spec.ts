@@ -145,6 +145,7 @@ test('the setting hides the microphone', async ({ page }) => {
     .getByRole('navigation', { name: 'Navegação principal' })
     .getByRole('button', { name: 'Configurações' })
     .click();
+  await page.getByRole('button', { name: 'Avançado', exact: true }).click();
   const toggle = page.getByRole('switch', { name: 'Ditado por voz' });
   await expect(toggle).toHaveAttribute('aria-checked', 'true');
   await expect(page.getByText('Disponível: whisper · base, neste computador.')).toBeVisible();

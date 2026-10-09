@@ -109,7 +109,12 @@ export function remoteHostsRoutes({ store, orchestrator }: BackendContext) {
   app.get('/api/remote-hosts/:id/directories', async (req, res) => {
     const host = store.getRemoteHost(req.params.id);
     if (!host) return error(res, 404, 'remotehosts.notFound');
-    const path = absolute.safeParse(req.query.path);
+    const path = z
+      .string()
+      .min(1)
+      .max(4096)
+      .refine((s) => s.startsWith('/') && !s.includes('\0'))
+      .safeParse(req.query.path);
     if (!path.success) return error(res, 400, 'remotehosts.invalid');
     try {
       res.json(

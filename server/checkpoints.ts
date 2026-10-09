@@ -238,11 +238,14 @@ export function blobId(data: Buffer, format: Repo['format']) {
 }
 
 /** Writes a tree of the folder's tracked and non-ignored files; returns its id. */
-export async function writeSnapshotTree(repo: Repo): Promise<string> {
+export async function writeSnapshotTree(repo: Repo, opts: { includePaths?: string[] } = {}): Promise<string> {
   const listed = nulSplit(
     await git(repo.root, ['ls-files', '-z', '--full-name', '--cached', '--others', '--exclude-standard'], { repo }),
   );
-  const paths = [...new Set(listed)];
+  // A caller may add paths from a trusted captured tree. This keeps eligible baseline files
+  // visible if a later .gitignore change would otherwise hide them, without including any
+  // path that was ignored when that baseline was captured.
+  const paths = [...new Set([...listed, ...(opts.includePaths ?? [])])];
   if (paths.length > LIMITS.files)
     throw new CheckpointError(`mais de ${LIMITS.files} arquivos na pasta do projeto`, 422);
   const regular: { path: string; mode: string }[] = [];
@@ -296,6 +299,41 @@ const refFor = (runId: string, kind: 'before' | 'after') => {
   return `${REF_PREFIX}/${runId}/${kind}`;
 };
 
+export type GitRepoClassification = { status: 'available'; repo: Repo } | { status: 'absent' } | { status: 'unknown' };
+
+/**
+ * Read-only Git probe shared by checkpoint, panel and run-context decisions.
+ * A failed probe with Git metadata is unknown, never evidence of absence.
+ */
+export async function classifyGitRepo(path: string): Promise<GitRepoClassification> {
+  let repo: Repo | undefined;
+  try {
+    repo = await openRepo(path, false);
+  } catch {
+    return { status: 'unknown' };
+  }
+  if (repo) return { status: 'available', repo };
+
+  let current: string;
+  try {
+    current = resolve(await realpath(path));
+  } catch {
+    return { status: 'unknown' };
+  }
+  while (true) {
+    try {
+      await lstat(join(current, '.git'));
+      return { status: 'unknown' };
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') return { status: 'unknown' };
+    }
+    const parent = dirname(current);
+    if (parent === current) return { status: 'absent' };
+    current = parent;
+  }
+}
+
 /** Snapshot taken before a run that may write. Never throws: failures become `available: false`. */
 export async function checkpointBefore(
   path: string,
@@ -303,8 +341,17 @@ export async function checkpointBefore(
   opts: { requireToplevel?: boolean } = {},
 ): Promise<RunCheckpoint> {
   try {
-    const repo = await openRepo(path, Boolean(opts.requireToplevel));
-    if (!repo) return { available: false, reason: NOT_GIT };
+    const classification = await classifyGitRepo(path);
+    if (classification.status !== 'available') {
+      return {
+        available: false,
+        captureState: classification.status === 'absent' ? 'not_applicable' : 'failed',
+        reason: NOT_GIT,
+      };
+    }
+    const repo = classification.repo;
+    if (opts.requireToplevel && repo.root !== repo.top)
+      return { available: false, captureState: 'not_applicable', reason: NOT_GIT };
     const tree = await writeSnapshotTree(repo);
     const commit = (
       await git(repo.top, ['commit-tree', '--no-gpg-sign', tree, '-m', `Adelic checkpoint ${runId} before`], { repo })
@@ -314,7 +361,7 @@ export async function checkpointBefore(
     await git(repo.top, ['update-ref', '-m', 'adelic checkpoint', refFor(runId, 'before'), commit, ''], { repo });
     return { available: true, root: repo.root, before: commit };
   } catch (e) {
-    return { available: false, reason: reasonOf(e) };
+    return { available: false, captureState: 'failed', reason: reasonOf(e) };
   }
 }
 
@@ -323,7 +370,8 @@ export async function checkpointAfter(runId: string, checkpoint: RunCheckpoint):
   if (!checkpoint.available || !checkpoint.before || !checkpoint.root) return checkpoint;
   try {
     const repo = await openRepo(checkpoint.root, false);
-    if (!repo || repo.root !== checkpoint.root) return { ...checkpoint, available: false, reason: NOT_GIT };
+    if (!repo || repo.root !== checkpoint.root)
+      return { ...checkpoint, available: false, captureState: 'failed', reason: NOT_GIT };
     const tree = await writeSnapshotTree(repo);
     const beforeTree = (await git(repo.top, ['rev-parse', `${checkpoint.before}^{tree}`], { repo })).toString().trim();
     if (beforeTree === tree) {
@@ -357,7 +405,7 @@ export async function checkpointAfter(runId: string, checkpoint: RunCheckpoint):
       ...(changes.length > files.length ? { omitted: changes.length - files.length } : {}),
     };
   } catch (e) {
-    return { ...checkpoint, available: false, reason: reasonOf(e) };
+    return { ...checkpoint, available: false, captureState: 'failed', reason: reasonOf(e) };
   }
 }
 

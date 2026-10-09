@@ -1,11 +1,14 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import net from 'node:net';
 import { CodexProvider } from '../server/providers/codex';
+import { createLocalExecutor, preflightLocalExecutor } from '../server/local-executor';
 import { KiroProvider } from '../server/providers/kiro';
 import {
+  boundedRemoteResult,
+  executorContextInstructions,
   REMOTE_TOOL_SPECS,
   remoteApprovalDetail,
   remoteToolDescription,
@@ -36,6 +39,258 @@ function input(cwd: string, remote: RemoteRuntime): RunInput {
 }
 
 describe('remote provider tools', () => {
+  it('preserves complete bounded JSON results and returns actionable recovery for oversized values', () => {
+    const page = { content: 'á😀"\\'.repeat(7000), offset: 0, nextOffset: 28000, truncated: true, revision: 'rev-1' };
+    const serialized = boundedRemoteResult(page);
+    expect(Buffer.byteLength(serialized, 'utf8')).toBeLessThanOrEqual(512 * 1024);
+    expect(JSON.parse(serialized)).toEqual(page);
+    const oversized = JSON.parse(boundedRemoteResult({ content: 'x'.repeat(1000) }, 100)) as {
+      error: string;
+      resultBytes: number;
+      maxResultBytes: number;
+      recovery: string;
+    };
+    expect(oversized).toMatchObject({
+      error: 'tool result exceeds model transport limit',
+      resultBytes: expect.any(Number),
+      maxResultBytes: 100,
+    });
+    expect(oversized.resultBytes).toBeGreaterThan(100);
+    expect(oversized.recovery).toContain('nextOffset');
+  });
+
+  it('paginates through the local factory, Codex provider and model transport across fresh runners', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'adelic-local-provider-pages-'));
+    dirs.push(directory);
+    const workspace = path.join(directory, 'workspace');
+    await mkdir(workspace);
+    const source = 'á😀'.repeat(40_000);
+    expect(Buffer.byteLength(source, 'utf8')).toBeGreaterThan(128 * 1024);
+    await writeFile(path.join(workspace, 'large.txt'), source, 'utf8');
+    const preflight = await preflightLocalExecutor(workspace);
+    expect(preflight.ready, JSON.stringify(preflight.issues)).toBe(true);
+    const runtime = await createLocalExecutor(workspace, 'workspace-write');
+    const requestLog = path.join(directory, 'model-results.jsonl');
+    const fake = path.join(directory, 'codex.mjs');
+    await writeFile(
+      fake,
+      `#!/usr/bin/env node
+import readline from 'node:readline';
+import fs from 'node:fs';
+const log=${JSON.stringify(requestLog)};
+const send=(value)=>process.stdout.write(JSON.stringify(value)+'\\n');
+const append=(value)=>fs.appendFileSync(log,JSON.stringify(value)+'\\n');
+let nextId=701; let thread='page-thread'; let offset=0; let revision;
+const ask=()=>send({jsonrpc:'2.0',id:nextId++,method:'item/tool/call',params:{threadId:thread,turnId:'page-turn',callId:'page-'+offset,tool:'adelic_remote_read_file',arguments:{path:'large.txt',offset,limit:49152,...(revision?{revision}:{})}}});
+readline.createInterface({input:process.stdin}).on('line',(line)=>{
+ const m=JSON.parse(line);
+ if(m.method==='initialize')send({jsonrpc:'2.0',id:m.id,result:{}});
+ else if(m.method==='config/read')send({jsonrpc:'2.0',id:m.id,result:{config:{mcp_servers:{}}}});
+ else if(m.method==='thread/start')send({jsonrpc:'2.0',id:m.id,result:{thread:{id:thread}}});
+ else if(m.method==='turn/start'){
+  send({jsonrpc:'2.0',id:m.id,result:{turn:{id:'page-turn'}}});
+  send({jsonrpc:'2.0',method:'turn/started',params:{threadId:thread,turn:{id:'page-turn'}}});
+  ask();
+ } else if(Number.isInteger(m.id)&&m.id>=701){
+  const text=m.result?.contentItems?.[0]?.text;
+  let page;
+  try { page=JSON.parse(text); } catch { append({invalid:text}); return; }
+  append(page);
+  offset=page.nextOffset; revision=page.revision;
+  if(page.truncated) ask();
+  else send({jsonrpc:'2.0',method:'turn/completed',params:{threadId:thread,turn:{id:'page-turn',status:'completed'}}});
+ }
+});
+`,
+      { mode: 0o700 },
+    );
+    const provider = new CodexProvider(
+      async () => fake,
+      undefined,
+      undefined,
+      undefined,
+      async (command, args) => ({ command, args }),
+    );
+    const approvals: string[] = [];
+    try {
+      const resultPromise = provider.run(
+        input(workspace, runtime),
+        (event) => {
+          if (event.type === 'approval') {
+            approvals.push(event.approval.id);
+            void provider.approve(event.approval.id, 'approve');
+          }
+        },
+        new AbortController().signal,
+      );
+      await expect(resultPromise).resolves.toMatchObject({ stopReason: 'completed' });
+      const pages = (await readFile(requestLog, 'utf8'))
+        .trim()
+        .split('\n')
+        .map(
+          (line) =>
+            JSON.parse(line) as {
+              content: string;
+              offset: number;
+              nextOffset: number;
+              totalBytes: number;
+              truncated: boolean;
+              revision: string;
+            },
+        );
+      expect(approvals.length).toBeGreaterThan(1);
+      expect(pages.length).toBeGreaterThan(2);
+      expect(pages.map((page) => page.offset)).toEqual(expect.arrayContaining([0, 49152, 98304]));
+      expect(pages.at(-1)?.truncated).toBe(false);
+      expect(pages.map((page) => page.content).join('')).toBe(source);
+      expect(pages.every((page) => page.totalBytes === Buffer.byteLength(source, 'utf8'))).toBe(true);
+      expect(pages.every((page) => page.revision.length > 0)).toBe(true);
+
+      const firstPage = (await runtime.call(
+        'read_file',
+        { path: 'large.txt', offset: 0, limit: 49_152 },
+        new AbortController().signal,
+      )) as { nextOffset: number; revision: string };
+      await writeFile(path.join(workspace, 'large.txt'), source.replaceAll('á', 'ç'), 'utf8');
+      await expect(
+        runtime.call(
+          'read_file',
+          { path: 'large.txt', offset: firstPage.nextOffset, limit: 49_152, revision: firstPage.revision },
+          new AbortController().signal,
+        ),
+      ).rejects.toMatchObject({ category: 'conflict', message: 'file changed while reading' });
+      const prefix = 'contexto-á😀\n'.repeat(15_000);
+      const oldText = 'EDITAR-ß🧪-único';
+      const suffix = '\nfinal-ç🚀'.repeat(15_000);
+      const largeEdit = oldText + prefix + suffix;
+      expect(Buffer.byteLength(largeEdit, 'utf8')).toBeGreaterThan(128 * 1024);
+      await writeFile(path.join(workspace, 'large-edit.txt'), largeEdit, 'utf8');
+      const editPage = (await runtime.call(
+        'read_file',
+        { path: 'large-edit.txt', offset: 0, limit: 49_152 },
+        new AbortController().signal,
+      )) as { revision: string; truncated: boolean; content: string };
+      expect(editPage.truncated).toBe(true);
+      expect(editPage.content).toContain(oldText);
+      await expect(
+        runtime.call(
+          'replace_text',
+          { path: 'large-edit.txt', oldText, newText: 'corrigido-ø🚀', expectedRevision: editPage.revision },
+          new AbortController().signal,
+        ),
+      ).resolves.toMatchObject({ matches: 1 });
+      expect(await readFile(path.join(workspace, 'large-edit.txt'), 'utf8')).toBe('corrigido-ø🚀' + prefix + suffix);
+      await expect(
+        runtime.call(
+          'replace_text',
+          { path: 'large-edit.txt', oldText: 'corrigido-ø🚀', newText: 'stale', expectedRevision: editPage.revision },
+          new AbortController().signal,
+        ),
+      ).rejects.toMatchObject({ category: 'conflict', message: 'file changed before edit' });
+      await writeFile(path.join(workspace, 'legacy-edit.txt'), 'antes-á😀-legacy', 'utf8');
+      await runtime.call('read_file', { path: 'legacy-edit.txt' }, new AbortController().signal);
+      await expect(
+        runtime.call(
+          'replace_text',
+          { path: 'legacy-edit.txt', oldText: 'antes-á😀', newText: 'depois-ø🚀' },
+          new AbortController().signal,
+        ),
+      ).resolves.toMatchObject({ matches: 1 });
+      expect(await readFile(path.join(workspace, 'legacy-edit.txt'), 'utf8')).toBe('depois-ø🚀-legacy');
+    } finally {
+      await runtime.close();
+      await provider.shutdown();
+    }
+  });
+  it('derives executor guidance from provider, runtime and effective sandbox permissions', () => {
+    const base = {
+      executorContext: { git: 'available' as const, checks: ['npm test', 'npm test'] },
+      approvalMode: 'manual' as const,
+      plan: { level: 'deep' as const, reason: 'test', tools: true, memory: false, contextBudget: 100 },
+    };
+    const codexWrite = executorContextInstructions({
+      ...base,
+      providerId: 'codex',
+      sandbox: 'workspace-write',
+      remote: { label: 'local', root: '/p', executionKind: 'isolated-local', call: async () => undefined },
+    });
+    expect(codexWrite).toContain('workspace-write');
+    expect(codexWrite).toContain('ferramentas nativas Codex em read-only');
+    expect(codexWrite).toContain('Modo de aprovação efetivo: manual');
+    expect(codexWrite).toContain('Git do checkout principal não é herdada');
+    expect(codexWrite).toContain('/var/tmp são scratch privados');
+    expect(codexWrite).not.toContain('npm test, npm test');
+    const codexReadOnly = executorContextInstructions({
+      ...base,
+      providerId: 'codex',
+      sandbox: 'read-only',
+      remote: { label: 'ssh', root: '/p', executionKind: 'ssh', call: async () => undefined },
+    });
+    expect(codexReadOnly).toContain('somente leitura');
+    expect(codexReadOnly).toContain('ferramentas nativas Codex em read-only');
+    const kiroWrite = executorContextInstructions({
+      ...base,
+      providerId: 'kiro',
+      sandbox: 'workspace-write',
+      remote: { label: 'ssh', root: '/p', executionKind: 'ssh', call: async () => undefined },
+    });
+    expect(kiroWrite).toContain('workspace-write');
+    expect(kiroWrite).not.toContain('nativas Codex');
+    const kiroReadOnly = executorContextInstructions({
+      ...base,
+      providerId: 'kiro',
+      sandbox: 'read-only',
+      remote: { label: 'ssh', root: '/p', executionKind: 'ssh', call: async () => undefined },
+    });
+    expect(kiroReadOnly).toContain('somente leitura');
+    expect(kiroReadOnly).not.toContain('nativas Codex');
+    const localOnly = executorContextInstructions({ ...base, providerId: 'opencode', sandbox: 'read-only' });
+    expect(localOnly).toContain('Não há executor');
+    expect(localOnly).not.toContain('workspace-write configurado');
+    expect(localOnly).not.toContain('Codex nativo');
+    expect(
+      executorContextInstructions({
+        ...base,
+        executorContext: { git: 'unavailable', checks: [] },
+        providerId: 'claude',
+        sandbox: 'workspace-write',
+      }),
+    ).toContain('não execute comandos Git');
+    expect(
+      executorContextInstructions({
+        ...base,
+        executorContext: { git: 'unknown', checks: [] },
+        providerId: 'claude',
+        sandbox: 'workspace-write',
+      }),
+    ).toContain('não foi verificada');
+    const noTools = executorContextInstructions({
+      ...base,
+      plan: { ...base.plan, tools: false },
+      providerId: 'codex',
+      sandbox: 'workspace-write',
+      remote: { label: 'ssh', root: '/p', executionKind: 'ssh', call: async () => undefined },
+    });
+    expect(noTools).toContain('ferramentas estão desativadas');
+    expect(noTools).not.toContain('workspace-write: operações mutantes');
+    expect(noTools).not.toContain('ferramentas nativas Codex em read-only');
+    const diagnose = REMOTE_TOOL_SPECS.find((tool) => tool.remoteName === 'diagnose')!;
+    expect(validateRemoteArguments(diagnose, {})).toEqual({});
+    expect(validateRemoteArguments(diagnose, { command: 'install' })).toBeUndefined();
+  });
+
+  it('explains HTTP 409 and read-only policy refusals without suggesting argument retries', () => {
+    const refusal = remoteToolError(Object.assign(new Error('read-only policy'), { status: 409 }));
+    expect(refusal).toContain('política somente leitura');
+    expect(refusal).not.toContain('corrija os argumentos');
+    const localRefusal = remoteToolError(new Error('A ferramenta de escrita está desativada no modo somente leitura.'));
+    expect(localRefusal).toContain('operação não é permitida');
+    expect(localRefusal).not.toContain('Argumentos inválidos');
+    const httpRefusal = remoteToolError(Object.assign(new Error('conflict'), { status: 409 }));
+    expect(httpRefusal).toContain('política do executor');
+    expect(httpRefusal).not.toContain('tente novamente');
+  });
+
   it('accepts only bounded fixed-schema remote arguments and displays complete approval context', () => {
     const runtime: RemoteRuntime = {
       label: 'build-host (builder@example.test)',
@@ -48,6 +303,55 @@ describe('remote provider tools', () => {
     expect(validateRemoteArguments(write, { ...args, localPath: '/tmp/secret' })).toBeUndefined();
     expect(validateRemoteArguments(write, { ...args, content: 'x'.repeat(128 * 1024 + 1) })).toBeUndefined();
     expect(validateRemoteArguments(write, { ...args, content: '😀'.repeat(32 * 1024 + 1) })).toBeUndefined();
+    const readFile = REMOTE_TOOL_SPECS.find((tool) => tool.remoteName === 'read_file')!;
+    expect(validateRemoteArguments(readFile, { path: 'server/orchestrator.ts' })).toEqual({
+      path: 'server/orchestrator.ts',
+    });
+    const page = { path: 'server/orchestrator.ts', offset: 48_000, limit: 49_152 };
+    expect(validateRemoteArguments(readFile, page)).toEqual(page);
+    expect(validateRemoteArguments(readFile, { ...page, offset: -1 })).toBeUndefined();
+    expect(validateRemoteArguments(readFile, { ...page, limit: 49_153 })).toBeUndefined();
+    expect(validateRemoteArguments(readFile, { ...page, fullPath: '/outside' })).toBeUndefined();
+    const replace = REMOTE_TOOL_SPECS.find((tool) => tool.remoteName === 'replace_text')!;
+    const revision = '1:2:300000:400000:500000';
+    expect(
+      validateRemoteArguments(replace, {
+        path: 'large.txt',
+        oldText: 'antes',
+        newText: 'depois',
+        expectedRevision: revision,
+      }),
+    ).toEqual({ path: 'large.txt', oldText: 'antes', newText: 'depois', expectedRevision: revision });
+    expect(
+      validateRemoteArguments(replace, {
+        path: 'large.txt',
+        oldText: 'antes',
+        newText: 'depois',
+        readRevision: revision,
+      }),
+    ).toEqual({ path: 'large.txt', oldText: 'antes', newText: 'depois', readRevision: revision });
+    expect(
+      validateRemoteArguments(replace, {
+        path: 'large.txt',
+        oldText: 'antes',
+        newText: 'depois',
+        expectedRevision: revision,
+        readRevision: 'stale',
+      }),
+    ).toBeUndefined();
+    expect(validateRemoteArguments(replace, { path: 'README.md', oldText: 'before', newText: 'after' })).toEqual({
+      path: 'README.md',
+      oldText: 'before',
+      newText: 'after',
+    });
+    expect(validateRemoteArguments(replace, { path: 'README.md', oldText: '', newText: 'after' })).toBeUndefined();
+    expect(
+      validateRemoteArguments(replace, {
+        path: 'README.md',
+        oldText: '😀'.repeat(32 * 1024 + 1),
+        newText: 'after',
+      }),
+    ).toBeUndefined();
     expect(remoteApprovalDetail(runtime, write, args)).toContain(
       'Host: build-host (builder@example.test)\nDiretório remoto: /srv/work/adelic\nFerramenta: write_file\nArgumentos: {"path":"README.md","content":"remote change"}',
     );
@@ -56,6 +360,9 @@ describe('remote provider tools', () => {
     expect(remoteApprovalDetail(runtime, write, largeArgs)).toContain(JSON.stringify(largeArgs));
     expect(remoteToolDescription(runtime, write, args)).toBe(
       'write_file: README.md\nHost build-host (builder@example.test): /srv/work/adelic',
+    );
+    expect(remoteToolFailure({ error: 'tool result exceeds model transport limit' })).toContain(
+      'nextOffset e revision',
     );
     expect(remoteToolFailure({ exitCode: 7, stdout: 'PRIVATE', stderr: 'PRIVATE' })).toBe('Falhou (código 7)');
     expect(remoteToolFailure({ exitCode: 0, stdout: '', stderr: '' })).toBeUndefined();
@@ -67,9 +374,43 @@ describe('remote provider tools', () => {
     );
     expect(longFailure).toContain('Falhou (código 17)');
     expect(longFailure.length).toBeLessThanOrEqual(280);
-    expect(remoteToolError(Object.assign(new Error('ssh ECONNRESET PRIVATE'), { code: 'ECONNRESET' }))).toBe(
-      'Falha de conexão remota',
+    const connectionFailure = remoteToolError(
+      Object.assign(new Error('ssh ECONNRESET PRIVATE'), { code: 'ECONNRESET' }),
     );
+    expect(connectionFailure).toContain('ECONNRESET');
+    expect(connectionFailure).toContain('confira host, porta e executor');
+    expect(connectionFailure).not.toContain('PRIVATE');
+    expect(remoteToolError(Object.assign(new Error('secret command'), { code: 'ENOENT' }))).toContain(
+      'ferramenta instalada',
+    );
+    expect(remoteToolError(Object.assign(new Error('path'), { code: 'EACCES' }))).toContain('Permissão negada');
+    expect(remoteToolError(Object.assign(new Error('opaque raw credential'), { category: 'not_found' }))).toContain(
+      'Não encontrado',
+    );
+    expect(
+      remoteToolError(Object.assign(new Error('file exceeds read limit'), { category: 'invalid_request' })),
+    ).toContain('offset/limit');
+    expect(
+      remoteToolError(Object.assign(new Error('oldText must match exactly once'), { category: 'conflict' })),
+    ).toContain('trecho único');
+    expect(
+      remoteToolError(Object.assign(new Error('opaque raw credential'), { category: 'invalid_request' })),
+    ).toContain('Argumentos inválidos');
+    expect(
+      remoteToolError(Object.assign(new Error('opaque raw credential'), { category: 'invalid_request' })),
+    ).not.toContain('opaque raw credential');
+    expect(
+      remoteToolError(Object.assign(new Error('opaque raw credential'), { category: 'secret-category' })),
+    ).not.toContain('opaque raw credential');
+    expect(remoteToolError(Object.assign(new Error('slow'), { code: 'ETIMEDOUT' }))).toContain('aumente timeoutMs');
+    expect(remoteToolError(Object.assign(new Error('rate limited'), { status: 429 }))).toContain('aguarde');
+    expect(remoteToolError(Object.assign(new Error('private detail'), { code: 'PRIVATE_SECRET_123' }))).not.toContain(
+      'PRIVATE_SECRET_123',
+    );
+    expect(remoteToolError(new Error('unavailable'))).not.toContain('causa retornada');
+    const visibleFailure = remoteToolDescription(runtime, write, args, connectionFailure);
+    expect(visibleFailure).toContain('confira host, porta e executor');
+    expect(visibleFailure.length).toBeLessThanOrEqual(280);
   });
 
   it('does not call the remote executor on denial and rejects a hostile local tool request', async () => {
@@ -227,7 +568,7 @@ import fs from 'node:fs';
 import net from 'node:net';
 const telemetry=${JSON.stringify(logSocket)};
 const send=(m)=>process.stdout.write(JSON.stringify(m)+'\\n');
-const append=(m)=>{const s=net.createConnection(telemetry,()=>s.end(JSON.stringify(m)+'\\n'));};
+const append=(m,done)=>{const s=net.createConnection(telemetry,()=>s.end(JSON.stringify(m)+'\\n',done));};
 let session='kiro-remote-session'; let promptId; let servers=[];
 readline.createInterface({input:process.stdin}).on('line',(line)=>{
  const m=JSON.parse(line); append(m);
@@ -241,7 +582,7 @@ readline.createInterface({input:process.stdin}).on('line',(line)=>{
    const bridge=servers.find((item)=>item.name==='adelic_remote');
    const socketPath=bridge.env.find((item)=>item.name==='ADELIC_REMOTE_SOCKET').value;
    const socket=net.createConnection(socketPath,()=>socket.write(JSON.stringify({id:'hostile-call',tool:'exec',args:{command:${JSON.stringify(`touch ${hostileFile}`)}}})+'\\n'));
-   let data=''; socket.on('data',(chunk)=>{data+=chunk.toString();if(data.includes('\\n')){append({bridgeResult:JSON.parse(data.slice(0,data.indexOf('\\n')))});socket.end();send({jsonrpc:'2.0',id:promptId,result:{stopReason:'end_turn'}});}});
+   let data=''; socket.on('data',(chunk)=>{data+=chunk.toString();if(data.includes('\\n')){append({bridgeResult:JSON.parse(data.slice(0,data.indexOf('\\n')))},()=>send({jsonrpc:'2.0',id:promptId,result:{stopReason:'end_turn'}}));socket.end();}});
   }
   return;
  }
@@ -360,7 +701,9 @@ readline.createInterface({input:process.stdin}).on('line',(line)=>{
         code: -32601,
       });
       expect(rows.find((row) => row.localWrite)?.localWrite).toBe('blocked');
-      expect(rows.find((row) => row.bridgeResult)?.bridgeResult).toMatchObject({ ok: true, text: 'remote result' });
+      await vi.waitFor(() =>
+        expect(rows.find((row) => row.bridgeResult)?.bridgeResult).toMatchObject({ ok: true, text: 'remote result' }),
+      );
       await expect(readFile(hostileFile, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
     } finally {
       releaseRemote?.();

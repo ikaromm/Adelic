@@ -135,7 +135,9 @@ export function observabilityRoutes({ store, providerList }: BackendContext) {
       SUM(CASE WHEN status='cancelled' THEN 1 ELSE 0 END) cancelled,
       CASE WHEN COUNT(input_tokens)=COUNT(*) THEN SUM(input_tokens) END input_tokens,
       CASE WHEN COUNT(output_tokens)=COUNT(*) THEN SUM(output_tokens) END output_tokens,
-      CASE WHEN COUNT(cost_usd)=COUNT(*) THEN SUM(cost_usd) END cost_usd
+      CASE WHEN COUNT(cost_usd)=COUNT(*) THEN SUM(cost_usd) END cost_usd,
+      CASE WHEN COUNT(cached_input_tokens)=COUNT(*) THEN SUM(cached_input_tokens) END cached_input_tokens,
+      CASE WHEN COUNT(reasoning_output_tokens)=COUNT(*) THEN SUM(reasoning_output_tokens) END reasoning_output_tokens
       FROM observability_runs r ${where}`,
       )
       .get(params) as Record<string, number | null>;
@@ -262,6 +264,9 @@ export function observabilityRoutes({ store, providerList }: BackendContext) {
           inputTokens: totals.input_tokens === null ? null : Number(totals.input_tokens),
           outputTokens: totals.output_tokens === null ? null : Number(totals.output_tokens),
           costUsd: totals.cost_usd === null ? null : Number(totals.cost_usd),
+          cachedInputTokens: totals.cached_input_tokens === null ? null : Number(totals.cached_input_tokens),
+          reasoningOutputTokens:
+            totals.reasoning_output_tokens === null ? null : Number(totals.reasoning_output_tokens),
         },
         components: componentsRows.map((row) => ({
           component: String(row.component),
@@ -282,12 +287,19 @@ export function observabilityRoutes({ store, providerList }: BackendContext) {
         durationMs: row.duration_ms === null ? null : Number(row.duration_ms),
         firstTokenMs: row.first_token_ms === null ? null : Number(row.first_token_ms),
         usage:
-          row.input_tokens === null && row.output_tokens === null && row.cost_usd === null
+          row.input_tokens === null &&
+          row.output_tokens === null &&
+          row.cost_usd === null &&
+          row.cached_input_tokens === null &&
+          row.reasoning_output_tokens === null
             ? null
             : {
                 inputTokens: row.input_tokens === null ? null : Number(row.input_tokens),
                 outputTokens: row.output_tokens === null ? null : Number(row.output_tokens),
                 costUsd: row.cost_usd === null ? null : Number(row.cost_usd),
+                cachedInputTokens: row.cached_input_tokens === null ? null : Number(row.cached_input_tokens),
+                reasoningOutputTokens:
+                  row.reasoning_output_tokens === null ? null : Number(row.reasoning_output_tokens),
               },
         error: row.error_kind ? 'A execução falhou' : null,
       })),

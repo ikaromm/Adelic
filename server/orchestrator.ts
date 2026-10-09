@@ -1,3 +1,4 @@
+import { captureRunArtifactSnapshot, compareRunArtifactSnapshots, type RunArtifactSnapshot } from './run-artifacts.js';
 import { RemoteHostService } from './remote/transport.js';
 import type { RemoteRuntime } from '../shared/remote-hosts.js';
 import type { Observability } from './observability.js';
@@ -22,6 +23,7 @@ import type {
   ProviderInfo,
   ProviderRegistry,
   Run,
+  RunArtifactsSnapshot,
   RunEvent,
   Session,
   RunInput,
@@ -41,9 +43,11 @@ import { expandMessage } from './commands.js';
 import { resolveMentions } from './mentions.js';
 import { parseMentions } from '../shared/mentions.js';
 import { Store } from './store.js';
+import { canRetryTask } from '../shared/task-retry.js';
 import { createLocalExecutor } from './local-executor.js';
 import { runMcpServers } from './mcp.js';
 import {
+  assessTaskDelivery,
   boundedCoordinatorContext,
   briefFor,
   graphifyPaths,
@@ -51,6 +55,8 @@ import {
   parseTaskPlan,
   resolveAgent,
   taskRecord,
+  synthesisExecutionFacts,
+  summarizeReview,
   type PlannedTask,
 } from './coordination.js';
 import { graphify, graphifyContext, type GraphifyService } from './graphify.js';
@@ -67,10 +73,21 @@ import {
   type RetryProgress,
 } from './retry.js';
 import { availableModel, modelLabel, resolvedModel, sameModel } from '../shared/model-fallback.js';
-import { CheckpointError, checkpointAfter, checkpointBefore, restoreCheckpoint } from './checkpoints.js';
+import {
+  CheckpointError,
+  NOT_GIT,
+  checkpointAfter,
+  checkpointBefore,
+  classifyGitRepo,
+  restoreCheckpoint,
+} from './checkpoints.js';
 import {
   applyWorktree,
   createWorktree,
+  createExecutorWorktree,
+  executorIsolation,
+  integrateExecutorWorktree,
+  inspectExecutorWorktree,
   mainRepo,
   pruneRepo,
   removeWorktree,
@@ -106,6 +123,10 @@ export interface StartOptions {
   automationId?: string;
   /** "Continuar mesmo assim": skip the usage limits for this one run (never persisted). */
   overrideLimit?: boolean;
+  /** Task-local recovery must not inherit the parent transcript or native provider thread. */
+  isolatedTaskRetry?: boolean;
+  /** Persist the origin on the run, including if start throws after run creation. */
+  retryOfTaskId?: string;
   /** "Corrigir automaticamente": `content` is the visible label, `prompt` goes to the agent. */
   hookFix?: { sourceRunId: string; prompt: string };
   /**
@@ -357,7 +378,7 @@ export class Orchestrator {
       const projectSnapshot = structuredClone(project),
         // After a provider handoff, only its summary and the messages after it are sent
         // (server/provider-handoff.ts).
-        history = handoffHistory(context.history),
+        history = options.isolatedTaskRetry ? [] : handoffHistory(context.history),
         settings = startingSettings;
       // `/plano` and "Planejar antes" plan first; task runs carry their prompt. Otherwise
       // `/name args` runs the saved command's template (the user message keeps the typed text)
@@ -494,6 +515,7 @@ export class Orchestrator {
         status: 'running',
         route: plan,
         startedAt: now,
+        ...(options.retryOfTaskId ? { retryOfTaskId: options.retryOfTaskId } : {}),
         approvalMode,
         ...(special ? { plan: special.ref } : {}),
         ...(options.hookFix ? { hookFix: { sourceRunId: options.hookFix.sourceRunId } } : {}),
@@ -507,7 +529,7 @@ export class Orchestrator {
       };
       // The native thread already holds the discarded turns and cannot be rewound: the next
       // run starts a fresh one, with the remaining history in its prompt.
-      if (options.replaceFrom) delete session.nativeSessionId;
+      if (options.replaceFrom || options.isolatedTaskRetry) delete session.nativeSessionId;
       const discarded = this.store.createRun(user, assistant, run, session, clientMessageId, options.replaceFrom);
       if (options.planTask) this.plans.taskStarted(options.planTask.planId, options.planTask.taskId, runId);
       if (reserveProject) this.reservedProjectWrites.set(writeKey, runId);
@@ -1050,6 +1072,234 @@ export class Orchestrator {
       return { ...result, session: this.saveWorktree(sessionId, undefined) };
     });
   }
+  /** Retry only one failed delegated task; completed siblings remain untouched. */
+  async retryTask(taskId: string, manualApproval = false): Promise<Started> {
+    const task = this.store.getTask(taskId);
+    if (!task) throw httpError(404, 'projects.taskNotFound');
+    // One shared predicate keeps API and UI decisions aligned. Store-derived history
+    // distinguishes a markerless first retry from markerless delivered/unknown history.
+    if (!canRetryTask(task)) throw httpError(409, 'orchestrator.planTaskRetry');
+    const session = this.requireWritableSession(task.sessionId);
+    const prompt = [
+      `Retome somente esta tarefa pendente: ${task.title}`,
+      task.instructions,
+      `Escopo original: ${task.scope.length ? task.scope.join(', ') : 'identifique apenas os arquivos necessários'}`,
+      'Não repita tarefas irmãs já concluídas na execução original.',
+    ].join('\n\n');
+    const previousRetryRunId = task.retryRunId;
+    const previousRetryStartedAt = task.retryStartedAt;
+    const previousRetryRun = previousRetryRunId ? this.store.getRun(previousRetryRunId) : undefined;
+    const retryStartedAt = new Date(
+      Math.max(Date.now(), previousRetryRun ? Date.parse(previousRetryRun.startedAt) + 1 : 0),
+    ).toISOString();
+    task.retryStartedAt = retryStartedAt;
+    // A missing pointer marks the new reservation in flight, but retain its previous value
+    // locally so a pre-persistence start failure can restore it without hiding old attempts.
+    task.retryRunId = undefined;
+    this.store.putTask(task);
+    try {
+      const started = await this.start(session, prompt, undefined, [], {
+        isolatedTaskRetry: true,
+        retryOfTaskId: task.id,
+        ...(manualApproval ? { manualApproval: true } : {}),
+      });
+      task.retryRunId = started.runId;
+      this.store.putTask(task);
+      return started;
+    } catch (error) {
+      const persistedRetry = this.store
+        .listRuns(task.sessionId)
+        .find((run) => run.retryOfTaskId === task.id && run.startedAt >= retryStartedAt);
+      if (persistedRetry) {
+        task.retryRunId = persistedRetry.id;
+      } else {
+        // start() may reject before creating a run (busy session, limits, etc.). Restore
+        // the last durable attempt pointer: a later-applied checkout from that attempt must
+        // still be consulted by Store before another retry is accepted.
+        task.retryRunId = previousRetryRunId;
+        task.retryStartedAt = previousRetryStartedAt;
+      }
+      this.store.putTask(task);
+      throw error;
+    }
+  }
+  /** Read and compare a pending task checkout against its recorded base before inspection claims. */
+  async inspectTaskWorktree(taskId: string): Promise<RunArtifactsSnapshot | undefined> {
+    const task = this.store.getTask(taskId);
+    if (!task?.recoveryWorktree) return undefined;
+    const project = task.projectId ? this.store.getProject(task.projectId) : undefined;
+    if (!project || project.remote) return { status: 'unknown', reason: 'Project worktree is unavailable.', files: [] };
+    try {
+      const files = await inspectExecutorWorktree(project, task.recoveryWorktree);
+      return {
+        status: 'available',
+        files: files.map((file) => ({
+          path: file.path,
+          status: file.status as 'added' | 'modified' | 'deleted',
+        })),
+        capturedAt: new Date().toISOString(),
+      };
+    } catch (cause) {
+      return {
+        status: 'unknown',
+        reason: cause instanceof Error ? cause.message.slice(0, 160) : 'Worktree inspection failed.',
+        files: [],
+        capturedAt: new Date().toISOString(),
+      };
+    }
+  }
+
+  /**
+   * Recovery for an automatic task checkout. Apply can be retried after conflict resolution;
+   * discard is explicit and never runs on a live task.
+   */
+  async recoverTaskWorktree(taskId: string, action: 'apply' | 'discard') {
+    const task = this.store.getTask(taskId);
+    if (!task?.recoveryWorktree) throw httpError(404, 'projects.taskNotFound');
+    const project = task.projectId ? this.store.getProject(task.projectId) : undefined;
+    const session = this.store.getSession(task.sessionId);
+    if (!project || project.remote || !session) throw httpError(409, 'remotehosts.unsupported');
+    this.assertIdle(session);
+    const worktree = task.recoveryWorktree;
+    if (action === 'apply') {
+      const main = realPath(project.path);
+      if (
+        this.busyAt(main) ||
+        this.writingProjects.has(project.id) ||
+        this.reservedProjectWrites.has(project.id) ||
+        [...this.gitOps, ...this.applying, ...this.restoring].some((path) => overlaps(path, main))
+      )
+        throw httpError(409, 'orchestrator.applyDuringRun');
+      this.applying.add(main);
+      try {
+        if (task.integration?.status !== 'applied') {
+          const result = await this.withProjectWrite(project.id, () => integrateExecutorWorktree(project, worktree));
+          if (!result.changed && !result.alreadyApplied) {
+            task.integration = undefined;
+            task.delivery = {
+              status: 'not_implemented',
+              reason: 'A integração não encontrou alterações novas para aplicar; nenhuma entrega foi registrada.',
+              evidence: [...(task.delivery?.evidence ?? []), 'integration:no-changes'],
+              recovery: { action: 'retry', reason: 'Retomar somente esta tarefa pendente.' },
+              recordedAt: new Date().toISOString(),
+            };
+            this.store.putTask(task);
+            return { task, applied: false, cleanupPending: false };
+          }
+          task.integration = {
+            status: 'applied',
+            cleanup: 'pending',
+            reason: 'Alterações aplicadas ao projeto; limpeza do checkout pendente.',
+            recordedAt: new Date().toISOString(),
+          };
+          task.delivery = {
+            status: 'implemented',
+            reason: result.alreadyApplied
+              ? 'As alterações já estavam aplicadas ao projeto; entrega confirmada sem reaplicação.'
+              : 'Alterações preservadas aplicadas após recuperação manual.',
+            evidence: [
+              ...(task.delivery?.evidence ?? []),
+              result.alreadyApplied ? 'recovery:already-applied' : 'recovery:applied',
+            ],
+            recovery: { action: 'recover_worktree', reason: 'Integração concluída; limpar checkout preservado.' },
+            recordedAt: new Date().toISOString(),
+          };
+          this.store.putTask(task);
+        }
+        try {
+          const cleanup = await removeWorktree(project, worktree, this.store.dataDir);
+          if (!cleanup.removed) throw new Error('O checkout integrado ainda existe; limpeza permanece pendente.');
+          task.recoveryWorktree = undefined;
+          task.integration = {
+            ...task.integration!,
+            cleanup: 'complete',
+            reason: 'Alterações aplicadas e checkout removido.',
+            recordedAt: new Date().toISOString(),
+          };
+          task.delivery = {
+            ...task.delivery!,
+            recovery: { action: 'inspect', reason: 'Entrega integrada; inspecionar evidências.' },
+          };
+        } catch (cleanupError) {
+          task.integration = {
+            ...task.integration!,
+            cleanup: 'pending',
+            reason: errorText(cleanupError),
+            recordedAt: new Date().toISOString(),
+          };
+          task.delivery = {
+            ...task.delivery!,
+            recovery: {
+              action: 'recover_worktree',
+              reason: 'Integração já concluída; tente limpar o checkout, sem reaplicar.',
+            },
+          };
+        }
+        this.store.putTask(task);
+        this.publishEvent(task.sessionId, task.runId, 'status', 'Alterações recuperadas e integradas ao projeto.', {
+          taskId: task.id,
+          agentId: task.agentId,
+          phase: task.role,
+        });
+        return {
+          task,
+          applied: task.integration?.status === 'applied',
+          cleanupPending: task.integration?.cleanup === 'pending',
+        };
+      } finally {
+        this.applying.delete(main);
+      }
+    }
+    const main = realPath(project.path);
+    if (
+      this.busyAt(main) ||
+      this.writingProjects.has(project.id) ||
+      this.reservedProjectWrites.has(project.id) ||
+      [...this.gitOps, ...this.applying, ...this.restoring].some((path) => overlaps(path, main))
+    )
+      throw httpError(409, 'orchestrator.applyDuringRun');
+    this.applying.add(main);
+    try {
+      const cleanup = await this.withProjectWrite(project.id, () =>
+        removeWorktree(project, worktree, this.store.dataDir),
+      );
+      if (!cleanup.removed) throw new Error('O checkout descartado ainda existe; limpeza permanece pendente.');
+    } finally {
+      this.applying.delete(main);
+    }
+    task.recoveryWorktree = undefined;
+    task.integration = {
+      ...(task.integration ?? { status: 'not_required' as const }),
+      cleanup: 'complete',
+      reason:
+        task.integration?.status === 'applied'
+          ? 'Integração aplicada anteriormente; checkout removido sem reaplicar.'
+          : 'Checkout descartado explicitamente e removido; nenhuma integração foi aplicada.',
+      recordedAt: new Date().toISOString(),
+    };
+    if (task.integration?.status !== 'applied') {
+      task.delivery = {
+        status: 'partial',
+        reason: 'Checkout isolado abandonado por solicitação explícita.',
+        evidence: [...(task.delivery?.evidence ?? []), 'recovery:discarded'],
+        recovery: { action: 'none', reason: 'Checkout abandonado explicitamente' },
+        recordedAt: new Date().toISOString(),
+      };
+    } else if (task.delivery) {
+      task.delivery = {
+        ...task.delivery,
+        recovery: { action: 'inspect', reason: 'Integração aplicada; checkout removido.' },
+        recordedAt: new Date().toISOString(),
+      };
+    }
+    this.store.putTask(task);
+    this.publishEvent(task.sessionId, task.runId, 'status', 'Checkout isolado abandonado explicitamente.', {
+      taskId: task.id,
+      agentId: task.agentId,
+      phase: task.role,
+    });
+    return { task, applied: false };
+  }
   /** Conversation deletion: the folder goes, the branch stays unless already merged. */
   async dropWorktree(session: Session) {
     if (!session.worktree) return;
@@ -1151,10 +1401,10 @@ export class Orchestrator {
       executionKind: 'ssh',
       call: async (tool, args, callSignal) => {
         if (signal.aborted || callSignal.aborted) throw new Error('Execução SSH cancelada');
-        if (sandbox === 'read-only' && (tool === 'exec' || tool === 'write_file'))
+        if (sandbox === 'read-only' && (tool === 'exec' || tool === 'write_file' || tool === 'replace_text'))
           throw httpError(409, 'remotehosts.readOnly');
         if (!connection) {
-          connection = this.remoteHosts.connect(host, root);
+          connection = this.remoteHosts.connect(host, root, { readOnly: sandbox === 'read-only' });
           this.remoteConnections.set(runId, connection);
         }
         const c = await connection;
@@ -1268,6 +1518,7 @@ export class Orchestrator {
     let memoryContext: string | undefined;
     // Usage of the direct call over every attempt (retries, model fallback), failed ones included.
     const directUsage = new UsageMeter();
+    let artifactBefore: RunArtifactSnapshot | undefined;
     try {
       // Checks still running from an earlier run stop before this one may write (with a note).
       if (mayWrite) await this.hookChecks.cancel(project.id, 'nova execução neste projeto');
@@ -1276,6 +1527,10 @@ export class Orchestrator {
         run.checkpoint = await checkpointBefore(project.path, run.id, {
           requireToplevel: session.projectId === null,
         });
+        if (!run.checkpoint.available) {
+          artifactBefore = await captureRunArtifactSnapshot(project.path);
+          run.artifactRoot = project.path;
+        }
         this.store.putRun(run);
         this.emit({ type: 'run', run });
       }
@@ -1352,6 +1607,20 @@ export class Orchestrator {
             reason: ignored.reason,
           });
       }
+      // A failed or legacy-unclassified checkpoint is not evidence that Git is absent.
+      // Do not probe again in that case: preserve the uncertainty from the failed capture.
+      const gitAvailability: NonNullable<RunInput['executorContext']>['git'] = run.checkpoint?.available
+        ? ('available' as const)
+        : run.checkpoint
+          ? run.checkpoint.captureState === 'not_applicable' && run.checkpoint.reason === NOT_GIT
+            ? ('unavailable' as const)
+            : 'unknown'
+          : plan.tools && plan.level === 'deep' && !project.remote
+            ? await classifyGitRepo(project.path).then(({ status }) =>
+                status === 'available' ? 'available' : status === 'absent' ? 'unavailable' : 'unknown',
+              )
+            : 'unknown';
+      if (gitAvailability !== 'unknown') run.gitAvailable = gitAvailability === 'available';
       const projectConfig = project.orchestration ?? { enabled: true, maxWorkers: 2, review: true };
       // Plan mode runs are one direct call: the plan already is the decomposition.
       if (projectConfig.enabled && !special) {
@@ -1372,6 +1641,12 @@ export class Orchestrator {
           attached,
           summary,
           hooks.blockedCommands,
+          plan.tools
+            ? {
+                git: gitAvailability,
+                checks: hooks.afterEdit.filter((check) => check.enabled).map((check) => check.command),
+              }
+            : undefined,
         );
         response = assistant.content;
         run.status = controller.signal.aborted ? 'cancelled' : assistant.status === 'failed' ? 'failed' : 'completed';
@@ -1400,6 +1675,12 @@ export class Orchestrator {
           model: session.model,
           cwd: project.path,
           prompt,
+          executorContext: plan.tools
+            ? {
+                git: gitAvailability,
+                checks: hooks.afterEdit.filter((check) => check.enabled).map((check) => check.command),
+              }
+            : undefined,
           history: boundedHistory(history, plan.contextBudget),
           plan,
           sandbox: settings.sandbox,
@@ -1565,6 +1846,10 @@ export class Orchestrator {
       await this.closeRemoteRun(run.id);
       addUsage(run, directUsage.totals());
       if (run.checkpoint) run.checkpoint = await checkpointAfter(run.id, run.checkpoint);
+      if (artifactBefore) {
+        const after = await captureRunArtifactSnapshot(project.path);
+        run.artifacts = { ...compareRunArtifactSnapshots(artifactBefore, after), capturedAt: new Date().toISOString() };
+      }
       run.completedAt = new Date().toISOString();
       run.durationMs = Date.now() - started;
       if (response) assistant.content = response;
@@ -1619,6 +1904,7 @@ export class Orchestrator {
     attached: { images: NonNullable<RunInput['attachments']>; text: string } = { images: [], text: '' },
     summary?: string,
     blockedCommands: string[] = [],
+    executorContext?: RunInput['executorContext'],
   ) {
     const config = project.orchestration ?? { enabled: true, maxWorkers: 2, review: true };
     const catalog = await this.providerList();
@@ -1658,6 +1944,7 @@ export class Orchestrator {
     ) =>
       taskRecord({
         id: randomUUID(),
+        agentId: randomUUID(),
         projectId: session.projectId,
         sessionId: session.id,
         runId: run.id,
@@ -1674,12 +1961,52 @@ export class Orchestrator {
       task.startedAt = new Date().toISOString();
       emitTask(task);
     };
-    const finishTask = (task: DelegatedTask, status: DelegatedTask['status'], output: string, error?: string) => {
+    const finishTask = (
+      task: DelegatedTask,
+      status: DelegatedTask['status'],
+      output: string,
+      error?: string,
+      changedFiles: string[] = [],
+    ) => {
       task.status = status;
       task.completedAt = new Date().toISOString();
       task.output = output;
       task.summary = output.replace(/\s+/g, ' ').trim().slice(0, 1200);
       if (error) task.error = error;
+      const taskRequest = [request, task.title, task.instructions].join(' ');
+      const mutationRequested =
+        /\b(implement|create|edit|fix|change|write|remove|refactor|build|add|implemente|implementar|crie|criar|edite|editar|corrija|corrigir|altere|alterar|escreva|escrever|remova|remover|refatore|refatorar|construa|construir)\b/i.test(
+          taskRequest,
+        );
+      const explicitlyReadOnly =
+        /\b(sem|without|do not|don't|nao|não)\b.{0,50}\b(alter|change|edit|write|modify|alterar|mudar|editar|escrever)\b/i.test(
+          taskRequest,
+        );
+      task.delivery = assessTaskDelivery(
+        task.role,
+        status,
+        error,
+        task.toolCalls || [],
+        changedFiles,
+        mutationRequested && !explicitlyReadOnly,
+      );
+      if (status === 'completed' && task.recoveryWorktree) {
+        task.delivery = changedFiles.length
+          ? {
+              status: 'partial',
+              reason: 'Processo concluído; alterações ainda existem somente no checkout isolado.',
+              evidence: [...task.delivery.evidence, 'integration:pending'],
+              recovery: { action: 'recover_worktree', reason: 'Inspecionar ou integrar o checkout preservado.' },
+              recordedAt: new Date().toISOString(),
+            }
+          : {
+              status: 'not_implemented',
+              reason: 'O processo terminou sem alterações de arquivos; nenhuma entrega foi aplicada.',
+              evidence: [...task.delivery.evidence, 'artifact:no-changes'],
+              recovery: { action: 'retry', reason: 'Retomar somente esta tarefa pendente.' },
+              recordedAt: new Date().toISOString(),
+            };
+      }
       emitTask(task);
     };
     const childRun = (task: DelegatedTask) => `${run.id}:${task.id}`;
@@ -1694,8 +2021,9 @@ export class Orchestrator {
       taskMemory?: string,
       level?: 'fast' | 'deep',
       taskImages: RunInput['attachments'] = [],
+      executionProject: Project = project,
     ) => {
-      if (tools && project.remote && providerId !== 'codex' && providerId !== 'kiro')
+      if (tools && executionProject.remote && providerId !== 'codex' && providerId !== 'kiro')
         throw httpError(409, 'remotehosts.provider');
       const taskLevel = level || (tools ? 'deep' : 'fast');
       return {
@@ -1703,7 +2031,8 @@ export class Orchestrator {
         sessionId: session.id,
         providerId,
         model,
-        cwd: project.path,
+        cwd: executionProject.path,
+        executorContext: tools ? executorContext : undefined,
         prompt,
         history: childHistory,
         plan: {
@@ -1721,7 +2050,14 @@ export class Orchestrator {
         sandbox,
         approvalMode: tools ? (run.approvalMode ?? 'auto-safe') : 'manual',
         ...(tools
-          ? this.remoteFor(project, sandbox, controller.signal, childRun(task), run.approvalMode, task.providerId)
+          ? this.remoteFor(
+              executionProject,
+              sandbox,
+              controller.signal,
+              childRun(task),
+              run.approvalMode,
+              task.providerId,
+            )
           : {}),
         memoryContext: taskMemory,
         ...(blockedCommands.length ? { blockedCommands } : {}),
@@ -1737,14 +2073,27 @@ export class Orchestrator {
       if (controller.signal.aborted) throw new Error('Execução cancelada');
       const usage = new UsageMeter();
       const effectiveInput = this.applyThinking(input, session.thinking, catalog);
+      const correlation = { taskId: task.id, agentId: task.agentId, phase: task.role };
+      task.providerId = effectiveInput.providerId;
+      task.model =
+        effectiveInput.model || catalog.find((provider) => provider.id === effectiveInput.providerId)?.defaultModel;
       task.effort = effectiveInput.plan.effort;
       this.store.putTask(task);
+      if (task.role === 'synthesis') {
+        effectiveInput.prompt = effectiveInput.prompt.replace(
+          '@@ADELIC_EXECUTION_FACTS@@',
+          synthesisExecutionFacts(
+            this.store.listSessionTasks(session.id, 100).filter((entry) => entry.runId === run.id),
+          ),
+        );
+      }
       this.publishKeyed(
         session.id,
         run.id,
         'status',
         task.effort ? 'event.taskEffort' : 'event.taskEffortAuto',
         task.effort ? { title: task.title, effort: task.effort } : { title: task.title },
+        correlation,
       );
       if (route.level === 'fast' && task.role === 'worker') {
         route.effort = effectiveInput.plan.effort;
@@ -1780,6 +2129,7 @@ export class Orchestrator {
                   this.publishEvent(session.id, run.id, 'approval', owned.title, {
                     status: owned.status,
                     ...(owned.decision ? { decision: owned.decision } : {}),
+                    ...correlation,
                   });
                 } else if (event.type === 'delta') {
                   task.output = (task.output || '') + event.text;
@@ -1797,16 +2147,30 @@ export class Orchestrator {
                       runId: run.id,
                       messageId: assistant.id,
                       text: event.text,
+                      taskId: task.id,
+                      agentId: task.agentId,
+                      phase: task.role,
                     });
                   }
-                } else if (event.type === 'status') this.publishEvent(session.id, run.id, 'status', event.text);
-                else if (event.type === 'tool')
+                } else if (event.type === 'status')
+                  this.publishEvent(session.id, run.id, 'status', event.text, correlation);
+                else if (event.type === 'tool') {
+                  const callId = event.toolCallId ? `${input.runId}:${event.toolCallId}` : undefined;
+                  task.toolCalls ??= [];
+                  task.toolCalls.push({
+                    ...(callId ? { callId } : {}),
+                    name: event.name,
+                    status: event.status,
+                    recordedAt: new Date().toISOString(),
+                  });
+                  this.store.putTask(task);
                   this.publishEvent(session.id, run.id, 'tool', event.description, {
                     toolName: event.name,
                     status: event.status,
-                    ...(event.toolCallId ? { toolCallId: `${input.runId}:${event.toolCallId}` } : {}),
+                    ...(callId ? { toolCallId: callId } : {}),
+                    ...correlation,
                   });
-                else if (event.type === 'usage') usage.event(event);
+                } else if (event.type === 'usage') usage.event(event);
               },
               controller.signal,
             ),
@@ -1821,7 +2185,7 @@ export class Orchestrator {
             withRetry((effects) => attempt(effects, effectiveInput), {
               policy: this.retryPolicy(settings),
               signal: controller.signal,
-              onRetry: (progress) => this.noteRetry(session.id, run, progress, task.title),
+              onRetry: (progress) => this.noteRetry(session.id, run, progress, task.title, correlation),
             }),
           {
             sessionId: session.id,
@@ -1832,6 +2196,7 @@ export class Orchestrator {
             current: { providerId: input.providerId, model: input.model },
             input: effectiveInput,
             taskTitle: task.title,
+            task: correlation,
           },
           (target, effects) => {
             // Delegated calls never resume a native session; their history is in the prompt.
@@ -1893,6 +2258,7 @@ export class Orchestrator {
       streamDirect = false,
     ) => {
       startTask(task);
+      let integrationBlocked = false;
       try {
         if (controller.signal.aborted) throw new Error('Execução cancelada');
         let graphContext = '';
@@ -1900,10 +2266,14 @@ export class Orchestrator {
           graphContext = await graph(`${planned.title}\n${planned.instructions}\n${planned.scope.join(' ')}`);
         } catch (e) {
           if (controller.signal.aborted) throw e;
-          this.publishKeyed(session.id, run.id, 'status', 'event.graphifyTask', {
-            title: planned.title,
-            error: errorText(e),
-          });
+          this.publishKeyed(
+            session.id,
+            run.id,
+            'status',
+            'event.graphifyTask',
+            { title: planned.title, error: errorText(e) },
+            { taskId: task.id, agentId: task.agentId, phase: task.role },
+          );
         }
         if (!planned.scope.length && graphContext) {
           planned.scope = mapPaths(graphContext);
@@ -1911,11 +2281,26 @@ export class Orchestrator {
           this.store.putTask(task);
         }
         if (controller.signal.aborted) throw new Error('Execução cancelada');
+        const writable = settings.sandbox === 'workspace-write' && route.tools && !project.remote;
+        const isolation = writable ? await executorIsolation(project) : undefined;
+        if (isolation?.mode === 'blocked') throw new Error(isolation.reason);
+        if (isolation?.mode === 'serial') {
+          this.publishEvent(session.id, run.id, 'status', isolation.reason, {
+            taskId: task.id,
+            agentId: task.agentId,
+            phase: task.role,
+          });
+        }
         const prompt = [
           'Você é um executor delegado. Recebeu apenas a tarefa atual e contexto limitado.',
           `Objetivo completo do usuário:\n${request}`,
           `Tarefa: ${planned.title}\n${planned.instructions}`,
           `Escopo: ${planned.scope.length ? planned.scope.join(', ') : 'identifique apenas os arquivos necessários ao objetivo'}`,
+          ...(isolation?.mode === 'serial'
+            ? [
+                `Isolamento: ${isolation.reason} Preserve estritamente a raiz autorizada (${project.path}); o coordenador executa os escritores em série.`,
+              ]
+            : []),
           skillContext,
           dependencySummaries.length
             ? `Resumos das dependências concluídas:\n${dependencySummaries.join('\n').slice(0, 1800)}`
@@ -1926,6 +2311,13 @@ export class Orchestrator {
         ]
           .filter(Boolean)
           .join('\n\n');
+        const executorWorktree =
+          writable && isolation?.mode === 'worktree'
+            ? await createExecutorWorktree(project, task, this.store.dataDir)
+            : undefined;
+        if (writable && isolation?.mode === 'worktree' && !executorWorktree)
+          throw new Error('A criação do worktree falhou; execução bloqueada, sem fallback inseguro.');
+        const executionProject = executorWorktree ? { ...project, path: executorWorktree.path } : project;
         const input = baseInput(
           worker.providerId,
           worker.model,
@@ -1937,34 +2329,210 @@ export class Orchestrator {
           memoryContext,
           undefined,
           images,
+          executionProject,
         );
-        const serialize = settings.sandbox === 'workspace-write';
+        if (executorWorktree) {
+          task.recoveryWorktree = executorWorktree;
+          this.store.putTask(task);
+        }
+        const serialize = settings.sandbox === 'workspace-write' && !executorWorktree;
+        let changedFiles: string[] = [];
+        let artifactSnapshotUnknown = false;
+        const workspacePath = executorWorktree?.path ?? project.path;
         const perform = async () => {
           if (controller.signal.aborted) throw new Error('Execução cancelada');
-          return call(input, task, streamDirect);
+          const before = writable ? await captureRunArtifactSnapshot(workspacePath) : undefined;
+          const result = await call(input, task, streamDirect);
+          if (before) {
+            const after = await captureRunArtifactSnapshot(workspacePath);
+            const changes = compareRunArtifactSnapshots(before, after);
+            if (changes.status === 'available') changedFiles = changes.files.map((file) => file.path);
+            else artifactSnapshotUnknown = true;
+          }
+          return result;
         };
         const result = serialize
           ? await this.withProjectWrite(this.writeKey(session, project), perform)
           : await perform();
         const output = result.text || task.output || '';
-        finishTask(task, result.stopReason === 'cancelled' ? 'cancelled' : 'completed', output);
+        finishTask(
+          task,
+          result.stopReason === 'cancelled' ? 'cancelled' : 'completed',
+          output,
+          undefined,
+          changedFiles,
+        );
+        if (task.role === 'worker' && artifactSnapshotUnknown && task.delivery) {
+          task.delivery = {
+            ...task.delivery,
+            status: 'unverified',
+            reason: 'A captura de artefatos ficou incompleta; não é possível afirmar ausência de alterações.',
+            evidence: [...task.delivery.evidence, 'artifact:snapshot-unknown'],
+            recovery: { action: 'inspect', reason: 'Inspecionar o workspace antes de aceitar ou repetir a tarefa.' },
+            recordedAt: new Date().toISOString(),
+          };
+          this.store.putTask(task);
+          emitTask(task);
+        }
+        if (
+          !artifactSnapshotUnknown &&
+          task.role === 'worker' &&
+          task.delivery?.status === 'unverified' &&
+          task.delivery.reason.includes('comparação não confirmou arquivos alterados')
+        ) {
+          task.delivery = {
+            ...task.delivery,
+            status: 'not_implemented',
+            reason: 'O processo terminou sem alterações observadas; entrega não aplicada.',
+            recovery: { action: 'retry', reason: 'Retomar somente esta tarefa pendente.' },
+          };
+          this.store.putTask(task);
+          emitTask(task);
+        }
+        if (executorWorktree && result.stopReason !== 'cancelled') {
+          task.recoveryWorktree = executorWorktree;
+          if (changedFiles.length || artifactSnapshotUnknown) {
+            task.delivery = {
+              status: 'partial',
+              reason: artifactSnapshotUnknown
+                ? 'Comparação de artefatos incompleta; checkout preservado enquanto Git reconcilia a entrega.'
+                : 'Processo concluído; alterações ainda existem somente no checkout isolado.',
+              evidence: [
+                ...(task.delivery?.evidence ?? []),
+                'integration:pending',
+                ...(artifactSnapshotUnknown ? ['artifact:snapshot-unknown'] : []),
+              ],
+              recovery: { action: 'recover_worktree', reason: 'Inspecionar ou integrar o checkout preservado.' },
+              recordedAt: new Date().toISOString(),
+            };
+          } else {
+            task.delivery = {
+              status: 'not_implemented',
+              reason: 'O processo terminou sem alterações de arquivos; nenhuma entrega foi aplicada.',
+              evidence: [...(task.delivery?.evidence ?? []), 'artifact:no-changes'],
+              recovery: { action: 'retry', reason: 'Retomar somente esta tarefa pendente.' },
+              recordedAt: new Date().toISOString(),
+            };
+          }
+          this.store.putTask(task);
+        }
+        // Git's tree comparison is authoritative for executor worktrees. Artifact snapshots
+        // are intentionally bounded and may be partial; neither an empty nor unknown artifact
+        // comparison is grounds to delete or skip integrating this checkout.
+        if (result.stopReason !== 'cancelled' && executorWorktree) {
+          try {
+            const integration = await this.withProjectWrite(this.writeKey(session, project), () =>
+              integrateExecutorWorktree(project, executorWorktree),
+            );
+            if (!integration.changed && !integration.alreadyApplied) {
+              task.integration = undefined;
+              task.delivery = {
+                ...task.delivery!,
+                status: 'not_implemented',
+                reason: 'A integração não encontrou alterações novas; nenhuma entrega foi aplicada.',
+                evidence: [...task.delivery!.evidence, 'integration:no-changes'],
+                recovery: { action: 'retry', reason: 'Retomar somente esta tarefa pendente.' },
+                recordedAt: new Date().toISOString(),
+              };
+              this.store.putTask(task);
+              emitTask(task);
+              return `Processo concluído, mas nenhuma alteração foi integrada; a tarefa permanece pendente para retry: ${output}`;
+            }
+            task.integration = {
+              status: 'applied',
+              cleanup: 'pending',
+              reason: 'Alterações aplicadas; limpeza do checkout pendente.',
+              recordedAt: new Date().toISOString(),
+            };
+            task.delivery = {
+              ...task.delivery!,
+              status: 'implemented',
+              reason: 'Processo concluído e alterações integradas ao projeto principal.',
+              evidence: [...task.delivery!.evidence, 'integration:applied'],
+              recovery: { action: 'recover_worktree', reason: 'Integração aplicada; limpeza do checkout pendente.' },
+            };
+            // Persist the commit point before cleanup: after a crash/reload recovery must never
+            // apply this patch a second time.
+            this.store.putTask(task);
+            try {
+              const cleanup = await removeWorktree(project, executorWorktree, this.store.dataDir);
+              if (!cleanup.removed) throw new Error('O checkout integrado ainda existe; limpeza permanece pendente.');
+              task.recoveryWorktree = undefined;
+              task.integration = {
+                ...task.integration,
+                cleanup: 'complete',
+                reason: 'Alterações aplicadas e checkout removido.',
+                recordedAt: new Date().toISOString(),
+              };
+            } catch (cleanupError) {
+              task.recoveryWorktree = executorWorktree;
+              task.integration = {
+                ...task.integration,
+                cleanup: 'pending',
+                reason: errorText(cleanupError),
+                recordedAt: new Date().toISOString(),
+              };
+            }
+          } catch (integrationError) {
+            const detail = errorText(integrationError);
+            task.recoveryWorktree = executorWorktree;
+            task.integration = {
+              status: 'blocked',
+              cleanup: 'pending',
+              reason: detail,
+              recordedAt: new Date().toISOString(),
+            };
+
+            if (task.delivery) {
+              task.delivery = {
+                ...task.delivery,
+                status: 'partial',
+                reason: 'O processo do executor terminou, mas a integração no projeto principal foi bloqueada.',
+                evidence: [...task.delivery.evidence, 'integration:blocked', 'recovery:workspace-retained'],
+                recovery: { action: 'recover_worktree', reason: 'Inspecionar ou integrar o checkout preservado.' },
+              };
+            }
+            emitTask(task);
+            this.publishEvent(
+              session.id,
+              run.id,
+              'status',
+              `Integração bloqueada; checkout preservado em ${executorWorktree.path}: ${detail}`,
+              { taskId: task.id, agentId: task.agentId, phase: task.role },
+            );
+            integrationBlocked = true;
+            return `Integração bloqueada; entrega não integrada e checkout preservado para recuperação: ${output}`;
+          }
+        }
+        if (task.integration?.status === 'applied' && task.delivery) {
+          task.delivery.recovery =
+            task.integration.cleanup === 'pending'
+              ? { action: 'recover_worktree', reason: 'Integração aplicada; limpeza do checkout pendente.' }
+              : { action: 'inspect', reason: 'Entrega integrada; inspecionar evidências.' };
+          if (task.integration.cleanup === 'pending')
+            task.delivery.evidence = [...task.delivery.evidence, 'cleanup:pending'];
+          else task.delivery.evidence = [...task.delivery.evidence, 'cleanup:complete'];
+          task.delivery.recordedAt = new Date().toISOString();
+          this.store.putTask(task);
+          emitTask(task);
+        }
         if (result.stopReason === 'cancelled') throw new Error('Execução cancelada');
         return output;
       } catch (e) {
         const cancelled = controller.signal.aborted;
-        finishTask(task, cancelled ? 'cancelled' : 'failed', task.output || '', errorText(e));
+        if (!integrationBlocked) finishTask(task, cancelled ? 'cancelled' : 'failed', task.output || '', errorText(e));
         throw e;
       }
     };
     if (route.level === 'fast') {
       const task = makeTask('worker', 'Responder pergunta', content, [], [], worker.providerId, worker.model);
-      startTask(task);
       const workerInfo = catalog.find((p) => p.id === worker.providerId);
       if (!workerInfo?.capabilities.fast) throw new Error('O executor escolhido não oferece o caminho rápido');
       if (!workerInfo.capabilities.tools)
         throw new Error(
           'O executor escolhido não disponibiliza ferramentas para esta conversa. Escolha outro executor.',
         );
+      startTask(task);
       const brief = getBrief();
       const style =
         settings.responseStyle === 'concise'
@@ -2069,9 +2637,23 @@ export class Orchestrator {
     try {
       graphContext = await graph(content);
     } catch (e) {
-      this.publishKeyed(session.id, run.id, 'status', 'event.graphifyPlanning', { error: errorText(e) });
+      this.publishKeyed(
+        session.id,
+        run.id,
+        'status',
+        'event.graphifyPlanning',
+        { error: errorText(e) },
+        {
+          taskId: planner.id,
+          agentId: planner.agentId,
+          phase: planner.role,
+        },
+      );
     }
-    if (controller.signal.aborted) throw new Error('Execução cancelada');
+    if (controller.signal.aborted) {
+      finishTask(planner, 'cancelled', planner.output || '', 'Execução cancelada durante a coleta do contexto.');
+      throw new Error('Execução cancelada');
+    }
     const plannerContext = boundedCoordinatorContext(history, request, priorBrief, mapPaths(graphContext), 6000);
     const plannerPrompt = [
       'Produza somente JSON válido, sem markdown, no formato: {"tasks":[{"id":"t1","title":"...","instructions":"...","scope":["path ou área"],"dependsOn":[]}]}.',
@@ -2105,7 +2687,18 @@ export class Orchestrator {
     } catch (e) {
       finishTask(planner, controller.signal.aborted ? 'cancelled' : 'failed', planner.output || '', errorText(e));
       if (controller.signal.aborted) throw e;
-      this.publishKeyed(session.id, run.id, 'status', 'event.invalidPlan', { error: errorText(e) });
+      this.publishKeyed(
+        session.id,
+        run.id,
+        'status',
+        'event.invalidPlan',
+        { error: errorText(e) },
+        {
+          taskId: planner.id,
+          agentId: planner.agentId,
+          phase: planner.role,
+        },
+      );
       planned = [
         { id: 'whole', title: 'Executar solicitação integral', instructions: content, scope: [], dependsOn: [] },
       ];
@@ -2120,12 +2713,43 @@ export class Orchestrator {
     }
     const summaries = new Map<string, string>(),
       pending = new Set(planned.map((t) => t.id));
+    const settlePending = (status: 'failed' | 'cancelled', reason: string) => {
+      for (const id of pending) {
+        const task = taskByPlanId.get(id)!;
+        if (task.status === 'queued') finishTask(task, status, '', reason);
+      }
+      pending.clear();
+    };
     while (pending.size) {
-      if (controller.signal.aborted) throw new Error('Execução cancelada');
+      if (controller.signal.aborted) {
+        settlePending('cancelled', 'A execução foi cancelada antes de iniciar as tarefas pendentes.');
+        throw new Error('Execução cancelada');
+      }
       const ready = planned.filter((t) => pending.has(t.id) && t.dependsOn.every((id) => summaries.has(id)));
-      if (!ready.length) throw new Error('Não há tarefa executável no plano');
-      const max = settings.sandbox === 'workspace-write' ? 1 : Math.max(1, Math.min(3, config.maxWorkers || 2));
-      const batch = ready.slice(0, max);
+      if (!ready.length) {
+        settlePending('failed', 'Nenhuma tarefa ficou executável após a falha de dependência.');
+        break;
+      }
+      // A dependency summary is not proof of integration. A failed provider or blocked
+      // integration explicitly blocks only its descendants; independent work can continue.
+      const executable = ready.filter((plannedTask) => {
+        const blocked = plannedTask.dependsOn
+          .map((id) => taskByPlanId.get(id)!)
+          .find((dependency) => dependency.status !== 'completed' || dependency.integration?.status === 'blocked');
+        if (!blocked) return true;
+        const task = taskByPlanId.get(plannedTask.id)!;
+        pending.delete(plannedTask.id);
+        finishTask(task, 'failed', '', `Dependência não integrada: ${blocked.title}.`);
+        summaries.set(plannedTask.id, `Bloqueada: a dependência ${blocked.title} não foi integrada.`);
+        return false;
+      });
+      if (!executable.length) continue;
+      const isolation =
+        settings.sandbox === 'workspace-write' && route.tools && !project.remote
+          ? await executorIsolation(project)
+          : undefined;
+      const max = isolation && isolation.mode !== 'worktree' ? 1 : Math.max(1, Math.min(3, config.maxWorkers || 2));
+      const batch = executable.slice(0, max);
       const results = await Promise.allSettled(
         batch.map((t) =>
           runWorker(
@@ -2135,23 +2759,21 @@ export class Orchestrator {
           ),
         ),
       );
-      let failure: unknown;
       results.forEach((r, i) => {
         const p = batch[i];
         pending.delete(p.id);
         if (r.status === 'fulfilled') summaries.set(p.id, r.value.replace(/\s+/g, ' ').slice(0, 1200));
         else {
-          failure ??= r.reason;
           summaries.set(p.id, `Falha: ${errorText(r.reason)}`);
         }
       });
-      if (failure) throw failure;
     }
     const workerSummary = planned
       .map((t) => `${t.title}: ${summaries.get(t.id) || ''}`)
       .join('\n')
       .slice(0, 5000);
     let reviewSummary = '';
+    let reviewIncomplete = false;
     if (config.review) {
       const reviewer = resolveAgent(
         catalog,
@@ -2186,7 +2808,9 @@ export class Orchestrator {
           ),
           review,
         );
-        reviewSummary = (result.text || review.output || '').slice(0, 1600);
+        const boundedReview = summarizeReview(result.text || review.output || '', 2400);
+        reviewSummary = boundedReview.text;
+        reviewIncomplete = boundedReview.incomplete;
         finishTask(
           review,
           result.stopReason === 'cancelled' ? 'cancelled' : 'completed',
@@ -2219,7 +2843,7 @@ export class Orchestrator {
           session.providerId,
           session.model,
           synth,
-          `${style}\n\nResponda ao pedido completo usando somente estes resultados compactos. ${memoryGuidance} Preserve incertezas e não afirme detalhes não contidos nos resumos.\n\nPedido completo do usuário:\n${content}${attachedNames}\n\nResultados:\n${workerSummary}${reviewSummary ? `\n\nRevisão independente:\n${reviewSummary}` : ''}\n\n${skillContext}`,
+          `${style}\n\nResponda ao pedido completo usando os resumos e os fatos de execução abaixo. Fatos estruturados descrevem observações do orquestrador, não autodeclarações de identidade/sucesso. Separe explicitamente status do processo de status da entrega; processo concluído não prova entrega integrada. Preserve incertezas e afirme apenas fatos/evidências presentes nos dados. ${memoryGuidance}\n\nFatos estruturados de execução (JSON observado pelo orquestrador):\n@@ADELIC_EXECUTION_FACTS@@\n\nPedido completo do usuário:\n${content}${attachedNames}\n\nResultados:\n${workerSummary}${reviewSummary ? `\n\nRevisão independente${reviewIncomplete ? ' (INCOMPLETA — achados podem estar omitidos; não declare aprovação com base nesta revisão)' : ''}:\n${reviewSummary}` : ''}\n\n${skillContext}`,
           [],
           false,
           settings.sandbox,
@@ -2425,8 +3049,13 @@ export class Orchestrator {
   /** Starts the project's enabled after-edit checks when a run completed and changed files. */
   private afterEditChecks(project: Project, run: Run) {
     try {
-      const changed = (run.checkpoint?.files?.length ?? 0) + (run.checkpoint?.omitted ?? 0);
-      if (run.status !== 'completed' || !run.checkpoint?.available || !changed || run.checkpoint.restoredAt) return;
+      const observed = run.checkpoint?.available
+        ? run.checkpoint
+        : run.artifacts?.status === 'available'
+          ? run.artifacts
+          : undefined;
+      const changed = (observed?.files?.length ?? 0) + (observed?.omitted ?? 0);
+      if (run.status !== 'completed' || !observed || !changed || run.checkpoint?.restoredAt) return;
       const hooks = this.store.getHooks(project.id);
       const checks = hooks.afterEdit.filter((check) => check.enabled);
       if (!checks.length) return;
@@ -2776,6 +3405,7 @@ export class Orchestrator {
       current: ModelRef;
       input: Pick<RunInput, 'plan' | 'attachments' | 'remote' | 'approvalMode'>;
       taskTitle?: string;
+      task?: Pick<RunEvent, 'taskId' | 'agentId' | 'phase'>;
     },
     attempt: (target: Required<ModelRef>, effects: EffectTracker) => Promise<T>,
   ): Promise<T> {
@@ -2814,7 +3444,7 @@ export class Orchestrator {
           context.run.id,
           'fallback',
           `${label}: trocado de ${fromLabel} para ${toLabel}${context.taskTitle ? ` (${context.taskTitle})` : ''}`,
-          { error: errorText(last).slice(0, 300), status: kind },
+          { error: errorText(last).slice(0, 300), status: kind, ...(context.task ?? {}) },
         );
         const effects = new EffectTracker();
         try {
@@ -2938,7 +3568,13 @@ export class Orchestrator {
     return { ...DEFAULT_RETRY, ...this.retryOverrides, retries: this.retryOverrides?.retries ?? retries };
   }
   /** Records an automatic retry on the run and in the activity panel. */
-  private noteRetry(sessionId: string, run: Run, progress: RetryProgress, taskTitle?: string) {
+  private noteRetry(
+    sessionId: string,
+    run: Run,
+    progress: RetryProgress,
+    taskTitle?: string,
+    task?: Pick<RunEvent, 'taskId' | 'agentId' | 'phase'>,
+  ) {
     run.retries = (run.retries ?? 0) + 1;
     this.store.putRun(run);
     this.emit({ type: 'run', run });
@@ -2950,7 +3586,13 @@ export class Orchestrator {
       'retry',
       taskTitle ? 'event.retryingTask' : 'event.retrying',
       taskTitle ? { task: taskTitle, ...vars } : vars,
-      { attempt: progress.attempt, of: progress.of, delayMs: progress.delayMs, error: progress.error.slice(0, 300) },
+      {
+        attempt: progress.attempt,
+        of: progress.of,
+        delayMs: progress.delayMs,
+        error: progress.error.slice(0, 300),
+        ...(task ?? {}),
+      },
     );
   }
   private assertNotUpdating() {

@@ -1,0 +1,124 @@
+.ssh-setup {
+  min-width: 0;
+}
+.ssh-setup-steps {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.5rem;
+  list-style: none;
+  padding: 0;
+  margin: 1.25rem 0;
+}
+.ssh-setup-steps li {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+  color: var(--text-muted, #9ca3af);
+  font-size: 0.78rem;
+}
+.ssh-setup-steps li > span {
+  flex: 0 0 1.6rem;
+  width: 1.6rem;
+  height: 1.6rem;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--border, #374151);
+  border-radius: 50%;
+}
+.ssh-setup-steps li.is-current {
+  color: var(--text, #f3f4f6);
+}
+.ssh-setup-steps li.is-current > span {
+  color: var(--accent, #60a5fa);
+  border-color: currentColor;
+}
+.ssh-setup-steps li.is-done > span {
+  color: var(--success, #34d399);
+  border-color: currentColor;
+}
+.ssh-host-state {
+  color: var(--text-muted, #9ca3af);
+  font-size: 0.8rem;
+}
+.ssh-ellipsis {
+  display: block;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ssh-primary-action {
+  flex: 0 0 auto;
+}
+.remote-host-info {
+  min-width: 0;
+}
+.ssh-host-details {
+  grid-column: 1 / -1;
+  min-width: 0;
+}
+.ssh-host-details > summary,
+.ssh-manual-target > summary {
+  cursor: pointer;
+  color: var(--text-muted, #9ca3af);
+}
+.ssh-details-content {
+  display: grid;
+  gap: 0.65rem;
+  padding: 0.75rem 0;
+  min-width: 0;
+}
+.ssh-details-content small {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.ssh-detail-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+.ssh-manual-target {
+  margin: 0.65rem 0;
+}
+.ssh-manual-target .remote-host-form-grid {
+  margin-top: 0.75rem;
+}
+.ssh-fingerprint {
+  display: block;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+.ssh-next-step {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+@media (max-width: 520px) {
+  .ssh-setup-steps {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .ssh-setup-steps li {
+    font-size: 0.72rem;
+  }
+  .remote-host-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .ssh-primary-action {
+    justify-self: start;
+  }
+  .remote-config-picker {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .remote-config-picker label {
+    flex: none;
+    width: 100%;
+  }
+  .remote-config-picker > button {
+    width: 100%;
+  }
+}

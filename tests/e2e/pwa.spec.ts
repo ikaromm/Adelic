@@ -88,5 +88,6 @@ test('explains the HTTPS requirement in Settings', async ({ page }) => {
     .getByRole('navigation', { name: 'Navegação principal' })
     .getByRole('button', { name: 'Configurações' })
     .click();
+  await page.getByRole('button', { name: 'Avançado', exact: true }).click();
   await expect(page.getByText(/a instalação exige HTTPS/)).toBeVisible();
 });

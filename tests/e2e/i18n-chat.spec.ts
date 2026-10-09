@@ -188,6 +188,7 @@ test('organizes project conversations in nested virtual folders', async ({ page,
       data: { name, path: repo, memoryWorkspace: 'e2e', memoryProject: `folders-${Date.now()}` },
     });
     expect(created.ok()).toBe(true);
+    const projectId = (await created.json()).id as string;
     await page.goto('/');
     await openMobileNavigation(page);
     await page.getByRole('button', { name: `New conversation in ${name}` }).click();
@@ -216,6 +217,45 @@ test('organizes project conversations in nested virtual folders', async ({ page,
     await tree.getByRole('textbox', { name: 'Rename folder' }).fill('Product area');
     await tree.getByRole('button', { name: 'Save folder name' }).click();
     await expect(tree).toContainText('Product area');
+
+    const productDelete = tree.getByRole('button', { name: 'Delete folder Product area' });
+    await expect(productDelete).toBeDisabled();
+    await expect(productDelete).toHaveAttribute('title', 'Remove subfolders before deleting this folder.');
+
+    const researchDelete = tree.getByRole('button', { name: 'Delete folder Research' });
+    let researchConfirm = '';
+    page.once('dialog', async (dialog) => {
+      researchConfirm = dialog.message();
+      await dialog.accept();
+    });
+    await researchDelete.click();
+    await expect(tree).not.toContainText('Research');
+    expect(researchConfirm).toContain('Conversations will move to its parent folder or the project root.');
+    expect(researchConfirm).toContain('No project data will be deleted.');
+
+    const afterResearchDelete = await request.get('/api/bootstrap').then((response) => response.json());
+    const conversation = afterResearchDelete.sessions.find(
+      (session: { projectId: string; title?: string }) => session.projectId === projectId,
+    );
+    expect(conversation?.folderId).toBeTruthy();
+    const productArea = (afterResearchDelete.projectFolders as { id: string; name: string }[]).find(
+      (folder) => folder.name === 'Product area',
+    );
+    expect(conversation.folderId).toBe(productArea?.id);
+
+    let productConfirm = '';
+    page.once('dialog', async (dialog) => {
+      productConfirm = dialog.message();
+      await dialog.accept();
+    });
+    await productDelete.click();
+    await expect(tree).not.toContainText('Product area');
+    expect(productConfirm).toContain('Conversations will move to its parent folder or the project root.');
+    const afterProductDelete = await request.get('/api/bootstrap').then((response) => response.json());
+    const movedConversation = afterProductDelete.sessions.find(
+      (session: { projectId: string }) => session.projectId === projectId,
+    );
+    expect(movedConversation?.folderId).toBeFalsy();
   } finally {
     rmSync(repo, { recursive: true, force: true });
   }

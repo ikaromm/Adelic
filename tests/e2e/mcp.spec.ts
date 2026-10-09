@@ -14,6 +14,7 @@ async function openSettings(page: Page) {
     .getByRole('navigation', { name: 'Navegação principal' })
     .getByRole('button', { name: 'Configurações' })
     .click();
+  await page.getByRole('button', { name: 'Avançado', exact: true }).click();
   return page.getByRole('region', { name: 'Servidores MCP' });
 }
 async function createProject(request: APIRequestContext) {

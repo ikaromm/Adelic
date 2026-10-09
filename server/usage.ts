@@ -24,7 +24,7 @@ import type { ServerKey } from './i18n.js';
 // retries and model fallback attempts), so the runs table is the single source of truth and
 // nothing has to be kept in sync or rebuilt at startup.
 
-type Usage = Pick<Run, 'inputTokens' | 'outputTokens' | 'costUsd'>;
+type Usage = Pick<Run, 'inputTokens' | 'cachedInputTokens' | 'outputTokens' | 'reasoningOutputTokens' | 'costUsd'>;
 const add = (a: number | undefined, b: number | undefined) =>
   a === undefined && b === undefined ? undefined : (a ?? 0) + (b ?? 0);
 
@@ -45,7 +45,9 @@ export class UsageMeter {
   event(usage: Usage) {
     this.current = {
       inputTokens: usage.inputTokens ?? this.current.inputTokens,
+      cachedInputTokens: usage.cachedInputTokens ?? this.current.cachedInputTokens,
       outputTokens: usage.outputTokens ?? this.current.outputTokens,
+      reasoningOutputTokens: usage.reasoningOutputTokens ?? this.current.reasoningOutputTokens,
       costUsd: usage.costUsd ?? this.current.costUsd,
     };
   }
@@ -53,14 +55,18 @@ export class UsageMeter {
   result(usage: Usage) {
     this.current = {
       inputTokens: this.current.inputTokens ?? usage.inputTokens,
+      cachedInputTokens: this.current.cachedInputTokens ?? usage.cachedInputTokens,
       outputTokens: this.current.outputTokens ?? usage.outputTokens,
+      reasoningOutputTokens: this.current.reasoningOutputTokens ?? usage.reasoningOutputTokens,
       costUsd: usage.costUsd ?? this.current.costUsd,
     };
   }
   private sum(): Usage {
     return {
       inputTokens: add(this.settled.inputTokens, this.current.inputTokens),
+      cachedInputTokens: add(this.settled.cachedInputTokens, this.current.cachedInputTokens),
       outputTokens: add(this.settled.outputTokens, this.current.outputTokens),
+      reasoningOutputTokens: add(this.settled.reasoningOutputTokens, this.current.reasoningOutputTokens),
       costUsd: add(this.settled.costUsd, this.current.costUsd),
     };
   }
@@ -72,7 +78,7 @@ export class UsageMeter {
 
 /** Copies a meter's totals onto a run; unknown fields are removed rather than set to zero. */
 export function applyUsage(run: Run, usage: Usage) {
-  for (const key of ['inputTokens', 'outputTokens', 'costUsd'] as const) {
+  for (const key of ['inputTokens', 'cachedInputTokens', 'outputTokens', 'reasoningOutputTokens', 'costUsd'] as const) {
     const value = usage[key];
     if (value === undefined) delete run[key];
     else run[key] = value;
@@ -81,9 +87,12 @@ export function applyUsage(run: Run, usage: Usage) {
 /** Adds one call's usage to a run (coordinated tasks, auxiliary calls). */
 export function addUsage(run: Run, usage: Usage) {
   run.inputTokens = add(run.inputTokens, usage.inputTokens);
+  run.cachedInputTokens = add(run.cachedInputTokens, usage.cachedInputTokens);
   run.outputTokens = add(run.outputTokens, usage.outputTokens);
+  run.reasoningOutputTokens = add(run.reasoningOutputTokens, usage.reasoningOutputTokens);
   run.costUsd = add(run.costUsd, usage.costUsd);
-  for (const key of ['inputTokens', 'outputTokens', 'costUsd'] as const) if (run[key] === undefined) delete run[key];
+  for (const key of ['inputTokens', 'cachedInputTokens', 'outputTokens', 'reasoningOutputTokens', 'costUsd'] as const)
+    if (run[key] === undefined) delete run[key];
 }
 
 /** Today and this month (local time), globally and for `projectId`, with the limit statuses. */

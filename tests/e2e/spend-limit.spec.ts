@@ -95,6 +95,7 @@ test('the Settings card sets a limit, shows usage, and everything fits a 360px s
     .getByRole('navigation', { name: 'Navegação principal' })
     .getByRole('button', { name: 'Configurações' })
     .click();
+  await page.getByRole('button', { name: 'Avançado', exact: true }).click();
   const card = page.getByRole('region', { name: 'Limites de uso' });
   await card.scrollIntoViewIfNeeded();
   const toggle = card.getByRole('switch', { name: 'Limitar uso' });

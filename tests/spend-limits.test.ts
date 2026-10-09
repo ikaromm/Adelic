@@ -245,22 +245,35 @@ describe('limit statuses and messages', () => {
 describe('UsageMeter', () => {
   it('keeps the usage of failed attempts and lets the last event of an attempt win', () => {
     const meter = new UsageMeter();
-    expect(meter.totals()).toEqual({ inputTokens: undefined, outputTokens: undefined, costUsd: undefined });
+    expect(meter.totals()).toEqual({
+      inputTokens: undefined,
+      cachedInputTokens: undefined,
+      outputTokens: undefined,
+      reasoningOutputTokens: undefined,
+      costUsd: undefined,
+    });
     meter.attempt();
     meter.event({ inputTokens: 10 });
-    meter.event({ inputTokens: 30, outputTokens: 2 }); // cumulative value of the same turn
+    meter.event({ inputTokens: 30, cachedInputTokens: 18, outputTokens: 2, reasoningOutputTokens: 1 }); // cumulative value of the same turn
+    meter.event({ inputTokens: 30, cachedInputTokens: 18, outputTokens: 2, reasoningOutputTokens: 1 }); // duplicate snapshot
     meter.attempt(); // retried after a failure
     meter.event({ inputTokens: 5 });
     meter.result({ inputTokens: 999, outputTokens: 1, costUsd: 0.5 });
-    expect(meter.totals()).toEqual({ inputTokens: 35, outputTokens: 3, costUsd: 0.5 });
+    expect(meter.totals()).toEqual({
+      inputTokens: 35,
+      cachedInputTokens: 18,
+      outputTokens: 3,
+      reasoningOutputTokens: 1,
+      costUsd: 0.5,
+    });
   });
   it('applies and adds usage without inventing zeros', () => {
     const run = { inputTokens: 1, costUsd: 2 } as Run;
-    applyUsage(run, { inputTokens: 4 });
-    expect(run).toEqual({ inputTokens: 4 });
-    addUsage(run, { outputTokens: 2 });
+    applyUsage(run, { inputTokens: 4, cachedInputTokens: 2, outputTokens: 7, reasoningOutputTokens: 3 });
+    expect(run).toEqual({ inputTokens: 4, cachedInputTokens: 2, outputTokens: 7, reasoningOutputTokens: 3 });
+    addUsage(run, { cachedInputTokens: 1, outputTokens: 2, reasoningOutputTokens: 1 });
     addUsage(run, {});
-    expect(run).toEqual({ inputTokens: 4, outputTokens: 2 });
+    expect(run).toEqual({ inputTokens: 4, cachedInputTokens: 3, outputTokens: 9, reasoningOutputTokens: 4 });
   });
 });
 

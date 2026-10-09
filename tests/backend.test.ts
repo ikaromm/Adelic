@@ -626,6 +626,7 @@ describe('backend persistence and API', () => {
     });
     store.putTask({
       id: 'detached-task',
+      agentId: 'agent-detached',
       projectId: null,
       sessionId: 'detached',
       runId: 'r2',
@@ -1520,6 +1521,7 @@ describe('backend persistence and API', () => {
     });
     store.putTask({
       id: 't',
+      agentId: 'agent-t',
       projectId: 'p',
       sessionId: 's',
       runId: 'r',
@@ -1570,6 +1572,7 @@ describe('backend persistence and API', () => {
     for (let index = 0; index < 35; index++)
       store.putTask({
         id: `task-${index}`,
+        agentId: `agent-${index}`,
         projectId: null,
         sessionId: session.id,
         runId: `run-${Math.floor(index / 4)}`,
@@ -1656,6 +1659,9 @@ describe('backend persistence and API', () => {
     const detail = await fetch(`${base}/api/tasks/${task.id}`);
     expect(detail.status).toBe(200);
     expect((await detail.json()).output).toBe('ok');
+    const inspected = await fetch(`${base}/api/tasks/${task.id}/inspect`);
+    expect(inspected.status).toBe(200);
+    expect((await inspected.json()).task.output).toBe('ok');
     expect((await fetch(`${base}/api/tasks/missing`)).status).toBe(404);
     expect(store.detail(store.getSession(session.id)!).tasks[0].output).toBeUndefined();
     await store.close();
@@ -2836,6 +2842,1029 @@ describe('backend persistence and API', () => {
     });
     expect(manual.status).toBe(200);
     expect((await manual.json()).approvalMode).toBe('manual');
+    store.close();
+  });
+
+  it('inspects persisted unassigned tool events from an exclusive direct retry after reload', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'adelic-inspect-direct-retry-'));
+    dirs.push(dir);
+    const store = new Store(dir);
+    const now = new Date().toISOString();
+    store.putProject({
+      id: 'inspect-direct-retry-project',
+      name: 'Direct retry',
+      path: process.cwd(),
+      createdAt: now,
+      memoryWorkspace: 'w',
+      memoryProject: 'p',
+      orchestration: { enabled: false, maxWorkers: 1, review: false },
+    });
+    store.putSession({
+      id: 'inspect-direct-retry-session',
+      projectId: 'inspect-direct-retry-project',
+      title: 'Direct retry',
+      providerId: 'codex',
+      mode: 'fast',
+      createdAt: now,
+      updatedAt: now,
+    });
+    store.putTask({
+      id: 'inspect-direct-retry-task',
+      agentId: 'inspect-direct-retry-agent',
+      projectId: 'inspect-direct-retry-project',
+      sessionId: 'inspect-direct-retry-session',
+      runId: 'inspect-direct-retry-source',
+      retryRunId: 'inspect-direct-retry-run',
+      retryStartedAt: now,
+      role: 'worker',
+      title: 'Direct retry task',
+      instructions: 'Retry only this task.',
+      scope: [],
+      dependsOn: [],
+      providerId: 'codex',
+      status: 'completed',
+      createdAt: now,
+      completedAt: now,
+      delivery: {
+        status: 'not_implemented',
+        reason: 'The original worker did not deliver changes.',
+        evidence: ['process:failed'],
+        recovery: { action: 'retry', reason: 'Retry this task only.' },
+        recordedAt: now,
+      },
+    });
+
+    const runId = 'inspect-direct-retry-run';
+    store.putRun({
+      id: runId,
+      sessionId: 'inspect-direct-retry-session',
+      providerId: 'codex',
+      status: 'completed',
+      route: {
+        level: 'fast',
+        reason: 'direct task retry',
+        tools: true,
+        memory: false,
+        effort: 'low',
+        contextBudget: 6000,
+      },
+      startedAt: now,
+      completedAt: now,
+      retryOfTaskId: 'inspect-direct-retry-task',
+    });
+
+    store.addEvent({
+      id: 'direct-retry-tool-event',
+      runId,
+      sessionId: 'inspect-direct-retry-session',
+      type: 'tool',
+      text: 'tool activity with no task attribution',
+      createdAt: now,
+    });
+    store.addEvent({
+      id: 'shared-parent-unassigned-event',
+      runId: 'inspect-direct-retry-source',
+      sessionId: 'inspect-direct-retry-session',
+      type: 'tool',
+      text: 'unassigned event in shared parent run',
+      createdAt: now,
+    });
+    store.addEvent({
+      id: 'unrelated-unassigned-event',
+      runId: 'unrelated-run',
+      sessionId: 'inspect-direct-retry-session',
+      type: 'tool',
+      text: 'unassigned event from another run',
+      createdAt: now,
+    });
+    const dataDir = store.dataDir;
+    store.close();
+
+    const reloaded = new Store(dataDir);
+    const { app } = createBackend(reloaded, {} as ProviderRegistry);
+    const reloadedServer = createServer(app);
+    servers.push(reloadedServer);
+    reloadedServer.listen(0, '127.0.0.1');
+    const reloadedBase = await ready(reloadedServer);
+    const inspected = await fetch(`${reloadedBase}/api/tasks/inspect-direct-retry-task/inspect`);
+    expect(inspected.status).toBe(200);
+    const result = await inspected.json();
+    expect(result.events.map((event: { id: string }) => event.id)).toEqual(['direct-retry-tool-event']);
+    reloaded.close();
+  });
+
+  it('inspects only the selected task evidence and exposes its pending recovery checkout', async () => {
+    const { store, server } = setup();
+    const now = new Date().toISOString();
+    const taskId = 'inspect-pending-task';
+    const runId = 'inspect-parent-run';
+    const sessionId = 'inspect-session';
+    store.putSession({
+      id: sessionId,
+      projectId: null,
+      title: 'Inspection',
+      providerId: 'codex',
+      mode: 'fast',
+      createdAt: now,
+      updatedAt: now,
+    });
+    const run: Run = {
+      id: runId,
+      sessionId,
+      providerId: 'codex',
+      status: 'completed',
+      route: { level: 'fast', reason: 'test', tools: false, memory: false, effort: 'low', contextBudget: 6000 },
+      startedAt: now,
+      artifacts: {
+        status: 'available',
+        files: [
+          { path: 'src/task/result.ts', status: 'added' },
+          { path: 'src/sibling/secret.ts', status: 'added' },
+        ],
+        capturedAt: now,
+      },
+    };
+    store.putRun(run);
+    const retryRunId = 'inspect-retry-run';
+    store.putRun({
+      ...run,
+      id: retryRunId,
+      retryOfTaskId: taskId,
+      artifacts: { status: 'available', files: [{ path: 'retry-only.ts', status: 'added' }], capturedAt: now },
+    });
+    store.putTask({
+      id: taskId,
+      agentId: 'inspect-agent',
+      projectId: null,
+      sessionId,
+      runId,
+      retryRunId: 'inspect-retry-run',
+      retryStartedAt: now,
+      role: 'worker',
+      title: 'Pending worktree task',
+      instructions: 'Inspect this task only',
+      scope: ['src'],
+      dependsOn: [],
+      providerId: 'codex',
+      status: 'completed',
+      createdAt: now,
+      completedAt: now,
+      recoveryWorktree: { path: '/tmp/task-worktree', branch: 'task-branch', base: 'abc', createdAt: now },
+      delivery: {
+        status: 'partial',
+        reason: 'The checkout is pending recovery.',
+        evidence: ['integration:pending', 'artifact:src/task/result.ts', 'artifact:src/sibling/secret.ts'],
+        recovery: { action: 'recover_worktree', reason: 'Inspect before applying.' },
+        recordedAt: now,
+      },
+    });
+    store.putTask({
+      id: 'inspect-retry-child',
+      agentId: 'inspect-retry-agent',
+      projectId: null,
+      sessionId,
+      runId: retryRunId,
+      role: 'worker',
+      title: 'Retry child task',
+      instructions: 'Retry task work',
+      scope: [],
+      dependsOn: [],
+      providerId: 'codex',
+      status: 'completed',
+      createdAt: now,
+    });
+    for (const [id, eventTaskId, text] of [
+      ['inspect-task-event', taskId, 'task evidence'],
+      ['inspect-sibling-event', 'sibling-task', 'sibling evidence'],
+    ] as const) {
+      store.addEvent({
+        id,
+        runId,
+        sessionId,
+        type: 'tool',
+        text,
+        createdAt: now,
+        taskId: eventTaskId,
+      });
+    }
+    store.addEvent({
+      id: 'inspect-retry-event',
+      runId: retryRunId,
+      sessionId,
+      type: 'tool',
+      text: 'retry child evidence',
+      createdAt: now,
+      taskId: 'inspect-retry-child',
+    });
+    store.addEvent({
+      id: 'inspect-unrelated-retry-event',
+      runId: retryRunId,
+      sessionId,
+      type: 'tool',
+      text: 'unrelated retry evidence',
+      createdAt: now,
+      taskId: 'unrelated-task',
+    });
+
+    const base = await ready(server);
+    const response = await fetch(`${base}/api/tasks/${taskId}/inspect`);
+    expect(response.status).toBe(200);
+    const result = await response.json();
+    expect(result.task.recoveryWorktree.branch).toBe('task-branch');
+    expect(result.task.delivery.recovery.action).toBe('recover_worktree');
+    expect(result.events.map((event: { id: string }) => event.id)).toEqual([
+      'inspect-task-event',
+      'inspect-retry-event',
+    ]);
+    expect(result.artifacts.project).toMatchObject({
+      status: 'unknown',
+      reason: expect.stringContaining('shared delegated run'),
+      files: [],
+    });
+    expect(result.artifacts.worktree).toMatchObject({
+      status: 'unknown',
+      reason: expect.any(String),
+      files: [],
+    });
+    expect(result.task.delivery.evidence).toEqual([
+      'integration:pending',
+      'artifact:src/task/result.ts',
+      'artifact:src/sibling/secret.ts',
+    ]);
+
+    store.putTask({
+      ...store.getTask(taskId)!,
+      id: 'inspect-empty-scope-task',
+      retryRunId: undefined,
+      retryStartedAt: undefined,
+      scope: [],
+    });
+    const emptyScope = await fetch(`${base}/api/tasks/inspect-empty-scope-task/inspect`);
+    const emptyScopeResult = await emptyScope.json();
+    expect(emptyScopeResult.artifacts.project.status).toBe('unknown');
+    expect(emptyScopeResult.task.delivery.evidence).toContain('artifact:src/task/result.ts');
+  });
+
+  it('retries only a pending task and leaves its delivered sibling out of the request', async () => {
+    const { store, server } = setup();
+    const now = new Date().toISOString();
+    store.putProject({
+      id: 'retry-project',
+      name: 'Retry project',
+      path: process.cwd(),
+      createdAt: now,
+      memoryWorkspace: 'w',
+      memoryProject: 'p',
+      orchestration: { enabled: false, maxWorkers: 1, review: false },
+    });
+    store.putSession({
+      id: 'retry-session',
+      projectId: 'retry-project',
+      title: 'Retry',
+      providerId: 'codex',
+      mode: 'fast',
+      nativeSessionId: 'parent-thread',
+      createdAt: now,
+      updatedAt: now,
+    });
+    const common = {
+      projectId: 'retry-project',
+      sessionId: 'retry-session',
+      runId: 'source-run',
+      role: 'worker' as const,
+      instructions: 'Implement only the pending unit.',
+      scope: ['src/pending.ts'],
+      dependsOn: [],
+      providerId: 'codex' as const,
+      status: 'completed' as const,
+      createdAt: now,
+      completedAt: now,
+    };
+    store.putTask({
+      ...common,
+      id: 'pending-task',
+      agentId: 'pending-agent',
+      title: 'Pending unit',
+      delivery: {
+        status: 'not_implemented',
+        reason: 'No changes observed',
+        evidence: ['process:completed'],
+        recovery: { action: 'retry', reason: 'Resume this task' },
+        recordedAt: now,
+      },
+    });
+    store.putTask({
+      ...common,
+      id: 'delivered-sibling',
+      agentId: 'sibling-agent',
+      title: 'Delivered sibling',
+      instructions: 'Do not repeat sibling work.',
+    });
+    const base = await ready(server);
+    const response = await fetch(`${base}/api/tasks/pending-task/retry`, {
+      method: 'POST',
+      headers: headers(base),
+      body: JSON.stringify({ confirm: true }),
+    });
+    expect(response.status).toBe(202);
+    expect(store.getSession('retry-session')).not.toHaveProperty('nativeSessionId');
+    const { runId } = (await response.json()) as { runId: string };
+    expect(store.getTask('pending-task')).toMatchObject({ retryRunId: runId, retryStartedAt: expect.any(String) });
+    expect(store.getRun(runId)).toMatchObject({ retryOfTaskId: 'pending-task' });
+    const duplicate = await fetch(`${base}/api/tasks/pending-task/retry`, {
+      method: 'POST',
+      headers: headers(base),
+      body: JSON.stringify({ confirm: true }),
+    });
+    expect(duplicate.status).toBe(409);
+    const request = store
+      .listMessages('retry-session')
+      .find((message) => message.runId === runId && message.role === 'user');
+    expect(request?.content).toContain('Implement only the pending unit.');
+    expect(request?.content).not.toContain('Do not repeat sibling work.');
+    for (let i = 0; i < 100 && store.getSession('retry-session')?.activeRunId; i++)
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    const dataDir = store.dataDir;
+    store.close();
+    const reloaded = new Store(dataDir);
+    expect(reloaded.getTask('pending-task')).toMatchObject({ retryRunId: runId });
+    expect(reloaded.getTask('delivered-sibling')).toMatchObject({ title: 'Delivered sibling' });
+    reloaded.close();
+  });
+
+  it('keeps a persisted retry reserved when start throws after creating its run', async () => {
+    const { store, server, orchestrator } = setup();
+    const now = new Date().toISOString();
+    store.putProject({
+      id: 'retry-after-create-project',
+      name: 'Retry project',
+      path: process.cwd(),
+      createdAt: now,
+      memoryWorkspace: 'w',
+      memoryProject: 'p',
+      orchestration: { enabled: false, maxWorkers: 1, review: false },
+    });
+    store.putSession({
+      id: 'retry-after-create-session',
+      projectId: 'retry-after-create-project',
+      title: 'Retry',
+      providerId: 'codex',
+      mode: 'fast',
+      createdAt: now,
+      updatedAt: now,
+    });
+    store.putTask({
+      id: 'retry-after-create-task',
+      agentId: 'retry-after-create-agent',
+      projectId: 'retry-after-create-project',
+      sessionId: 'retry-after-create-session',
+      runId: 'source-run',
+      role: 'worker',
+      title: 'Pending task',
+      instructions: 'Only this task',
+      scope: [],
+      dependsOn: [],
+      providerId: 'codex',
+      status: 'completed',
+      createdAt: now,
+      completedAt: now,
+      delivery: {
+        status: 'not_implemented',
+        reason: 'No changes',
+        evidence: [],
+        recovery: { action: 'retry', reason: 'Try this task' },
+        recordedAt: now,
+      },
+    });
+    const originalStart = orchestrator.start.bind(orchestrator);
+    orchestrator.start = async (...args: Parameters<Orchestrator['start']>) => {
+      await originalStart(...args);
+      throw new Error('injected after createRun');
+    };
+
+    const base = await ready(server);
+    const response = await fetch(`${base}/api/tasks/retry-after-create-task/retry`, {
+      method: 'POST',
+      headers: headers(base),
+      body: JSON.stringify({ confirm: true }),
+    });
+    expect(response.status).toBe(500);
+    const task = store.getTask('retry-after-create-task')!;
+    expect(task.retryRunId).toBeTruthy();
+    expect(store.getRun(task.retryRunId!)).toMatchObject({ retryOfTaskId: task.id });
+
+    const duplicate = await fetch(`${base}/api/tasks/retry-after-create-task/retry`, {
+      method: 'POST',
+      headers: headers(base),
+      body: JSON.stringify({ confirm: true }),
+    });
+    expect(duplicate.status).toBe(409);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    const dataDir = store.dataDir;
+    store.close();
+    const reloaded = new Store(dataDir);
+    expect(reloaded.getTask('retry-after-create-task')).toMatchObject({ retryRunId: task.retryRunId });
+    reloaded.close();
+  });
+
+  it('reconciles orphaned retry reservations and restores retry-run links on seeded crash-state reload', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'adelic-retry-reconcile-'));
+    dirs.push(dir);
+    let store = new Store(dir);
+    const now = new Date().toISOString();
+    store.putSession({
+      id: 'retry-reconcile-session',
+      projectId: null,
+      title: 'Retry reconciliation',
+      providerId: 'codex',
+      mode: 'fast',
+      createdAt: now,
+      updatedAt: now,
+    });
+    const failedTask = (id: string) => ({
+      id,
+      agentId: id,
+      projectId: null,
+      sessionId: 'retry-reconcile-session',
+      runId: 'source-run',
+      role: 'worker' as const,
+      title: id,
+      instructions: 'Retry only this failed task',
+      scope: [],
+      dependsOn: [],
+      providerId: 'codex' as const,
+      status: 'failed' as const,
+      createdAt: now,
+      completedAt: now,
+      retryStartedAt: now,
+      delivery: {
+        status: 'blocked' as const,
+        reason: 'Original attempt failed.',
+        evidence: ['process:failed'],
+        recovery: { action: 'retry' as const, reason: 'Retry this task' },
+        recordedAt: now,
+      },
+    });
+    store.putTask(failedTask('orphaned-reservation'));
+    store.putTask(failedTask('retry-run-link-gap'));
+    store.putRun({
+      id: 'persisted-retry-run',
+      sessionId: 'retry-reconcile-session',
+      providerId: 'codex',
+      status: 'failed',
+      route: {
+        level: 'fast',
+        reason: 'seeded crash state',
+        tools: false,
+        memory: false,
+        effort: 'low',
+        contextBudget: 6000,
+      },
+      startedAt: now,
+      completedAt: now,
+      retryOfTaskId: 'retry-run-link-gap',
+    });
+    store.close();
+
+    // This is a reload of seeded crash state, not a process-kill test.
+    store = new Store(dir);
+    expect(store.getTask('orphaned-reservation')).toMatchObject({
+      status: 'failed',
+      delivery: { evidence: ['process:failed'] },
+    });
+    expect(store.getTask('orphaned-reservation')).not.toHaveProperty('retryStartedAt');
+    expect(store.getTask('orphaned-reservation')).not.toHaveProperty('retryRunId');
+    expect(store.getTask('retry-run-link-gap')).toMatchObject({
+      retryRunId: 'persisted-retry-run',
+      retryStartedAt: now,
+    });
+    expect(store.getRun('persisted-retry-run')).toMatchObject({
+      retryOfTaskId: 'retry-run-link-gap',
+      status: 'failed',
+    });
+    store.close();
+  });
+
+  it('allows retrying a failed retry run but rejects another retry after success', async () => {
+    const { store, server } = setup();
+    const now = new Date().toISOString();
+    store.putProject({
+      id: 'retry-again-project',
+      name: 'Retry again',
+      path: process.cwd(),
+      createdAt: now,
+      memoryWorkspace: 'w',
+      memoryProject: 'p',
+      orchestration: { enabled: false, maxWorkers: 1, review: false },
+    });
+    store.putSession({
+      id: 'retry-again-session',
+      projectId: 'retry-again-project',
+      title: 'Retry again',
+      providerId: 'codex',
+      mode: 'fast',
+      createdAt: now,
+      updatedAt: now,
+    });
+    store.putTask({
+      id: 'retry-again-task',
+      agentId: 'retry-again-agent',
+      projectId: 'retry-again-project',
+      sessionId: 'retry-again-session',
+      runId: 'original-run',
+      role: 'worker',
+      title: 'Recover failed retry',
+      instructions: 'Only this task',
+      scope: [],
+      dependsOn: [],
+      providerId: 'codex',
+      status: 'failed',
+      createdAt: now,
+      completedAt: now,
+      retryRunId: 'failed-retry-run',
+      retryStartedAt: now,
+      delivery: {
+        status: 'blocked',
+        reason: 'Task attempt failed.',
+        evidence: ['process:failed'],
+        recovery: { action: 'retry', reason: 'Retry this failed task' },
+        recordedAt: now,
+      },
+    });
+    store.putRun({
+      id: 'failed-retry-run',
+      sessionId: 'retry-again-session',
+      providerId: 'codex',
+      status: 'failed',
+      route: {
+        level: 'fast',
+        reason: 'seeded failed attempt',
+        tools: false,
+        memory: false,
+        effort: 'low',
+        contextBudget: 6000,
+      },
+      startedAt: now,
+      completedAt: now,
+      retryOfTaskId: 'retry-again-task',
+      artifacts: { status: 'available', files: [], capturedAt: now },
+    });
+    const base = await ready(server);
+    const response = await fetch(`${base}/api/tasks/retry-again-task/retry`, {
+      method: 'POST',
+      headers: headers(base),
+      body: JSON.stringify({ confirm: true }),
+    });
+    expect(response.status).toBe(202);
+    const { runId } = (await response.json()) as { runId: string };
+    expect(runId).not.toBe('failed-retry-run');
+    expect(store.getRun('failed-retry-run')).toMatchObject({ retryOfTaskId: 'retry-again-task', status: 'failed' });
+    expect(store.getTask('retry-again-task')).toMatchObject({ retryRunId: runId });
+
+    for (let i = 0; i < 100 && store.getRun(runId)?.status === 'running'; i++)
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    // Git checkpoint changes prove delivery even when run artifacts are absent.
+    store.putRun({
+      ...store.getRun(runId)!,
+      checkpoint: {
+        available: true,
+        files: [{ path: 'src/delivered.ts', status: 'added', additions: 1, deletions: 0 }],
+      },
+    });
+    expect(store.getTask('retry-again-task')).toMatchObject({ retryRunStatus: 'completed', retryRunDelivered: true });
+    const duplicateAfterDelivery = await fetch(`${base}/api/tasks/retry-again-task/retry`, {
+      method: 'POST',
+      headers: headers(base),
+      body: JSON.stringify({ confirm: true }),
+    });
+    expect(duplicateAfterDelivery.status).toBe(409);
+  });
+
+  it('treats an applied retry task as delivery proof across Store reload', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'adelic-retry-applied-'));
+    dirs.push(dir);
+    let store = new Store(dir);
+    const now = new Date().toISOString();
+    store.putSession({
+      id: 'applied-retry-session',
+      projectId: null,
+      title: 'Applied retry',
+      providerId: 'codex',
+      mode: 'fast',
+      createdAt: now,
+      updatedAt: now,
+    });
+    store.putRun({
+      id: 'applied-retry-run',
+      sessionId: 'applied-retry-session',
+      providerId: 'codex',
+      status: 'completed',
+      route: { level: 'fast', reason: 'retry', tools: true, memory: false, contextBudget: 1000 },
+      startedAt: now,
+      completedAt: now,
+      retryOfTaskId: 'applied-parent-task',
+      artifacts: { status: 'unknown', reason: 'capture incomplete', files: [], capturedAt: now },
+    });
+    expect(store.getRun('applied-retry-run')).toMatchObject({ retryOfTaskId: 'applied-parent-task' });
+    store.putTask({
+      id: 'applied-parent-task',
+      agentId: 'parent-agent',
+      projectId: null,
+      sessionId: 'applied-retry-session',
+      runId: 'source-run',
+      retryRunId: 'applied-retry-run',
+      retryStartedAt: now,
+      role: 'worker',
+      title: 'Retry task',
+      instructions: 'Retry',
+      scope: [],
+      dependsOn: [],
+      providerId: 'codex',
+      status: 'failed',
+      createdAt: now,
+      completedAt: now,
+      delivery: {
+        status: 'blocked',
+        reason: 'Original attempt failed.',
+        evidence: ['process:failed'],
+        recovery: { action: 'retry', reason: 'Inspect retry.' },
+        recordedAt: now,
+      },
+    });
+    store.putTask({
+      id: 'applied-child-task',
+      agentId: 'child-agent',
+      projectId: null,
+      sessionId: 'applied-retry-session',
+      runId: 'applied-retry-run',
+      role: 'worker',
+      title: 'Applied child',
+      instructions: 'Implement',
+      scope: [],
+      dependsOn: [],
+      providerId: 'codex',
+      status: 'completed',
+      createdAt: now,
+      completedAt: now,
+      integration: { status: 'applied', cleanup: 'complete', recordedAt: now },
+    });
+    expect(store.getTask('applied-parent-task')?.retryRunDelivered).toBe(true);
+    store.close();
+
+    store = new Store(dir);
+    expect(store.getTask('applied-parent-task')).toMatchObject({
+      retryRunStatus: 'completed',
+      retryRunDelivered: true,
+    });
+    store.close();
+  });
+
+  it('allows retry after completed synthesis when the worker attempt delivered no artifacts', async () => {
+    const { store, server } = setup();
+    const now = new Date().toISOString();
+    store.putProject({
+      id: 'retry-no-delivery-project',
+      name: 'Retry no delivery',
+      path: process.cwd(),
+      createdAt: now,
+      memoryWorkspace: 'w',
+      memoryProject: 'p',
+      orchestration: { enabled: false, maxWorkers: 1, review: false },
+    });
+    store.putSession({
+      id: 'retry-no-delivery-session',
+      projectId: 'retry-no-delivery-project',
+      title: 'Retry no delivery',
+      providerId: 'codex',
+      mode: 'fast',
+      createdAt: now,
+      updatedAt: now,
+    });
+    store.putRun({
+      id: 'completed-synthesis-run',
+      sessionId: 'retry-no-delivery-session',
+      providerId: 'codex',
+      status: 'completed',
+      route: {
+        level: 'fast',
+        reason: 'synthesis completed',
+        tools: false,
+        memory: false,
+        effort: 'low',
+        contextBudget: 6000,
+      },
+      startedAt: now,
+    });
+    store.putRun({
+      id: 'completed-empty-retry',
+      sessionId: 'retry-no-delivery-session',
+      providerId: 'codex',
+      status: 'completed',
+      route: {
+        level: 'fast',
+        reason: 'normal completion',
+        tools: false,
+        memory: false,
+        effort: 'low',
+        contextBudget: 6000,
+      },
+      startedAt: now,
+      retryOfTaskId: 'failed-worker-task',
+      artifacts: { status: 'available', files: [], capturedAt: now },
+    });
+    store.putTask({
+      id: 'failed-worker-task',
+      agentId: 'failed-worker-agent',
+      projectId: 'retry-no-delivery-project',
+      sessionId: 'retry-no-delivery-session',
+      runId: 'completed-synthesis-run',
+      retryRunId: 'completed-empty-retry',
+      retryStartedAt: now,
+      role: 'worker',
+      title: 'Worker failure absorbed by synthesis',
+      instructions: 'Implement the requested change only.',
+      scope: [],
+      dependsOn: [],
+      providerId: 'codex',
+      status: 'failed',
+      createdAt: now,
+      completedAt: now,
+      delivery: {
+        status: 'blocked',
+        reason: 'The worker failed; coordinator synthesis completed without delivery.',
+        evidence: ['process:failed'],
+        recovery: { action: 'retry', reason: 'Retry this task only.' },
+        recordedAt: now,
+      },
+    });
+
+    expect(store.getTask('failed-worker-task')).toMatchObject({
+      retryRunStatus: 'completed',
+      retryRunDelivered: false,
+    });
+    const base = await ready(server);
+    const response = await fetch(`${base}/api/tasks/failed-worker-task/retry`, {
+      method: 'POST',
+      headers: headers(base),
+      body: JSON.stringify({ confirm: true }),
+    });
+    expect(response.status).toBe(202);
+    const { runId } = (await response.json()) as { runId: string };
+    expect(runId).not.toBe('completed-empty-retry');
+    expect(store.getTask('failed-worker-task')).toMatchObject({ retryRunId: runId });
+    for (let i = 0; i < 100 && store.getSession('retry-no-delivery-session')?.activeRunId; i++)
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    // Replace the wide fixture checkout's incidental capture with explicit complete no-change evidence.
+    store.putRun({
+      ...store.getRun(runId)!,
+      artifacts: { status: 'available', files: [], capturedAt: now },
+    });
+    const dataDir = store.dataDir;
+    store.close();
+    const reloaded = new Store(dataDir);
+    expect(reloaded.getTask('failed-worker-task')).toMatchObject({
+      retryRunStatus: 'completed',
+      retryRunDelivered: false,
+    });
+    const reloadedOrchestrator = new Orchestrator(reloaded, {} as ProviderRegistry);
+    reloadedOrchestrator.start = async () => ({ runId: 'retry-after-reload', messageId: 'retry-message' });
+    await expect(reloadedOrchestrator.retryTask('failed-worker-task')).resolves.toMatchObject({
+      runId: 'retry-after-reload',
+    });
+    reloaded.close();
+  });
+
+  it('keeps completed process separate from an unregistered worktree integration after reload', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'adelic-task-phase-gap-'));
+    dirs.push(dir);
+    let store = new Store(dir);
+    const now = new Date().toISOString();
+    store.putTask({
+      id: 'completed-before-integration',
+      agentId: 'agent-phase-gap',
+      projectId: null,
+      sessionId: 'phase-session',
+      runId: 'phase-run',
+      role: 'worker',
+      title: 'Pending integration',
+      instructions: 'Implement the requested unit',
+      scope: ['src/unit.ts'],
+      dependsOn: [],
+      providerId: 'codex',
+      status: 'completed',
+      createdAt: now,
+      completedAt: now,
+      recoveryWorktree: { path: dir, branch: 'task-branch', base: 'base', createdAt: now },
+      delivery: {
+        status: 'partial',
+        reason: 'Processo concluído; alterações ainda existem somente no checkout isolado.',
+        evidence: ['process:completed', 'integration:pending'],
+        recovery: { action: 'recover_worktree', reason: 'Inspecionar ou integrar o checkout.' },
+        recordedAt: now,
+      },
+    });
+    store.close();
+    store = new Store(dir);
+    expect(store.getTask('completed-before-integration')).toMatchObject({
+      status: 'completed',
+      delivery: { status: 'partial', recovery: { action: 'recover_worktree' } },
+    });
+    expect(store.getTask('completed-before-integration')?.integration).toBeUndefined();
+    store.close();
+  });
+
+  it('persists retry delivery across every linked attempt and isolates other tasks after reload', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'adelic-retry-lineage-'));
+    dirs.push(dir);
+    let store = new Store(dir);
+    const now = new Date().toISOString();
+    store.putSession({
+      id: 'retry-history-session',
+      projectId: null,
+      title: 'Retry history',
+      providerId: 'codex',
+      mode: 'fast',
+      createdAt: now,
+      updatedAt: now,
+    });
+    const baseRun = {
+      sessionId: 'retry-history-session',
+      providerId: 'codex' as const,
+      status: 'completed' as const,
+      route: { level: 'fast' as const, reason: 'test', tools: false, memory: false, contextBudget: 0 },
+      startedAt: now,
+    };
+    const original = {
+      id: 'retry-history-original',
+      agentId: 'retry-history-agent',
+      projectId: null,
+      sessionId: 'retry-history-session',
+      runId: 'original-run',
+      role: 'worker' as const,
+      title: 'Historical task',
+      instructions: 'Keep the retry lineage.',
+      scope: [],
+      dependsOn: [],
+      providerId: 'codex' as const,
+      status: 'failed' as const,
+      createdAt: now,
+      completedAt: now,
+      retryRunId: 'retry-b',
+      delivery: {
+        status: 'blocked' as const,
+        reason: 'Original failure.',
+        evidence: ['process:failed'],
+        recovery: { action: 'retry' as const, reason: 'Retry task.' },
+        recordedAt: now,
+      },
+    };
+    store.putTask(original);
+    store.putRun({ ...baseRun, id: 'retry-a', retryOfTaskId: original.id });
+    store.putRun({
+      ...baseRun,
+      id: 'retry-b',
+      retryOfTaskId: original.id,
+      artifacts: { status: 'available', files: [], capturedAt: now },
+    });
+    store.putTask({
+      ...original,
+      id: 'retry-a-delivered-child',
+      runId: 'retry-a',
+      retryRunId: undefined,
+      status: 'completed',
+      integration: { status: 'applied', cleanup: 'not_required', recordedAt: now },
+      delivery: {
+        status: 'implemented',
+        reason: 'Retry A was applied.',
+        evidence: ['integration:applied'],
+        recovery: { action: 'inspect', reason: 'Already delivered.' },
+        recordedAt: now,
+      },
+    });
+    const unrelated = {
+      ...original,
+      id: 'unrelated-retry-task',
+      runId: 'unrelated-original-run',
+      retryRunId: 'retry-unrelated',
+    };
+    store.putTask(unrelated);
+    store.putRun({
+      ...baseRun,
+      id: 'retry-unrelated',
+      retryOfTaskId: unrelated.id,
+      artifacts: { status: 'available', files: [], capturedAt: now },
+    });
+    store.close();
+
+    store = new Store(dir);
+    expect(store.getTask(original.id)).toMatchObject({
+      retryRunId: 'retry-b',
+      retryRunStatus: 'completed',
+      retryRunDelivered: true,
+    });
+    expect(store.getTask(unrelated.id)).toMatchObject({
+      retryRunId: 'retry-unrelated',
+      retryRunDelivered: false,
+    });
+    store.close();
+  });
+
+  it('keeps legacy applied cleanup pending when no owned checkout path was recorded', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'adelic-legacy-no-worktree-'));
+    dirs.push(dir);
+    let store = new Store(dir);
+    const now = new Date().toISOString();
+    store.putTask({
+      id: 'legacy-no-worktree',
+      agentId: 'legacy-no-worktree-agent',
+      projectId: null,
+      sessionId: 'legacy-session',
+      runId: 'legacy-run',
+      role: 'worker',
+      title: 'Legacy applied task',
+      instructions: 'Do not claim physical cleanup.',
+      scope: [],
+      dependsOn: [],
+      providerId: 'codex',
+      status: 'completed',
+      createdAt: now,
+      completedAt: now,
+      integration: { status: 'applied', cleanup: 'pending', recordedAt: now },
+      delivery: {
+        status: 'implemented',
+        reason: 'Applied before restart',
+        evidence: ['integration:applied'],
+        recovery: { action: 'recover_worktree', reason: 'legacy cleanup' },
+        recordedAt: now,
+      },
+    });
+    store.close();
+
+    // Reload seeded legacy state; no real process was terminated.
+    store = new Store(dir);
+    expect(store.getTask('legacy-no-worktree')).toMatchObject({
+      integration: {
+        status: 'applied',
+        cleanup: 'pending',
+        reason: expect.stringContaining('limpeza física não verificada'),
+      },
+      delivery: {
+        status: 'implemented',
+        recovery: { action: 'inspect' },
+      },
+    });
+    expect(store.getTask('legacy-no-worktree')).not.toHaveProperty('recoveryWorktree');
+    expect(store.getTask('legacy-no-worktree')?.delivery?.evidence).not.toContain('cleanup:complete');
+    store.close();
+  });
+
+  it('repairs a legacy applied integration with missing checkout on Store reopen', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'adelic-legacy-cleanup-'));
+    dirs.push(dir);
+    let store = new Store(dir);
+    const now = new Date().toISOString();
+    store.putTask({
+      id: 'legacy-applied-task',
+      agentId: 'legacy-agent',
+      projectId: null,
+      sessionId: 'legacy-session',
+      runId: 'legacy-run',
+      role: 'worker',
+      title: 'Legacy applied task',
+      instructions: 'Preserve its delivery record',
+      scope: [],
+      dependsOn: [],
+      providerId: 'codex',
+      status: 'completed',
+      createdAt: now,
+      completedAt: now,
+      recoveryWorktree: { path: join(dir, 'already-removed'), branch: 'adelic/legacy', base: 'base', createdAt: now },
+      integration: {
+        status: 'applied',
+        cleanup: 'pending',
+        reason: 'old pending cleanup',
+        recordedAt: now,
+      },
+      delivery: {
+        status: 'implemented',
+        reason: 'Applied before restart',
+        evidence: ['integration:applied'],
+        recovery: { action: 'recover_worktree', reason: 'cleanup' },
+        recordedAt: now,
+      },
+    });
+    store.close();
+
+    store = new Store(dir);
+    expect(store.getTask('legacy-applied-task')).toMatchObject({
+      integration: {
+        status: 'applied',
+        cleanup: 'complete',
+        reason: 'Alterações aplicadas e checkout removido.',
+      },
+      delivery: { status: 'implemented', recovery: { action: 'inspect' } },
+    });
+    expect(store.getTask('legacy-applied-task')?.recoveryWorktree).toBeUndefined();
     store.close();
   });
 });

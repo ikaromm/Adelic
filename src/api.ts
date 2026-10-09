@@ -24,6 +24,8 @@ import type {
   QueuedMessage,
   ProjectCoordination,
   Run,
+  RunArtifactsSnapshot,
+  RunEvent,
   Session,
   SessionDetail,
   SelfUpdateStatus,
@@ -169,6 +171,15 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+/** Task-scoped recovery contracts returned by the persisted task endpoints. */
+export type TaskInspection = {
+  task: DelegatedTask;
+  events: RunEvent[];
+  artifacts: { project: RunArtifactsSnapshot; worktree?: RunArtifactsSnapshot };
+};
+export type TaskRetryResult = { runId: string };
+export type TaskWorktreeApplyResult = { applied: boolean; conflicts?: string[]; task?: DelegatedTask };
+
 export const api = {
   bootstrap: () => request<Bootstrap>('/api/bootstrap'),
   health: () => request<Health>('/api/health'),
@@ -202,13 +213,53 @@ export const api = {
   updateProgress: () => request<UpdateProgress>('/api/update/progress'),
   detail: (id: string) => request<SessionDetail>(`/api/sessions/${encodeURIComponent(id)}`),
   task: (id: string) => request<DelegatedTask>(`/api/tasks/${encodeURIComponent(id)}`),
+  /** Task-specific persisted evidence, events and artifact snapshot for the inspection panel. */
+  inspectTask: (id: string) => request<TaskInspection>(`/api/tasks/${encodeURIComponent(id)}/inspect`),
+  /** Retries only this pending delegated task; never replays sibling tasks or the parent request. */
+  retryTask: (id: string) =>
+    request<TaskRetryResult>(`/api/tasks/${encodeURIComponent(id)}/retry`, {
+      method: 'POST',
+      body: JSON.stringify({ confirm: true }),
+    }),
+  applyTaskWorktree: (id: string) =>
+    request<TaskWorktreeApplyResult>(`/api/tasks/${encodeURIComponent(id)}/worktree`, {
+      method: 'POST',
+      body: JSON.stringify({ action: 'apply' }),
+    }),
+  discardTaskWorktree: (id: string) =>
+    request<{ discarded: boolean; task?: DelegatedTask }>(`/api/tasks/${encodeURIComponent(id)}/worktree`, {
+      method: 'DELETE',
+      body: JSON.stringify({ confirm: true }),
+    }),
   createProject: (data: {
     name: string;
     path?: string;
     remote?: { hostId: string; path: string };
     memoryWorkspace?: string;
     memoryProject?: string;
+    orchestration?: { enabled: boolean; maxWorkers: 1 | 2 | 3; review: boolean };
+    graphify?: { enabled: boolean };
   }) => request<Project>('/api/projects', { method: 'POST', body: JSON.stringify(data) }),
+  localDirectories: (path?: string) =>
+    request<{
+      path: string;
+      entries: { name: string; path: string; directory: true; readable: boolean; writable: boolean }[];
+      truncated: boolean;
+      readable: boolean;
+      writable: boolean;
+    }>(`/api/local-directories${path ? `?path=${encodeURIComponent(path)}` : ''}`),
+  createLocalDirectory: (parentPath: string, name: string) =>
+    request<{ path: string }>('/api/local-directories', { method: 'POST', body: JSON.stringify({ parentPath, name }) }),
+  runArtifacts: (id: string) => request<RunArtifactsSnapshot>(`/api/runs/${encodeURIComponent(id)}/artifacts`),
+  runArtifactFile: (id: string, path: string) =>
+    request<{ path: string; content: string; truncated: boolean }>(
+      `/api/runs/${encodeURIComponent(id)}/artifacts/file?path=${encodeURIComponent(path)}`,
+    ),
+  initProjectGit: (id: string) =>
+    request<{ initialized: boolean }>(`/api/projects/${encodeURIComponent(id)}/git/init`, {
+      method: 'POST',
+      body: JSON.stringify({ confirm: true }),
+    }),
   createProjectFolder: (projectId: string, data: { name: string; parentId?: string | null }) =>
     request<ProjectFolder>(`/api/projects/${encodeURIComponent(projectId)}/folders`, {
       method: 'POST',
@@ -288,6 +339,7 @@ export const api = {
       model?: string | null;
       approvalMode?: ApprovalMode | null;
       archived?: boolean;
+      pinned?: boolean;
     },
   ) => request<Session>(`/api/sessions/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(data) }),
   /** "Continuar com outro agente" (docs/specs/provider-handoff.md). */

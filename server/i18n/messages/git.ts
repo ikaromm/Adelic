@@ -5,6 +5,8 @@ import { defineMessages } from '../../../shared/i18n.js';
 export default defineMessages(
   {
     'git.notRepo': 'O projeto não é um repositório git',
+    'git.initConfirm': 'Confirme a criação do repositório Git.',
+    'git.initExists': 'Já existe configuração Git nesta pasta.',
     'git.fileNotListed': 'Arquivo não está na lista de alterações',
     'git.fileOutsideList': 'Arquivo fora da lista de alterações: {path}',
     'git.conflicted': 'Arquivos em conflito não podem ser descartados: {paths}',
@@ -25,6 +27,8 @@ export default defineMessages(
   },
   {
     'git.notRepo': 'The project is not a git repository',
+    'git.initConfirm': 'Confirm Git repository creation.',
+    'git.initExists': 'Git configuration already exists in this folder.',
     'git.fileNotListed': 'The file is not in the list of changes',
     'git.fileOutsideList': 'File outside the list of changes: {path}',
     'git.conflicted': 'Conflicted files cannot be discarded: {paths}',

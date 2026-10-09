@@ -48,6 +48,7 @@ async function enableInSettings(page: Page) {
     .getByRole('navigation', { name: 'Navegação principal' })
     .getByRole('button', { name: 'Configurações' })
     .click();
+  await page.getByRole('button', { name: 'Avançado', exact: true }).click();
   const toggle = page.getByRole('switch', { name: 'Notificar quando terminar' });
   await expect(toggle).toHaveAttribute('aria-checked', 'false');
   await toggle.click();

@@ -5,6 +5,7 @@ import {
   ItemParams,
   TokenUsageParams,
   TurnParams,
+  CodexThreadUsage,
   parseParams,
 } from '../server/providers/codex-protocol.js';
 
@@ -69,7 +70,51 @@ describe('Codex token usage', () => {
     expect(parseParams(TokenUsageParams, params)?.tokenUsage.last).toMatchObject({
       inputTokens: 4606,
       outputTokens: 5,
+      cachedInputTokens: 0,
+      reasoningOutputTokens: 0,
+    });
+    expect(parseParams(TokenUsageParams, params)?.tokenUsage.total).toMatchObject({
+      inputTokens: 4606,
+      cachedInputTokens: 0,
+      outputTokens: 5,
+      reasoningOutputTokens: 0,
     });
     expect(parseParams(TokenUsageParams, { threadId: 't', tokenUsage: { last: { inputTokens: -1 } } })).toBeUndefined();
+  });
+
+  it('turns cumulative thread totals into retry-safe turn totals and preserves cache/reasoning separately', () => {
+    const usage = new CodexThreadUsage();
+    usage.beginTurn('grade-school');
+    // Captured Codex 0.160 usage snapshots, with thread/turn ids and prompt data omitted.
+    const capturedSnapshots = [
+      { inputTokens: 5_572, cachedInputTokens: 0, outputTokens: 47, reasoningOutputTokens: 19 },
+      { inputTokens: 11_244, cachedInputTokens: 0, outputTokens: 79, reasoningOutputTokens: 19 },
+      { inputTokens: 17_351, cachedInputTokens: 4_864, outputTokens: 532, reasoningOutputTokens: 111 },
+      { inputTokens: 23_950, cachedInputTokens: 10_752, outputTokens: 687, reasoningOutputTokens: 136 },
+      { inputTokens: 30_742, cachedInputTokens: 15_616, outputTokens: 776, reasoningOutputTokens: 169 },
+    ];
+    const finalSnapshot = capturedSnapshots.map((snapshot) => usage.update('grade-school', snapshot)).at(-1);
+    expect(finalSnapshot).toEqual({
+      inputTokens: 30_742,
+      cachedInputTokens: 15_616,
+      outputTokens: 776,
+      reasoningOutputTokens: 169,
+    });
+    // A repeated notification is a snapshot, so the consumer replaces its current value.
+    expect(usage.update('grade-school', capturedSnapshots.at(-1))).toEqual({
+      inputTokens: 30_742,
+      cachedInputTokens: 15_616,
+      outputTokens: 776,
+      reasoningOutputTokens: 169,
+    });
+    usage.beginTurn('grade-school');
+    expect(
+      usage.update('grade-school', {
+        inputTokens: 35_000,
+        cachedInputTokens: 18_816,
+        outputTokens: 900,
+        reasoningOutputTokens: 269,
+      }),
+    ).toEqual({ inputTokens: 4_258, cachedInputTokens: 3_200, outputTokens: 124, reasoningOutputTokens: 100 });
   });
 });

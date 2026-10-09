@@ -1,4 +1,11 @@
+import { mkdirSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { defineConfig } from '@playwright/test';
+
+// Pin fallback-font discovery for visual E2E runs without touching personal config.
+// The config uses only /usr/share/fonts and a private /tmp cache, not Playwright's XDG cache.
+mkdirSync('/tmp/adelic-playwright-fontconfig-cache', { recursive: true });
+process.env.FONTCONFIG_FILE = fileURLToPath(new URL('./tests/e2e/fontconfig-test.conf', import.meta.url));
 
 // E2E against the real backend and web build with a scripted provider (tests/e2e/server.ts).
 // Uses the system Chromium when PLAYWRIGHT_CHROMIUM is set (no browser download needed);

@@ -176,9 +176,134 @@ export class Store {
     this.db.exec(
       "UPDATE approvals SET data=json_set(data,'$.status','denied') WHERE json_extract(data,'$.status')='pending'",
     );
-    this.db.exec(
-      "UPDATE delegated_tasks SET data=json_set(data,'$.status','interrupted','$.completedAt',datetime('now'),'$.error','Servidor reiniciado durante a tarefa') WHERE json_extract(data,'$.status') IN ('running','queued')",
-    );
+    // Persist an explicit blocked delivery result as well as process termination so a
+    // restart cannot make a merely queued/running worker look delivered.
+    for (const task of this.rows<DelegatedTask>(
+      'delegated_tasks',
+      "WHERE json_extract(data,'$.status') IN ('running','queued')",
+    )) {
+      const completedAt = new Date().toISOString();
+      task.agentId ||= task.id;
+      if (task.integration?.status === 'applied') {
+        task.status = 'completed';
+        task.completedAt ||= completedAt;
+        if (task.integration.cleanup === 'pending' && task.delivery) {
+          task.delivery.recovery = {
+            action: 'recover_worktree',
+            reason: 'Integração aplicada; concluir somente a limpeza pendente.',
+          };
+        }
+      } else {
+        task.status = 'interrupted';
+        task.completedAt = completedAt;
+        task.error = 'Servidor reiniciado durante a tarefa';
+        task.delivery = {
+          status: 'blocked',
+          reason: task.error,
+          evidence: [
+            'process:interrupted',
+            ...(task.toolCalls || []).map((call) => `tool:${call.name}:${call.status}`),
+          ],
+          recovery: { action: 'retry', reason: 'Retomar somente esta tarefa pendente' },
+          recordedAt: completedAt,
+        };
+      }
+      this.putTask(task);
+    }
+    // Reconcile retry reservations around the two durable writes in retryTask():
+    // a reservation with no run is safe to release; a run with a missing task link is
+    // repaired by its persisted retryOfTaskId. Existing runs remain the source of truth.
+    for (const task of this.rows<DelegatedTask>('delegated_tasks')) {
+      const runs = this.listRuns(task.sessionId).filter((run) => run.retryOfTaskId === task.id);
+      const linked = task.retryRunId ? this.getRun(task.retryRunId) : undefined;
+      const reservationTime = task.retryStartedAt;
+      const linkedForReservation =
+        linked &&
+        linked.sessionId === task.sessionId &&
+        linked.retryOfTaskId === task.id &&
+        (!reservationTime || linked.startedAt >= reservationTime)
+          ? linked
+          : undefined;
+      const retryRun =
+        linkedForReservation ??
+        runs
+          .filter((run) => !reservationTime || run.startedAt >= reservationTime)
+          .sort((a, b) => b.startedAt.localeCompare(a.startedAt))[0];
+      let changed = false;
+      if (retryRun && task.retryRunId !== retryRun.id) {
+        task.retryRunId = retryRun.id;
+        task.retryStartedAt ||= retryRun.startedAt;
+        changed = true;
+      } else if (!retryRun && (task.retryStartedAt || task.retryRunId)) {
+        // No run was committed: the persisted reservation is an orphan, not evidence
+        // that a retry happened. Let the user request it again.
+        task.retryStartedAt = undefined;
+        task.retryRunId = undefined;
+        changed = true;
+      }
+      if (changed) this.putTask(task);
+    }
+    // Cleanup may have succeeded just before a crash prevented recording completion.
+    // Only a recorded checkout path can be checked; never infer physical cleanup from a
+    // missing legacy recoveryWorktree reference.
+    for (const task of this.rows<DelegatedTask>(
+      'delegated_tasks',
+      "WHERE json_extract(data,'$.integration.status')='applied' AND json_extract(data,'$.integration.cleanup')='pending'",
+    )) {
+      if (!task.recoveryWorktree || existsSync(task.recoveryWorktree.path)) continue;
+      task.recoveryWorktree = undefined;
+      task.integration = {
+        ...task.integration!,
+        cleanup: 'complete',
+        reason: 'Alterações aplicadas e checkout removido.',
+        recordedAt: new Date().toISOString(),
+      };
+      if (task.delivery) {
+        task.delivery.recovery = { action: 'inspect', reason: 'Entrega integrada; inspecionar evidências.' };
+        task.delivery.evidence = [...task.delivery.evidence, 'cleanup:complete'];
+        task.delivery.recordedAt = new Date().toISOString();
+      }
+      this.putTask(task);
+    }
+    // Legacy applied rows may predate recoveryWorktree persistence. Keep cleanup pending:
+    // without an owned path there is no safe way to claim removal or delete any checkout.
+    for (const task of this.rows<DelegatedTask>(
+      'delegated_tasks',
+      "WHERE json_extract(data,'$.integration.status')='applied' AND json_extract(data,'$.integration.cleanup')='pending' AND json_extract(data,'$.recoveryWorktree') IS NULL",
+    )) {
+      task.integration = {
+        ...task.integration!,
+        reason: 'Integração aplicada; limpeza física não verificada (caminho do checkout ausente no registro legado).',
+        recordedAt: new Date().toISOString(),
+      };
+      if (task.delivery) {
+        task.delivery.recovery = {
+          action: 'inspect',
+          reason: 'Entrega integrada; localizar e verificar manualmente qualquer checkout legado antes de removê-lo.',
+        };
+        task.delivery.recordedAt = new Date().toISOString();
+      }
+      this.putTask(task);
+    }
+    // Backfill identity and an explicit non-claiming result for older persisted task rows.
+    for (const task of this.rows<DelegatedTask>('delegated_tasks')) {
+      let changed = false;
+      if (!task.agentId) {
+        task.agentId = task.id;
+        changed = true;
+      }
+      if (!task.delivery && !['queued', 'running'].includes(task.status)) {
+        task.delivery = {
+          status: 'unverified',
+          reason: 'Resultado histórico sem evidências de entrega registradas.',
+          evidence: [`legacy-process:${task.status}`],
+          recovery: { action: 'inspect', reason: 'Inspecionar artefatos antes de aceitar' },
+          recordedAt: task.completedAt || task.createdAt || new Date().toISOString(),
+        };
+        changed = true;
+      }
+      if (changed) this.putTask(task);
+    }
     // Nothing drains a queue after a restart on its own: pause it so the UI offers "Retomar fila".
     this.db
       .prepare(
@@ -245,6 +370,28 @@ export class Store {
     return this.putProject(p);
   }
   putTask(task: DelegatedTask) {
+    task.agentId ||= task.id;
+    if (!task.delivery && !['queued', 'running'].includes(task.status)) {
+      const blocked = task.status === 'failed' || task.status === 'interrupted';
+      const partial = task.status === 'cancelled' && Boolean(task.toolCalls?.length);
+      task.delivery = {
+        status: blocked ? 'blocked' : partial ? 'partial' : 'unverified',
+        reason:
+          task.error ||
+          (blocked
+            ? 'A tarefa terminou sem confirmar entrega.'
+            : 'Registro histórico sem evidências de entrega verificáveis.'),
+        evidence: [
+          `process:${task.status}`,
+          ...(task.toolCalls || []).map((call) => `tool:${call.name}:${call.status}`),
+        ],
+        recovery: {
+          action: blocked ? 'retry' : 'inspect',
+          reason: blocked ? 'Tentar a tarefa novamente' : 'Inspecionar artefatos antes de aceitar',
+        },
+        recordedAt: task.completedAt || new Date().toISOString(),
+      };
+    }
     this.db
       .prepare(
         'INSERT INTO delegated_tasks(id,project_id,session_id,run_id,data) VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data',
@@ -252,35 +399,133 @@ export class Store {
       .run(task.id, task.projectId, task.sessionId, task.runId, JSON.stringify(task));
     return task;
   }
+  private retryRunDelivered(run: Run): boolean | undefined {
+    // Delivery evidence belongs only to tasks produced by this retry run. Project the
+    // two relevant fields in SQLite so task outputs/instructions never enter this path.
+    const retryTasks = this.db
+      .prepare(
+        "SELECT json_extract(data,'$.integration.status') AS integration_status, json_extract(data,'$.delivery.evidence') AS delivery_evidence FROM delegated_tasks WHERE session_id=? AND run_id=?",
+      )
+      .all(run.sessionId, run.id) as { integration_status: string | null; delivery_evidence: string | null }[];
+    if (
+      retryTasks.some(({ integration_status, delivery_evidence }) => {
+        const evidence = delivery_evidence ? (JSON.parse(delivery_evidence) as string[]) : [];
+        return integration_status === 'applied' || evidence.includes('integration:applied');
+      })
+    )
+      return true;
+
+    const evidence: boolean[] = [];
+    const checkpoint = run.checkpoint;
+    if (checkpoint?.available && checkpoint.files) {
+      evidence.push(checkpoint.files.length > 0 || (checkpoint.omitted ?? 0) > 0);
+    }
+    const artifacts = run.artifacts;
+    if (artifacts?.status === 'available') {
+      const changed = artifacts.files.length > 0 || (artifacts.omitted ?? 0) > 0;
+      if (changed) evidence.push(true);
+      else if (!artifacts.truncated) evidence.push(false);
+    }
+    // Positive evidence wins, including when another source is unknown. But an
+    // incomplete or still-active attempt cannot establish no delivery yet.
+    if (evidence.includes(true)) return true;
+    if (
+      run.status === 'running' ||
+      (checkpoint?.available && !checkpoint.files) ||
+      // Failed and legacy-unclassified unavailable checkpoints are uncertainty, not proof
+      // of an empty Git history. Only the structured non-applicable state can be ignored.
+      (checkpoint && !checkpoint.available && checkpoint.captureState !== 'not_applicable') ||
+      artifacts?.status === 'unknown' ||
+      artifacts?.truncated
+    )
+      return undefined;
+    return evidence.includes(false) ? false : undefined;
+  }
+  private withRetryRunStatus(task: DelegatedTask): DelegatedTask {
+    const linkedRun = task.retryRunId
+      ? (this.db
+          .prepare(
+            "SELECT session_id, json_extract(data,'$.status') AS status, json_extract(data,'$.retryOfTaskId') AS retry_of_task_id FROM runs WHERE id=?",
+          )
+          .get(task.retryRunId) as
+          { session_id: string; status: Run['status']; retry_of_task_id: string | null } | undefined)
+      : undefined;
+    const latestRun =
+      linkedRun?.session_id === task.sessionId && linkedRun.retry_of_task_id === task.id ? linkedRun : undefined;
+
+    // Follow only retries rooted at this task. A retry run may create delegated
+    // child tasks; retries of those children are part of this task's recovery
+    // history, but sibling tasks and other sessions are not.
+    const runs = this.db
+      .prepare(
+        "SELECT json_object('id',json_extract(data,'$.id'),'sessionId',json_extract(data,'$.sessionId'),'status',json_extract(data,'$.status'),'startedAt',json_extract(data,'$.startedAt'),'retryOfTaskId',json_extract(data,'$.retryOfTaskId'),'checkpoint',json(json_extract(data,'$.checkpoint')),'artifacts',json(json_extract(data,'$.artifacts'))) AS data FROM runs WHERE session_id=? AND json_extract(data,'$.retryOfTaskId') IS NOT NULL",
+      )
+      .all(task.sessionId)
+      .map(({ data }) => JSON.parse(String(data)) as Run);
+    const tasks = this.db.prepare('SELECT id, run_id FROM delegated_tasks WHERE session_id=?').all(task.sessionId) as {
+      id: string;
+      run_id: string;
+    }[];
+    const attempts: Run[] = [];
+    const visitedTaskIds = new Set<string>([task.id]);
+    const visitedRunIds = new Set<string>();
+    const pendingTaskIds = [task.id];
+    while (pendingTaskIds.length) {
+      const taskId = pendingTaskIds.pop()!;
+      for (const run of runs) {
+        if (run.retryOfTaskId !== taskId || visitedRunIds.has(run.id)) continue;
+        visitedRunIds.add(run.id);
+        attempts.push(run);
+        for (const child of tasks) {
+          if (child.run_id === run.id && !visitedTaskIds.has(child.id)) {
+            visitedTaskIds.add(child.id);
+            pendingTaskIds.push(child.id);
+          }
+        }
+      }
+    }
+    const evidence = attempts.map((run) => this.retryRunDelivered(run));
+    const delivered = evidence.includes(true)
+      ? true
+      : evidence.length > 0 && evidence.every((item) => item === false)
+        ? false
+        : undefined;
+
+    const result = { ...task };
+    if (latestRun) result.retryRunStatus = latestRun.status;
+    else delete result.retryRunStatus;
+    if (delivered === undefined) delete result.retryRunDelivered;
+    else result.retryRunDelivered = delivered;
+    result.retryHistoryState =
+      evidence.length === 0 ? 'none' : delivered === true ? 'delivered' : delivered === false ? 'empty' : 'unknown';
+    return result;
+  }
   getTask(id: string) {
     const row = this.db.prepare('SELECT data FROM delegated_tasks WHERE id=?').get(id) as { data: string } | undefined;
-    return row ? (JSON.parse(row.data) as DelegatedTask) : undefined;
+    return row ? this.withRetryRunStatus(JSON.parse(row.data) as DelegatedTask) : undefined;
   }
   listTasks(projectId: string, limit = 50) {
     return (
       this.db
         .prepare('SELECT data FROM delegated_tasks WHERE project_id=? ORDER BY rowid DESC LIMIT ?')
         .all(projectId, limit) as { data: string }[]
-    ).map((r) => JSON.parse(r.data) as DelegatedTask);
+    ).map((r) => this.withRetryRunStatus(JSON.parse(r.data) as DelegatedTask));
   }
   listSessionTasks(sessionId: string, limit = 30) {
     return (
       this.db
         .prepare('SELECT data FROM delegated_tasks WHERE session_id=? ORDER BY rowid DESC LIMIT ?')
         .all(sessionId, limit) as { data: string }[]
-    ).map((r) => JSON.parse(r.data) as DelegatedTask);
+    ).map((r) => this.withRetryRunStatus(JSON.parse(r.data) as DelegatedTask));
   }
   listSessionTaskMetadata(sessionId: string) {
     return (
       this.db
         .prepare(
-          "SELECT json_remove(data,'$.output') AS data FROM delegated_tasks WHERE session_id=? ORDER BY rowid DESC",
+          "SELECT json_set(json_remove(data,'$.output','$.instructions'),'$.instructions',substr(json_extract(data,'$.instructions'),1,600)) AS data FROM delegated_tasks WHERE session_id=? ORDER BY rowid DESC",
         )
         .all(sessionId) as { data: string }[]
-    ).map((row) => {
-      const task = JSON.parse(row.data) as DelegatedTask;
-      return { ...task, output: undefined, instructions: task.instructions.slice(0, 600) };
-    });
+    ).map((row) => this.withRetryRunStatus(JSON.parse(row.data) as DelegatedTask));
   }
   putBrief(brief: ProjectBrief) {
     this.db
@@ -613,6 +858,8 @@ export class Store {
             inputTokens: r.inputTokens ?? null,
             outputTokens: r.outputTokens ?? null,
             costUsd: r.costUsd ?? null,
+            cachedInputTokens: r.cachedInputTokens ?? null,
+            reasoningOutputTokens: r.reasoningOutputTokens ?? null,
           },
           error: r.status === 'failed' || r.status === 'interrupted' ? 'A execução falhou' : null,
         });
@@ -729,8 +976,8 @@ export class Store {
   upsertObservabilityRun(run: ObservabilityRunSummary) {
     this.db
       .prepare(
-        `INSERT INTO observability_runs(run_id,trace_id,session_id,project_id,provider_id,status,started_at,completed_at,duration_ms,first_token_ms,input_tokens,output_tokens,cost_usd,error_kind)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(run_id) DO UPDATE SET trace_id=excluded.trace_id,session_id=excluded.session_id,project_id=excluded.project_id,provider_id=excluded.provider_id,status=excluded.status,started_at=excluded.started_at,completed_at=excluded.completed_at,duration_ms=excluded.duration_ms,first_token_ms=excluded.first_token_ms,input_tokens=excluded.input_tokens,output_tokens=excluded.output_tokens,cost_usd=excluded.cost_usd,error_kind=excluded.error_kind`,
+        `INSERT INTO observability_runs(run_id,trace_id,session_id,project_id,provider_id,status,started_at,completed_at,duration_ms,first_token_ms,input_tokens,output_tokens,cost_usd,cached_input_tokens,reasoning_output_tokens,error_kind)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(run_id) DO UPDATE SET trace_id=excluded.trace_id,session_id=excluded.session_id,project_id=excluded.project_id,provider_id=excluded.provider_id,status=excluded.status,started_at=excluded.started_at,completed_at=excluded.completed_at,duration_ms=excluded.duration_ms,first_token_ms=excluded.first_token_ms,input_tokens=excluded.input_tokens,output_tokens=excluded.output_tokens,cost_usd=excluded.cost_usd,cached_input_tokens=excluded.cached_input_tokens,reasoning_output_tokens=excluded.reasoning_output_tokens,error_kind=excluded.error_kind`,
       )
       .run(
         run.runId,
@@ -746,6 +993,8 @@ export class Store {
         run.usage?.inputTokens ?? null,
         run.usage?.outputTokens ?? null,
         run.usage?.costUsd ?? null,
+        run.usage?.cachedInputTokens ?? null,
+        run.usage?.reasoningOutputTokens ?? null,
         run.error ? 'failed' : null,
       );
     this.recordObservabilityEvent({

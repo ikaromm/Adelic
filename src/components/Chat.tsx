@@ -1,3 +1,6 @@
+import { RunDelivery } from './RunDelivery';
+import { deriveRunProgress } from './RunProgressBanner';
+import { api } from '../api';
 import { useState, type ReactNode } from 'react';
 import {
   Activity,
@@ -31,6 +34,7 @@ import { thinkingLabel } from '../reasoning';
 import {
   actionNeedsDisclosure,
   activityForRun,
+  deliveryChecks,
   activityIsVisible,
   checksSummary,
   commandPreview,
@@ -42,6 +46,7 @@ import { useNow } from '../useNow';
 import { catalogs, useI18n } from '../i18n';
 import { COMPACTING_TEXT } from '../../shared/compaction';
 import { MessageAttachments } from './ComposerAttachments';
+import { TaskRecovery } from './TaskRecovery';
 import { RunChanges } from './RunChanges';
 import { eventText } from '../i18n/eventText';
 import { mentionSegments } from '../../shared/mentions';
@@ -194,7 +199,12 @@ export function RunActivityPanel({
   taskOutputs,
   loadingTaskOutputs,
   onLoadTaskOutput,
+  onRecoveryRefresh,
   busy = false,
+  onOpenTerminal,
+  onOpenPreview,
+  onOpenProject,
+  onInitializeGit,
 }: {
   runId: string;
   run?: Run;
@@ -209,20 +219,21 @@ export function RunActivityPanel({
   taskOutputs: Record<string, string | null>;
   loadingTaskOutputs: Set<string>;
   onLoadTaskOutput: (task: DelegatedTask) => Promise<void>;
+  onRecoveryRefresh?: () => Promise<void>;
   /** A run is active in this conversation: undo is disabled meanwhile. */
   busy?: boolean;
+  onOpenTerminal?: () => void;
+  onOpenPreview?: () => void;
+  onOpenProject?: () => void;
+  onInitializeGit?: () => Promise<void>;
 }) {
   const { t, fmt, locale } = useI18n();
+  const [inspectedTasks, setInspectedTasks] = useState<Set<string>>(() => new Set());
   const activity = activityForRun(runId, tasks, events);
   const runStatus = run?.status;
   const running = runStatus === 'running' || (!runStatus && active);
   const now = useNow(1000, running);
-  const pendingApproval = approvals.find((approval) => approval.status === 'pending');
   const runEvents = events.filter((event) => event.runId === runId);
-  const latestEventAt = runEvents.reduce((latest, event) => {
-    const timestamp = new Date(event.createdAt).getTime();
-    return Number.isFinite(timestamp) ? Math.max(latest, timestamp) : latest;
-  }, 0);
   const activeAction = [...activity.actions]
     .reverse()
     .find((event) => ['running', 'in_progress', 'started', 'pending', 'queued'].includes(event.status || ''));
@@ -239,12 +250,31 @@ export function RunActivityPanel({
   const changes = (
     <>
       {run && <RunChanges run={run} busy={busy || active} />}
-      {activity.checks.length > 0 && <RunChecks checks={activity.checks} />}
+      {run?.artifacts && !running ? (
+        <RunDelivery
+          key={run.id}
+          artifacts={run.artifacts}
+          checks={deliveryChecks(activity.checks)}
+          onLoadFile={(path) => api.runArtifactFile(run.id, path)}
+          onOpenProject={onOpenProject || (() => {})}
+          onOpenTerminal={onOpenTerminal}
+          onOpenPreview={onOpenPreview}
+          canInitializeGit={!busy && !active && run.gitAvailable === false && Boolean(onInitializeGit)}
+          onInitializeGit={onInitializeGit}
+          labels={deliveryLabels(t)}
+        />
+      ) : (
+        activity.checks.length > 0 && <RunChecks checks={activity.checks} />
+      )}
     </>
   );
   if (!activityIsVisible(activity) && !outcome)
-    return run?.checkpoint?.files?.length || activity.checks.length ? (
-      <section className={`run-activity ${run?.status ?? 'completed'}`} aria-label={t('chat.activity.label')}>
+    return run?.checkpoint?.files?.length || run?.artifacts || activity.checks.length ? (
+      <section
+        id={`run-activity-${runId}`}
+        className={`run-activity ${run?.status ?? 'completed'}`}
+        aria-label={t('chat.activity.label')}
+      >
         {changes}
       </section>
     ) : null;
@@ -273,22 +303,38 @@ export function RunActivityPanel({
   // comes from the server, possibly already in English.
   const lastText = activity.events.at(-1)?.text;
   const compacting = running && (lastText === COMPACTING_TEXT || lastText === catalogs.en['chat.activity.compacting']);
+  const progress = run
+    ? deriveRunProgress({ run, events, tasks, approvals, streamUpdatedAt, eventsConnected, now })
+    : null;
   const currentActivity = !running
     ? null
-    : !eventsConnected
-      ? t('chat.activity.connectionLost')
-      : pendingApproval
-        ? t('chat.activity.waitingApproval', { title: pendingApproval.title })
-        : activeAction
+    : compacting
+      ? t('chat.activity.compacting')
+      : progress?.phase === 'approval'
+        ? t('chat.activity.waitingApproval', { title: progress.detail })
+        : progress?.phase === 'tool'
           ? t('chat.activity.runningTool', {
-              tool: commandTitle(activeAction.toolName),
-              detail: commandPreview(activeAction.text, 120) || t('chat.activity.toolDetailsUnavailable'),
+              tool: commandTitle(activeAction?.toolName),
+              detail: activeAction
+                ? commandPreview(activeAction.text, 120) || t('chat.activity.toolDetailsUnavailable')
+                : progress.detail,
             })
-          : compacting
-            ? t('chat.activity.compacting')
-            : streamUpdatedAt && streamUpdatedAt >= latestEventAt
+          : progress?.phase === 'connection'
+            ? t('chat.activity.connectionLost')
+            : progress?.phase === 'generating'
               ? t('chat.activity.generating')
-              : t('chat.activity.waitingModel');
+              : progress?.phase === 'retry'
+                ? t('chat.activity.retrying')
+                : !eventsConnected
+                  ? t('chat.activity.connectionLost')
+                  : activeAction
+                    ? t('chat.activity.runningTool', {
+                        tool: commandTitle(activeAction.toolName),
+                        detail: commandPreview(activeAction.text, 120) || t('chat.activity.toolDetailsUnavailable'),
+                      })
+                    : streamUpdatedAt
+                      ? t('chat.activity.generating')
+                      : t('chat.activity.waitingModel');
   const silence = running && latestActivityAt ? fmt.duration(Math.max(0, now - latestActivityAt)) : undefined;
   const attempt = lastRetry
     ? t('chat.activity.attempt', { attempt: lastRetry.attempt ?? '', of: lastRetry.of ?? '' })
@@ -302,6 +348,14 @@ export function RunActivityPanel({
     activity.tasks.length ? t('chat.activity.tasks', { count: activity.tasks.length }) : '',
     activity.actions.length ? t('chat.activity.actions', { count: activity.actions.length }) : '',
     !running && totalTokens ? t('chat.activity.tokens', { tokens: totalTokens }) : '',
+    !running && run?.cachedInputTokens != null
+      ? t('delivery.cachedTokens', { tokens: fmt.tokens(run.cachedInputTokens) ?? String(run.cachedInputTokens) })
+      : '',
+    !running && run?.reasoningOutputTokens != null
+      ? t('delivery.reasoningTokens', {
+          tokens: fmt.tokens(run.reasoningOutputTokens) ?? String(run.reasoningOutputTokens),
+        })
+      : '',
     !running ? (fmt.cost(run?.costUsd) ?? '') : '',
   ]
     .filter(Boolean)
@@ -314,7 +368,7 @@ export function RunActivityPanel({
     <X size={14} />
   );
   return (
-    <section className={`run-activity ${tone}`} aria-label={t('chat.activity.label')}>
+    <section id={`run-activity-${runId}`} className={`run-activity ${tone}`} aria-label={t('chat.activity.label')}>
       {activity.errors.map((event) => (
         <RunEventRow key={event.id} event={event} />
       ))}
@@ -361,11 +415,49 @@ export function RunActivityPanel({
                       <span className="activity-task-status">{taskStatusName(task.status)}</span>
                     </div>
                     <div className="activity-meta">
-                      {taskRoleName(task.role)} ·{' '}
+                      {taskRoleName(task.role)} · {t('chat.task.agent', { id: task.agentId })} ·{' '}
                       {providers.find((item) => item.id === task.providerId)?.name || task.providerId}
                       {task.model ? ` / ${task.model}` : ''}
                       {task.effort ? t('chat.task.thinking', { thinking: thinkingLabel(task.effort) }) : ''}
                     </div>
+                    {task.toolCalls?.length || events.some((event) => event.taskId === task.id) ? (
+                      <details className="activity-task-tools">
+                        <summary>{t('chat.task.tools', { count: task.toolCalls?.length ?? 0 })}</summary>
+                        <ul>
+                          {(task.toolCalls ?? []).map((call, index) => (
+                            <li key={call.callId ?? `${call.name}-${index}`}>
+                              <code>{call.name}</code> · {statusLabel(call.status)}
+                              {call.callId && <small> · {call.callId}</small>}
+                            </li>
+                          ))}
+                          {events
+                            .filter((event) => event.taskId === task.id && event.type === 'tool')
+                            .map((event) => (
+                              <li key={event.id}>
+                                <code>{event.toolName || t('chat.task.unknownTool')}</code> ·{' '}
+                                {event.status || t('chat.task.toolEvent')}
+                              </li>
+                            ))}
+                        </ul>
+                      </details>
+                    ) : null}
+                    {task.delivery && (
+                      <div className={`task-delivery ${task.delivery.status}`}>
+                        <strong>{t(`chat.task.delivery.${task.delivery.status}`)}</strong>
+                        <p>{task.delivery.reason}</p>
+                        {task.delivery.evidence.length > 0 && (
+                          <details open={inspectedTasks.has(task.id)}>
+                            <summary>{t('chat.task.evidence', { count: task.delivery.evidence.length })}</summary>
+                            <ul>
+                              {task.delivery.evidence.map((item, index) => (
+                                <li key={index}>{item}</li>
+                              ))}
+                            </ul>
+                          </details>
+                        )}
+                      </div>
+                    )}
+                    {task.error && <p className="activity-task-error">{task.error}</p>}
                     {task.summary && (
                       <details className="activity-summary">
                         <summary>{t('chat.task.summary')}</summary>
@@ -382,13 +474,19 @@ export function RunActivityPanel({
                       </div>
                     )}
                     {hasCachedOutput ? (
-                      <details className="activity-output">
+                      <details className="activity-output" open={inspectedTasks.has(task.id)}>
                         <summary>{t('chat.task.output')}</summary>
                         <pre>{taskOutputs[task.id] || t('chat.task.outputEmpty')}</pre>
                       </details>
                     ) : task.status !== 'running' && task.status !== 'queued' ? (
                       <button
+                        type="button"
                         className="task-output-button"
+                        aria-label={t(loadingOutput ? 'chat.task.loadingOutputFor' : 'chat.task.loadOutputFor', {
+                          title: task.title,
+                          id: task.id,
+                        })}
+                        data-task-id={task.id}
                         onClick={() => void onLoadTaskOutput(task)}
                         disabled={loadingOutput}
                       >
@@ -396,6 +494,19 @@ export function RunActivityPanel({
                         {loadingOutput ? t('chat.task.loadingOutput') : t('chat.task.loadOutput')}
                       </button>
                     ) : null}
+                    {(task.recoveryWorktree ||
+                      task.delivery?.recovery.action === 'retry' ||
+                      task.delivery?.recovery.action === 'inspect') && (
+                      <TaskRecovery
+                        task={task}
+                        onRefresh={onRecoveryRefresh ?? (async () => undefined)}
+                        onInspect={async () => {
+                          await onLoadTaskOutput(task);
+                          setInspectedTasks((current) => new Set(current).add(task.id));
+                        }}
+                        disabled={busy || running}
+                      />
+                    )}
                   </article>
                 );
               })}
@@ -567,6 +678,7 @@ export function RunChecks({ checks }: { checks: RunEvent[] }) {
               <ChevronDown className="activity-chevron" size={13} aria-hidden="true" />
             </summary>
             <pre aria-label={t('chat.checks.output', { name: check.name })}>
+              {check.command ? `${check.command}\n\n` : ''}
               {check.truncated ? `${t('chat.checks.truncated')}\n` : ''}
               {check.output || check.detail || t('chat.checks.noOutput')}
             </pre>
@@ -588,4 +700,45 @@ export function RunEventRow({ event }: { event: SessionDetail['events'][number] 
       <time>{timeLabel(event.createdAt)}</time>
     </div>
   );
+}
+
+function deliveryLabels(t: import('../i18n').I18n['t']): import('./RunDelivery').RunDeliveryLabels {
+  return {
+    title: t('delivery.title'),
+    changes: t('delivery.changes'),
+    contentNote: t('delivery.contentNote'),
+    noChanges: t('delivery.noChanges'),
+    initializeGit: t('delivery.initializeGit'),
+    initializeGitConfirm: t('delivery.initializeGitConfirm'),
+    unknown: t('delivery.unknown'),
+    truncated: t('delivery.truncated'),
+    contentTruncated: t('delivery.contentTruncated'),
+    checkResults: t('delivery.checkResults'),
+    noChecks: t('delivery.noChecks'),
+    unverified: t('delivery.unverified'),
+    openPath: t('delivery.openPath'),
+    download: t('delivery.download'),
+    terminal: t('delivery.terminal'),
+    preview: t('delivery.preview'),
+    project: t('delivery.project'),
+    added: t('delivery.added'),
+    modified: t('delivery.modified'),
+    deleted: t('delivery.deleted'),
+    passed: t('delivery.passed'),
+    failed: t('delivery.failed'),
+    running: t('delivery.running'),
+    timeout: t('delivery.timeout'),
+    cancelled: t('delivery.cancelled'),
+    error: t('delivery.error'),
+    unknownStatus: t('delivery.unknownStatus'),
+    claimsUnverified: t('delivery.claimsUnverified'),
+    unverifiedClaims: t('delivery.unverifiedClaims'),
+    filesSummary: t('delivery.filesSummary'),
+    checksSummary: t('delivery.checksSummary'),
+    checksUnknown: t('delivery.checksUnknown'),
+    checkOutput: t('delivery.checkOutput'),
+    retryLoad: t('delivery.retryLoad'),
+    loading: t('delivery.loading'),
+    nextSteps: t('delivery.nextSteps'),
+  };
 }

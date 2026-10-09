@@ -1,0 +1,66 @@
+.run-progress-banner {
+  margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+  color: var(--text-secondary);
+}
+.run-progress-indicator {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+.run-progress-banner.connection .run-progress-indicator,
+.run-progress-banner.approval .run-progress-indicator {
+  background: var(--warning);
+}
+.run-progress-copy {
+  display: flex;
+  flex: 1;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 10px;
+  min-width: 0;
+}
+.run-progress-copy strong {
+  min-width: 0;
+  color: var(--text);
+  font-size: var(--text-sm);
+  font-weight: 550;
+  overflow-wrap: anywhere;
+}
+.run-progress-copy small {
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+}
+.run-progress-banner > button {
+  flex: none;
+  min-height: 30px;
+  padding: 0 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+}
+.run-progress-banner > button:hover {
+  border-color: var(--accent-border);
+  color: var(--text);
+}
+@media (max-width: 420px) {
+  .run-progress-banner {
+    align-items: flex-start;
+    gap: 7px;
+    padding: 8px;
+  }
+  .run-progress-banner > button {
+    padding-inline: 7px;
+  }
+}

@@ -130,7 +130,11 @@ describe('SQLite schema migrations', () => {
     );
     db.exec(`INSERT INTO sessions VALUES('s',NULL,'{}');`);
     const result = migrate(db, dir);
-    expect(result).toMatchObject({ from: 2, to: schemaVersion, applied: [3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14, 15] });
+    expect(result).toMatchObject({
+      from: 2,
+      to: schemaVersion,
+      applied: [3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+    });
     db.exec(`PRAGMA foreign_keys=ON; INSERT INTO message_queue VALUES('q','s',0,'{}'); DELETE FROM sessions;`);
     expect(tableRows(db, 'message_queue')).toEqual([]);
     db.close();
@@ -146,10 +150,14 @@ describe('SQLite schema migrations', () => {
     );
     db.exec(`INSERT INTO sessions VALUES('s',NULL,'{}'); INSERT INTO message_queue VALUES('q','s',0,'{}');`);
     const result = migrate(db, dir);
-    expect(result).toMatchObject({ from: 4, to: schemaVersion, applied: [5, 6, 8, 9, 10, 11, 12, 13, 14, 15] });
+    expect(result).toMatchObject({
+      from: 4,
+      to: schemaVersion,
+      applied: [5, 6, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+    });
     expect(result.backupPath).toBeTruthy();
     expect(tableRows(db, 'message_queue')).toHaveLength(1);
-    expect(migrations.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14, 15]);
+    expect(migrations.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
     db.exec(`PRAGMA foreign_keys=ON; INSERT INTO plans VALUES('p','s','{}');`);
     expect(() => db.exec(`INSERT INTO plans VALUES('x','missing','{}')`)).toThrow();
     db.exec(`DELETE FROM sessions;`);
@@ -166,7 +174,7 @@ describe('SQLite schema migrations', () => {
       migrations.filter((m) => m.version <= 8),
     );
     db.exec(`INSERT INTO projects VALUES('p','{}');`);
-    expect(migrate(db, dir)).toMatchObject({ from: 8, to: schemaVersion, applied: [9, 10, 11, 12, 13, 14, 15] });
+    expect(migrate(db, dir)).toMatchObject({ from: 8, to: schemaVersion, applied: [9, 10, 11, 12, 13, 14, 15, 16] });
     db.exec(`PRAGMA foreign_keys=ON; INSERT INTO project_hooks VALUES('p','{}');`);
     expect(() => db.exec(`INSERT INTO project_hooks VALUES('nao','{}')`)).toThrow();
     db.exec(`DELETE FROM projects;`);
@@ -184,7 +192,7 @@ describe('SQLite schema migrations', () => {
     );
     db.exec(`INSERT INTO projects VALUES('p','{"name":"kept"}');`);
     const result = migrate(db, dir);
-    expect(result).toMatchObject({ from: 11, to: 15, applied: [12, 13, 14, 15] });
+    expect(result).toMatchObject({ from: 11, to: schemaVersion, applied: [12, 13, 14, 15, 16] });
     expect(result.backupPath && existsSync(result.backupPath)).toBe(true);
     expect(tableRows(db, 'projects')).toEqual([{ id: 'p', data: '{"name":"kept"}' }]);
     for (const table of ['remote_users', 'remote_sessions', 'remote_logins']) expect(tableRows(db, table)).toEqual([]);
@@ -213,12 +221,25 @@ describe('SQLite schema migrations', () => {
         startedAt: '2026-10-01T00:00:00.000Z',
         completedAt: '2026-10-01T00:00:00.040Z',
         durationMs: 40,
+        inputTokens: 100,
+        cachedInputTokens: 40,
+        outputTokens: 20,
+        reasoningOutputTokens: 8,
         error: 'PRIVATE_LEGACY_FAILURE',
       }),
     );
     migrate(db, dir);
     expect(tableRows(db, 'observability_runs')).toEqual([
-      expect.objectContaining({ run_id: 'legacy-run', status: 'error', duration_ms: 40, error_kind: 'failed' }),
+      expect.objectContaining({
+        run_id: 'legacy-run',
+        status: 'error',
+        duration_ms: 40,
+        input_tokens: 100,
+        output_tokens: 20,
+        cached_input_tokens: 40,
+        reasoning_output_tokens: 8,
+        error_kind: 'failed',
+      }),
     ]);
     const span = db.prepare('SELECT * FROM observability_events WHERE run_id=?').get('legacy-run') as {
       id: string;

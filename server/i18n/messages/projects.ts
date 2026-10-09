@@ -17,6 +17,11 @@ export default defineMessages(
     'projects.folderNameExists': 'Já existe uma pasta com esse nome neste nível',
     'projects.folderHasChildren': 'Mova ou remova as subpastas antes de excluir esta pasta',
     'projects.folderSessionRunning': 'Não é possível excluir uma pasta com conversas em execução',
+    'projects.localFolderInvalidName': 'Use um nome de pasta simples, sem barras ou componentes . e ..',
+    'projects.localFolderInvalidPath': 'Informe um caminho de pasta válido',
+    'projects.localFolderNotDirectory': 'O caminho informado não é uma pasta',
+    'projects.localFolderExists': 'Já existe uma pasta ou arquivo com esse nome',
+    'projects.localFolderUnavailable': 'Não foi possível acessar essa pasta',
   },
   {
     'projects.createRequired': 'name, path, memoryWorkspace and memoryProject are required',
@@ -32,5 +37,10 @@ export default defineMessages(
     'projects.folderNameExists': 'A folder with this name already exists at this level',
     'projects.folderHasChildren': 'Move or remove child folders before deleting this folder',
     'projects.folderSessionRunning': 'A folder with running conversations cannot be deleted',
+    'projects.localFolderInvalidName': 'Enter a simple folder name without slashes or . and .. components',
+    'projects.localFolderInvalidPath': 'Enter a valid folder path',
+    'projects.localFolderNotDirectory': 'The selected path is not a folder',
+    'projects.localFolderExists': 'A folder or file with that name already exists',
+    'projects.localFolderUnavailable': 'Could not access this folder',
   },
 );

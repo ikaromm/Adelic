@@ -56,6 +56,7 @@ async function expectNoPortuguese(locator: Locator, skip: string[] = []) {
 
 async function openSettings(page: Page) {
   await page.getByRole('navigation', { name: 'Main navigation' }).getByRole('button', { name: 'Settings' }).click();
+  await page.getByRole('button', { name: 'Advanced', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Settings', exact: true })).toBeVisible();
 }
 
@@ -170,6 +171,18 @@ test('project cards and the New project dialog read in English', async ({ page, 
     `In ${name}, per agent`,
   );
 
+  // Directory names are user data, not translated interface text. Use a deterministic directory list.
+  await page.route('**/api/local-directories*', (route) =>
+    route.fulfill({
+      json: {
+        path: '/tmp/example',
+        entries: [{ name: 'example', path: '/tmp/example/child', directory: true, readable: true, writable: true }],
+        readable: true,
+        writable: true,
+        truncated: false,
+      },
+    }),
+  );
   await page.getByRole('button', { name: 'Add project' }).first().click();
   const dialog = page.getByRole('dialog', { name: 'New project' });
   await expect(dialog).toContainText('Connect a folder on your computer.');

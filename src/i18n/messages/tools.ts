@@ -9,6 +9,8 @@ export default defineMessages(
     'tools.tab.preview': 'Preview',
     'tools.closeLabel': 'Fechar ferramentas',
     'tools.close': 'Fechar',
+    'tools.scope.local': 'Local',
+    'tools.scope.ssh': 'SSH',
     'tools.status.running': 'Em execução',
     'tools.status.exited': 'Código de saída {code}',
     'tools.status.stopped': 'Parado',
@@ -20,6 +22,10 @@ export default defineMessages(
       'Executa no sandbox do Adelic com as mesmas permissões dos agentes (somente leitura). Os comandos não são enviados a nenhum modelo. Sem entrada interativa: use opções não interativas, como {yes} ou {ci}.',
     'tools.terminal.note':
       'Executa no sandbox do Adelic com as mesmas permissões dos agentes. Os comandos não são enviados a nenhum modelo. Sem entrada interativa: use opções não interativas, como {yes} ou {ci}.',
+    'tools.terminal.remoteWrite':
+      'Executa por SSH como o usuário configurado no servidor. Este comando não usa o sandbox local do Adelic e tem as permissões desse usuário. Com modo somente leitura, a execução fica desativada.',
+    'tools.terminal.remoteReadOnly':
+      'Terminal indisponível para projetos SSH enquanto o Adelic estiver em modo somente leitura. Altere Permissões nas Configurações para permitir comandos remotos.',
     'tools.terminal.output': 'Saída do terminal',
     'tools.terminal.empty': 'Nenhum comando executado nesta sessão do Adelic.',
     'tools.terminal.form': 'Executar comando',
@@ -37,7 +43,7 @@ export default defineMessages(
     'tools.preview.address': 'Endereço do preview',
     'tools.preview.open': 'Abrir',
     'tools.preview.remote':
-      'No acesso remoto, localhost e 127.0.0.1 são o computador que roda o Adelic: o preview não carrega neste dispositivo.',
+      'O Preview roda neste navegador; localhost e 127.0.0.1 apontam para este dispositivo. Um servidor em outro computador não pode ser aberto por esse endereço aqui.',
     'tools.preview.reloadLabel': 'Recarregar preview',
     'tools.preview.reload': 'Recarregar',
     'tools.preview.openBrowser': 'Abrir no navegador',
@@ -59,6 +65,8 @@ export default defineMessages(
     'tools.tab.preview': 'Preview',
     'tools.closeLabel': 'Close tools',
     'tools.close': 'Close',
+    'tools.scope.local': 'Local',
+    'tools.scope.ssh': 'SSH',
     'tools.status.running': 'Running',
     'tools.status.exited': 'Exit code {code}',
     'tools.status.stopped': 'Stopped',
@@ -70,6 +78,10 @@ export default defineMessages(
       'Runs in the Adelic sandbox with the same permissions as the agents (read-only). Commands are never sent to any model. No interactive input: use non-interactive options such as {yes} or {ci}.',
     'tools.terminal.note':
       'Runs in the Adelic sandbox with the same permissions as the agents. Commands are never sent to any model. No interactive input: use non-interactive options such as {yes} or {ci}.',
+    'tools.terminal.remoteWrite':
+      'Runs over SSH as the configured server user. This command does not use Adelic’s local sandbox and has that user’s permissions. Execution is disabled in read-only mode.',
+    'tools.terminal.remoteReadOnly':
+      'The terminal is unavailable for SSH projects while Adelic is in read-only mode. Change Permissions in Settings to allow remote commands.',
     'tools.terminal.output': 'Terminal output',
     'tools.terminal.empty': 'No commands run in this Adelic session.',
     'tools.terminal.form': 'Run command',
@@ -87,7 +99,7 @@ export default defineMessages(
     'tools.preview.address': 'Preview address',
     'tools.preview.open': 'Open',
     'tools.preview.remote':
-      'Over remote access, localhost and 127.0.0.1 are the computer running Adelic: the preview does not load on this device.',
+      'Preview runs in this browser; localhost and 127.0.0.1 point to this device. A server on another computer cannot be opened here through that address.',
     'tools.preview.reloadLabel': 'Reload preview',
     'tools.preview.reload': 'Reload',
     'tools.preview.openBrowser': 'Open in browser',

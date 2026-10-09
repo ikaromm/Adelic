@@ -1,4 +1,11 @@
-import type { DelegatedTask, Project, ProjectBrief, ProviderInfo, ProviderId } from '../shared/contracts.js';
+import type {
+  DelegatedTask,
+  Project,
+  ProjectBrief,
+  ProviderInfo,
+  ProviderId,
+  TaskDeliveryResult,
+} from '../shared/contracts.js';
 import { hasFileReference } from './router.js';
 
 export interface PlannedTask {
@@ -30,13 +37,44 @@ export function graphifyPaths(text: string): string[] {
   return paths;
 }
 
+/** Close only a truncated JSON container at EOF. Strings, malformed tokens and schema errors are never repaired. */
+function closeTruncatedJson(text: string): string | undefined {
+  if (text.length > 32_000) return undefined;
+  const stack: string[] = [];
+  let quoted = false;
+  let escaped = false;
+  for (const char of text) {
+    if (quoted) {
+      if (escaped) escaped = false;
+      else if (char === '\\') escaped = true;
+      else if (char === '"') quoted = false;
+      continue;
+    }
+    if (char === '"') quoted = true;
+    else if (char === '{') stack.push('}');
+    else if (char === '[') stack.push(']');
+    else if (char === '}' || char === ']') {
+      if (stack.pop() !== char) return undefined;
+    }
+  }
+  if (quoted || stack.length < 1 || stack.length > 3) return undefined;
+  return text.trimEnd() + stack.reverse().join('');
+}
+
 /** Validates and bounds the planner's JSON before it can create runtime work. */
 export function parseTaskPlan(text: string): PlannedTask[] {
   let value: unknown;
   try {
     value = JSON.parse(text);
-  } catch {
-    throw new Error('O planejador não retornou JSON válido');
+  } catch (parseError) {
+    const detail = parseError instanceof Error ? parseError.message.slice(0, 180) : 'JSON inválido';
+    const repaired = closeTruncatedJson(text);
+    if (!repaired) throw new Error(`O planejador não retornou JSON válido: ${detail}`, { cause: parseError });
+    try {
+      value = JSON.parse(repaired);
+    } catch (repairError) {
+      throw new Error(`O planejador truncou JSON em estrutura não recuperável: ${detail}`, { cause: repairError });
+    }
   }
   const raw = (value as { tasks?: unknown } | null)?.tasks;
   if (!Array.isArray(raw)) throw new Error('Plano deve conter uma lista tasks');
@@ -103,7 +141,7 @@ export function resolveAgent(
     (role === 'worker'
       ? models.find((m) => m.id === preferredId)?.id || models.find((m) => /luna/i.test(`${m.id} ${m.name}`))?.id
       : models.find((m) => m.id === preferredId)?.id || models.find((m) => /sol/i.test(`${m.id} ${m.name}`))?.id);
-  const model = preferred || (providerId === fallbackProvider ? fallbackModel : undefined);
+  const model = preferred || (providerId === fallbackProvider ? fallbackModel : undefined) || provider.defaultModel;
   if (model && !provider.models.some((m) => m.id === model || m.name === model))
     throw new Error(`Modelo ${model} não está disponível em ${providerId}`);
   return { providerId, model };
@@ -137,6 +175,120 @@ export function boundedCoordinatorContext(
   return supporting ? `${prefix}\n\n${supporting}` : prefix;
 }
 
+/**
+ * Facts observed and persisted by the orchestrator for synthesis. These fields are deliberately
+ * separate: a provider process can complete while delivery remains partial or blocked.
+ */
+export function synthesisExecutionFacts(tasks: DelegatedTask[]): string {
+  const facts = tasks.map((task) => ({
+    role: task.role,
+    title: task.title,
+    providerId: task.providerId,
+    model: task.model ?? null,
+    effort: task.effort ?? null,
+    process: {
+      status: task.status,
+      startedAt: task.startedAt ?? null,
+      completedAt: task.completedAt ?? null,
+      error: task.error ?? null,
+    },
+    integration: task.integration
+      ? {
+          status: task.integration.status,
+          cleanup: task.integration.cleanup,
+          reason: task.integration.reason ?? null,
+          recordedAt: task.integration.recordedAt,
+        }
+      : null,
+    delivery: task.delivery
+      ? {
+          status: task.delivery.status,
+          reason: task.delivery.reason,
+          evidence: task.delivery.evidence,
+          recovery: {
+            action: task.delivery.recovery.action,
+            reason: task.delivery.recovery.reason,
+            available: task.delivery.recovery.action !== 'none',
+            retainedWorkspace: Boolean(task.recoveryWorktree),
+          },
+        }
+      : null,
+  }));
+  return JSON.stringify(facts);
+}
+
+/**
+ * Keep review findings, not conversational lead-in or progress chatter, in bounded coordinator
+ * context. Findings are recognised by explicit severity/issue headings; when the source or the
+ * budget cannot be represented completely the returned text says so rather than implying approval.
+ */
+export function summarizeReview(
+  text: string,
+  maxChars = 1600,
+): { text: string; incomplete: boolean; findings: number } {
+  const lines = text.split(/\r?\n/);
+  const findingStart =
+    /^\s*(?:[-*+]\s+|\d+[.)]\s*)?(?:#{1,6}\s*)?(?:\*\*)?(?:\d+[.)]\s*)?(?:\*\*)?\[?(?:P[0-3]|critical|high|medium|low|bloqueador|blocker|achado|finding|severidade\s*:\s*(?:alta|high))\b/i;
+  const starts = lines.map((line, index) => (findingStart.test(line) ? index : -1)).filter((index) => index >= 0);
+  if (maxChars <= 0)
+    return {
+      text: '', // no non-empty warning can fit a zero/negative character budget
+      incomplete: true,
+      findings: starts.length,
+    };
+  if (starts.length === 0) {
+    const compact = text.trim();
+    if (compact.length <= maxChars) return { text: compact, incomplete: false, findings: 0 };
+    const marker = 'REVISÃO INCOMPLETA: saída sem achados estruturados foi truncada; não concluir aprovação.';
+    return { text: marker.slice(0, maxChars), incomplete: true, findings: 0 };
+  }
+
+  const prefixLines = lines
+    .slice(0, starts[0])
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const location = /(?:[\w.-]+\/)+[\w.-]+\.[a-z\d]+(?::\d+(?:[-:]\d+)?)?/i;
+  const blocks = starts.map((start, index) => {
+    const end = starts[index + 1] ?? lines.length;
+    const blockLines = lines
+      .slice(start, end)
+      .map((line) => line.trim())
+      .filter(Boolean);
+    const locations = blockLines.slice(1).filter((line) => location.test(line));
+    const details = blockLines.slice(1).filter((line) => !location.test(line));
+    return { anchors: [blockLines[0], ...locations].filter(Boolean), details };
+  });
+  const findingCount = blocks.length;
+  const allLines = [...prefixLines, ...blocks.flatMap((block) => [...block.anchors, ...block.details])];
+  const completeText = allLines.join('\n');
+  if (completeText.length <= maxChars) return { text: completeText, incomplete: false, findings: findingCount };
+
+  const markerText = ' [REVISÃO INCOMPLETA: achados ou detalhes omitidos pelo limite; não concluir aprovação.]';
+  const marker = markerText.slice(0, maxChars);
+  let remaining = Math.max(0, maxChars - marker.length);
+  const kept: string[] = [];
+  const append = (value: string) => {
+    if (!value || remaining <= 0) return;
+    const separator = kept.length ? '\n' : '';
+    const available = Math.max(0, remaining - separator.length);
+    if (value.length <= available) {
+      kept.push(value);
+      remaining -= separator.length + value.length;
+    } else {
+      const fragment = value.slice(0, Math.max(0, available - 1)).trimEnd();
+      if (fragment) kept.push(`${fragment}…`);
+      remaining -= separator.length + (fragment ? fragment.length + 1 : 0);
+    }
+  };
+
+  // Under pressure, unparsed lead-in is dropped rather than crowding out recognized
+  // findings. Retain every finding heading and location before explanatory details.
+  blocks.forEach((block) => block.anchors.forEach(append));
+  blocks.forEach((block) => block.details.forEach(append));
+  const content = kept.join('\n');
+  return { text: `${content}${marker}`.slice(0, maxChars), incomplete: true, findings: findingCount };
+}
+
 export function briefFor(project: Project, objective: string, summary: string, paths: string[]): ProjectBrief {
   const unique = [...new Set(paths)].slice(0, 160);
   const truncated = paths.length > unique.length;
@@ -162,6 +314,74 @@ export function isSimpleInspectionRequest(text: string) {
   return (
     inspection.test(text) && (file.test(text) || hasFileReference(text)) && !mutating.test(text) && !complex.test(text)
   );
+}
+
+/**
+ * Classifies delivery from orchestrator-observed process/tool facts. A clean provider stop is
+ * deliberately not treated as proof that files changed; successful tool calls still require review.
+ */
+export function assessTaskDelivery(
+  role: DelegatedTask['role'],
+  status: DelegatedTask['status'],
+  error: string | undefined,
+  toolCalls: { name: string; status: string }[],
+  changedFiles: string[] = [],
+  expectsImplementation = true,
+): TaskDeliveryResult {
+  const successfulTools = toolCalls.filter((call) => /completed|success|succeeded/i.test(call.status));
+  const evidence = [
+    `process:${status}`,
+    ...toolCalls.map((call) => `tool:${call.name}:${call.status}`),
+    ...changedFiles.map((path) => `artifact:${path}`),
+  ];
+  let delivery: TaskDeliveryResult['status'];
+  let reason: string;
+  let action: TaskDeliveryResult['recovery']['action'];
+  if (status === 'failed' || status === 'interrupted') {
+    delivery = 'blocked';
+    reason = error || 'A fase terminou sem conclusão do processo.';
+    action = 'retry';
+  } else if (status === 'cancelled') {
+    delivery = toolCalls.length ? 'partial' : 'blocked';
+    reason = error || 'A fase foi cancelada antes da confirmação de entrega.';
+    action = delivery === 'partial' ? 'inspect' : 'retry';
+  } else if (role !== 'worker') {
+    delivery = 'unverified';
+    reason = 'A fase de coordenação terminou; isso não comprova implementação de uma tarefa de código.';
+    action = 'none';
+  } else if (!expectsImplementation) {
+    delivery = 'unverified';
+    reason =
+      'O pedido não solicitou alteração de artefatos; a conclusão do processo não é apresentada como implementação.';
+    action = 'none';
+  } else if (successfulTools.length && changedFiles.length) {
+    delivery = 'implemented';
+    reason = 'O processo terminou e a comparação dos artefatos observou arquivos alterados.';
+    action = 'inspect';
+  } else if (!successfulTools.length) {
+    delivery = 'not_implemented';
+    reason = 'O processo terminou, mas não há chamada de ferramenta bem-sucedida registrada; entrega não implementada.';
+    action = 'retry';
+  } else {
+    delivery = 'unverified';
+    reason = 'Há chamadas de ferramenta bem-sucedidas, mas a comparação não confirmou arquivos alterados.';
+    action = 'inspect';
+  }
+  return {
+    status: delivery,
+    reason,
+    evidence,
+    recovery: {
+      action,
+      reason:
+        action === 'retry'
+          ? 'Reenviar a execução de origem'
+          : action === 'inspect'
+            ? 'Inspecionar artefatos antes de aceitar'
+            : 'Nenhuma ação de recuperação necessária',
+    },
+    recordedAt: new Date().toISOString(),
+  };
 }
 
 export function taskRecord(input: Omit<DelegatedTask, 'createdAt' | 'status'>): DelegatedTask {

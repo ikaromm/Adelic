@@ -16,6 +16,8 @@ export interface ObservabilityUsage {
   inputTokens: number | null;
   outputTokens: number | null;
   costUsd: number | null;
+  cachedInputTokens?: number | null;
+  reasoningOutputTokens?: number | null;
 }
 
 export interface ObservabilityRunSummary {

@@ -1,3 +1,5 @@
+import { readRunArtifactFile } from '../run-artifacts.js';
+import { LOCAL_ONLY, requestKind } from './auth.js';
 import { Router } from 'express';
 import { CheckpointError, checkpointDiff } from '../checkpoints.js';
 import { RestoreRunSchema, RetryRunSchema, parseBody, text } from '../../shared/schemas.js';
@@ -42,6 +44,30 @@ export function runsRoutes({ store, orchestrator }: BackendContext) {
       const status = e instanceof CheckpointError ? e.status : errorStatus(e) || 500;
       const conflicts = e instanceof CheckpointError ? e.conflicts : undefined;
       res.status(status).json({ error: errorText(res, e), ...(conflicts ? { conflicts } : {}) });
+    }
+  });
+  app.get('/api/runs/:id/artifacts', (req, res) => {
+    if (requestKind(req) !== 'local') return error(res, 403, LOCAL_ONLY);
+    const run = store.getRun(req.params.id);
+    if (!run) return error(res, 404, 'common.runNotFound');
+    res.json(run.artifacts ?? { status: 'unknown', files: [] });
+  });
+  app.get('/api/runs/:id/artifacts/file', async (req, res) => {
+    if (requestKind(req) !== 'local') return error(res, 403, LOCAL_ONLY);
+    const run = store.getRun(req.params.id);
+    if (!run) return error(res, 404, 'common.runNotFound');
+    const path = pathQuery.safeParse(req.query.path);
+    if (
+      !path.success ||
+      !run.artifactRoot ||
+      !run.artifacts?.files.some((file) => file.path === path.data && file.status !== 'deleted')
+    )
+      return error(res, 404, 'git.fileNotListed');
+    try {
+      res.setHeader('Cache-Control', 'no-store');
+      res.json(await readRunArtifactFile(run.artifactRoot, path.data));
+    } catch {
+      error(res, 409, 'git.invalidPath', { path: path.data });
     }
   });
   // "Tentar de novo" and "Tentar com outro modelo": the same request as a new run, optionally

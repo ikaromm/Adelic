@@ -16,6 +16,7 @@ import {
   boundedRemoteResult,
   blockedRemoteTool,
   emitRemoteApproval,
+  executorContextInstructions,
   REMOTE_TOOL_SPECS,
   remoteApprovalDetail,
   remoteToolDescription,
@@ -643,7 +644,7 @@ export class KiroProvider {
       JSON.stringify({
         name: agentName,
         description: 'Runtime isolado do Adelic',
-        prompt: 'Siga somente as instruções da conversa atual.',
+        prompt: `${executorContextInstructions(input)} ${remoteToolsAllowed ? 'Siga somente as instruções da conversa atual. Acesse e edite o projeto somente pelas ferramentas @adelic_remote. Para uma edição localizada, use replace_text, que exige uma ocorrência única de texto antigo não vazio; use write_file para criar ou reescrever um arquivo. Não tente ferramentas nativas de edição, apply_patch ou shell para contornar o executor.' : 'Siga somente as instruções da conversa atual.'}`,
         tools: agentTools,
         allowedTools: remoteToolsAllowed ? agentTools : [],
         resources: [],
@@ -888,7 +889,8 @@ export class KiroProvider {
           toolCallId: remotePending.toolCallId,
         });
       } catch (error) {
-        remotePending.socket.end(JSON.stringify({ ok: false, text: errorMessage(error).slice(0, 2000) }) + '\n');
+        const safeFailure = remoteToolError(error);
+        remotePending.socket.end(JSON.stringify({ ok: false, text: safeFailure }) + '\n');
         if (turn.remoteTools.delete(remotePending.toolCallId))
           turn.emit({
             type: 'tool',

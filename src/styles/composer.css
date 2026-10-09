@@ -1,0 +1,115 @@
+/* Composer surface: roomy input, a compact primary row, and a separate context row. */
+.composer-surface {
+  min-width: 0;
+}
+
+.composer-surface-input {
+  min-width: 0;
+}
+
+.composer-surface-main {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  padding: 4px 8px 0 10px;
+}
+
+.composer-surface-primary,
+.composer-surface-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.composer-surface-primary {
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+}
+
+.composer-surface-actions {
+  flex: 0 0 auto;
+  justify-content: flex-end;
+}
+
+.composer-surface-context {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  min-width: 0;
+  padding: 2px 8px 7px 10px;
+  border-top: 1px solid color-mix(in srgb, var(--border) 58%, transparent);
+}
+
+.composer-surface-context > * {
+  min-width: 0;
+}
+
+.composer-access-menu {
+  gap: 4px;
+}
+
+.composer-access-menu .choice-menu-title {
+  margin-top: 4px;
+}
+
+.composer-access-menu .composer-access-approval-title {
+  padding-top: 7px;
+  border-top: 1px solid var(--border);
+}
+
+.composer-access-scope {
+  margin: -2px 0 3px;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  line-height: 1.4;
+}
+
+.composer-access-check {
+  flex: none;
+  color: var(--accent);
+  font-weight: 700;
+}
+
+@container main-area (max-width: 560px) {
+  .composer-surface-main {
+    align-items: flex-start;
+    flex-wrap: wrap;
+    padding-left: 7px;
+    padding-right: 7px;
+  }
+
+  .composer-surface-primary {
+    flex: 1 1 100%;
+    order: 0;
+  }
+
+  .composer-surface-actions {
+    flex: 1 1 100%;
+    order: 1;
+    justify-content: flex-end;
+  }
+
+  .composer-surface-context {
+    padding-left: 7px;
+    padding-right: 7px;
+  }
+}
+
+@media (max-width: 420px) {
+  .composer-access-menu .choice-option {
+    padding: 9px 8px;
+  }
+}
+
+/* Options keep their content height; the menu scrolls instead of compressing labels. */
+.composer-access-menu > * {
+  flex-shrink: 0;
+}
+.composer-access-menu .choice-option > .composer-access-check {
+  display: block;
+  flex: 0 0 auto;
+}

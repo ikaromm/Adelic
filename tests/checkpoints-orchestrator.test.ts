@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { createBackend } from '../server/index.js';
 import { Store } from '../server/store.js';
 import { NOT_GIT, REF_PREFIX } from '../server/checkpoints.js';
+import { executorContextInstructions } from '../server/providers/remote-tools.js';
 import type { ProviderRegistry, Run, RunInput, Session } from '../shared/contracts.js';
 import { gitIn, makeGitRepo } from './git-fixtures.js';
 
@@ -122,10 +123,12 @@ describe('checkpoints around runs', () => {
   it('records what a writing run changed, shows the diff and undoes it through the API', async () => {
     const repo = makeRepo();
     const head = gitIn(repo, 'rev-parse', 'HEAD');
-    const { orchestrator, finished, session, api } = setup(repo);
+    const { orchestrator, finished, session, api, inputs } = setup(repo);
     const { runId } = await orchestrator.start(session(), 'Oi');
     const run = await finished(runId);
     expect(run.checkpoint).toMatchObject({ available: true, root: realpathSync(repo) });
+    expect(run.gitAvailable).toBe(true);
+    expect(inputs[0].executorContext?.git).toBe('available');
 
     const changes = await api(`/api/runs/${runId}/changes`);
     expect(changes).toEqual({
@@ -192,11 +195,57 @@ describe('checkpoints around runs', () => {
     const dir = realpathSync(mkdtempSync(join(tmpdir(), 'adelic-nogit-')));
     cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
     writeFileSync(join(dir, 'README.md'), 'x\n');
-    const { orchestrator, finished, session, api } = setup(dir);
+    const { orchestrator, finished, session, api, inputs } = setup(dir);
     const { runId } = await orchestrator.start(session(), 'Oi');
-    expect((await finished(runId)).checkpoint).toEqual({ available: false, reason: NOT_GIT });
+    const run = await finished(runId);
+    expect(run.checkpoint).toEqual({
+      available: false,
+      captureState: 'not_applicable',
+      reason: NOT_GIT,
+    });
+    expect(run.gitAvailable).toBe(false);
+    expect(inputs[0].executorContext?.git).toBe('unavailable');
     expect((await api(`/api/runs/${runId}/changes`)).body).toEqual({ available: false, reason: NOT_GIT, files: [] });
     expect((await api(`/api/runs/${runId}/restore`, { method: 'POST', body: { confirm: true } })).status).toBe(404);
+  });
+
+  it('keeps Git unknown when checkpoint probing fails despite .git metadata', async () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'adelic-brokengit-')));
+    cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
+    writeFileSync(join(dir, '.git'), 'gitdir: /missing/metadata');
+    writeFileSync(join(dir, 'README.md'), 'x\\n');
+    const { orchestrator, finished, session, inputs } = setup(dir);
+    const s = session();
+    s.mode = 'deep';
+    const { runId } = await orchestrator.start(s, 'Inspecione o projeto');
+    const run = await finished(runId);
+
+    expect(run.checkpoint).toEqual({ available: false, captureState: 'failed', reason: NOT_GIT });
+    expect(run.gitAvailable).toBeUndefined();
+    expect(inputs[0].remote).toBeUndefined();
+    expect(inputs[0].executorContext?.git).toBe('unknown');
+    const guidance = executorContextInstructions(inputs[0]);
+    expect(guidance).toContain('não foi verificada');
+    expect(guidance).not.toContain('não execute comandos Git');
+  });
+
+  it('keeps Git unknown for an invalid .git probe in deep read-only runs without checkpoints', async () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'adelic-readonly-brokengit-')));
+    cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
+    writeFileSync(join(dir, '.git'), 'gitdir: /missing/metadata');
+    writeFileSync(join(dir, 'README.md'), 'x\\n');
+    const { orchestrator, finished, session, inputs } = setup(dir, { sandbox: 'read-only' });
+    const s = session();
+    s.mode = 'deep';
+    const { runId } = await orchestrator.start(s, 'Inspecione o projeto');
+    const run = await finished(runId);
+
+    expect(run.checkpoint).toBeUndefined();
+    expect(run.gitAvailable).toBeUndefined();
+    expect(inputs[0].executorContext?.git).toBe('unknown');
+    const guidance = executorContextInstructions(inputs[0]);
+    expect(guidance).toContain('não foi verificada');
+    expect(guidance).not.toContain('não execute comandos Git');
   });
 
   it('takes no checkpoint for read-only runs, nor for detached conversations without their own repository', async () => {
@@ -208,6 +257,10 @@ describe('checkpoints around runs', () => {
 
     const rw = setup(repo);
     const detached = await rw.orchestrator.start(rw.session(null), 'Oi');
-    expect((await rw.finished(detached.runId)).checkpoint).toEqual({ available: false, reason: NOT_GIT });
+    expect((await rw.finished(detached.runId)).checkpoint).toEqual({
+      available: false,
+      captureState: 'not_applicable',
+      reason: NOT_GIT,
+    });
   });
 });

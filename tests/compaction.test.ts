@@ -20,6 +20,7 @@ import { builtinCommands, expandMessage, listCommands } from '../server/commands
 import { migrate, migrations, userVersion } from '../server/migrations.js';
 import { boundedPrompt } from '../server/providers/common.js';
 import { Store } from '../server/store.js';
+import { summarizeReview } from '../server/coordination.js';
 import { COMPACTING_TEXT, COMPACT_INVALID, compactCommand } from '../shared/compaction.js';
 import { COMMAND_RESERVED, commandFieldsError } from '../shared/commands.js';
 import type {
@@ -70,6 +71,86 @@ const compaction = (upTo: string, summary = 'resumo', extra: Partial<Compaction>
   upToMessageId: upTo,
   createdAt: tick(),
   ...extra,
+});
+
+describe('review summary safety', () => {
+  it('keeps recognized findings in the usual Markdown formats with severity and location', () => {
+    const review = [
+      '### [P1] Retry can duplicate delivered work',
+      'Location: server/store.ts:410',
+      'An applied older retry must block another retry.',
+      '### **[P2] Retry button label is inconsistent',
+      'Location: src/components/TaskRecovery.tsx:91',
+      'The label does not match the API.',
+    ].join('\n');
+
+    const result = summarizeReview(review, 1200);
+    expect(result).toMatchObject({ incomplete: false, findings: 2 });
+    for (const expected of ['[P1]', 'server/store.ts:410', '[P2]', 'TaskRecovery.tsx:91'])
+      expect(result.text).toContain(expected);
+  });
+
+  it('preserves numbered unsupported P1 sections before a recognized P2 when the full review fits', () => {
+    const review = [
+      '### 1: **[P1] Delivered Git work can repeat**',
+      'Location: server/store.ts:410',
+      'An already-applied older retry may be repeated.',
+      '### 2: **[P1] Unknown capture is treated as empty**',
+      'Location: server/coordination.ts:233',
+      'Unknown capture must not be converted into a clean result.',
+      '### [P2] Retry button differs from API',
+      'Location: src/components/TaskRecovery.tsx:91',
+      'The local busy state disagrees with the API.',
+    ].join('\n');
+
+    const result = summarizeReview(review, 2000);
+    expect(result.incomplete).toBe(false);
+    expect(result.findings).toBe(1); // only the recognized P2 is counted as structured
+    for (const expected of [
+      '[P1] Delivered Git work can repeat',
+      'server/store.ts:410',
+      '[P1] Unknown capture is treated as empty',
+      'server/coordination.ts:233',
+      '[P2] Retry button differs from API',
+    ])
+      expect(result.text).toContain(expected);
+    expect(result.text).not.toContain('REVISÃO INCOMPLETA');
+  });
+
+  it('handles multiple recognized P1s and mixed unstructured lead-in conservatively', () => {
+    const review = [
+      'Potential blocker: delivery may already have been applied.',
+      '### **[P1] Retry A can be repeated**',
+      'Location: server/store.ts:410',
+      '### **[P1] Unknown state can be reported as clean**',
+      'Location: server/coordination.ts:233',
+      '### **[P2] Retry control remains busy**',
+      'Location: src/components/TaskRecovery.tsx:91',
+    ].join('\n');
+
+    const result = summarizeReview(review, 2000);
+    expect(result.incomplete).toBe(false);
+    expect(result.findings).toBe(3);
+    for (const expected of ['Potential blocker', '[P1] Retry A', '[P1] Unknown state', '[P2]', 'coordination.ts:233'])
+      expect(result.text).toContain(expected);
+  });
+
+  it('signals incompleteness when a small budget cannot preserve every finding', () => {
+    const review = [
+      '### 1: **[P1] First unsupported blocker**',
+      'Location: server/store.ts:410',
+      '### 2: **[P1] Second unsupported blocker**',
+      'Location: server/coordination.ts:233',
+      '### [P2] Recognized finding',
+      'Location: src/components/TaskRecovery.tsx:91',
+    ].join('\n');
+
+    const result = summarizeReview(review, 180);
+    expect(result.text.length).toBeLessThanOrEqual(180);
+    expect(result.incomplete).toBe(true);
+    expect(result.text).toContain('REVISÃO INCOMPLETA');
+    expect(result.text).toContain('não concluir aprovação');
+  });
 });
 
 describe('/compactar detection', () => {
@@ -644,9 +725,9 @@ describe('migration 8', () => {
     expect(userVersion(db)).toBe(6);
     db.exec(`INSERT INTO sessions VALUES('s',NULL,'{}'); INSERT INTO plans VALUES('p','s','{}');`);
     const result = migrate(db, dir);
-    expect(result).toMatchObject({ from: 6, to: 15, applied: [8, 9, 10, 11, 12, 13, 14, 15] });
+    expect(result).toMatchObject({ from: 6, to: 16, applied: [8, 9, 10, 11, 12, 13, 14, 15, 16] });
     expect(result.backupPath).toBeTruthy();
-    expect(migrations.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14, 15]);
+    expect(migrations.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
     expect(db.prepare('SELECT COUNT(*) AS n FROM plans').get()).toEqual({ n: 1 });
     db.exec(`PRAGMA foreign_keys=ON; INSERT INTO compactions VALUES('c','s','{}');`);
     expect(() => db.exec(`INSERT INTO compactions VALUES('x','missing','{}')`)).toThrow();

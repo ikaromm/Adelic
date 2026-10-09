@@ -9,15 +9,105 @@ import { REMOTE_RUNNER_SOURCE } from './runner-source.js';
 const MAX_FRAME = 1024 * 1024;
 const STDERR_LIMIT = 8192;
 const REMOTE_PATH = '/usr/local/bin:/usr/bin:/bin';
-const TOOL_NAMES = new Set<RemoteToolName>(['exec', 'read_file', 'write_file', 'list', 'stat', 'search', 'git']);
+const TOOL_NAMES = new Set<RemoteToolName>([
+  'exec',
+  'read_file',
+  'write_file',
+  'replace_text',
+  'list',
+  'stat',
+  'search',
+  'git',
+  'diagnose',
+]);
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+const ERROR_CATEGORIES = ['timeout', 'not_found', 'permission', 'invalid_request', 'conflict', 'executor'] as const;
+type RemoteErrorCategory = (typeof ERROR_CATEGORIES)[number];
+const isErrorCategory = (value: unknown): value is RemoteErrorCategory =>
+  typeof value === 'string' && ERROR_CATEGORIES.includes(value as RemoteErrorCategory);
+export const reconstructRemoteError = (raw: string, rawCategory: unknown): Error & { category?: string } => {
+  const category = isErrorCategory(rawCategory) ? rawCategory : undefined;
+  const message = safeRemoteErrorMessage(category, raw);
+  const error = new Error(message) as Error & { category?: string };
+  if (category) error.category = category;
+  return error;
+};
 
-const validateResult = (tool: RemoteToolName, value: unknown): unknown => {
+const safeRemoteErrorMessage = (category: RemoteErrorCategory | undefined, raw: string): string => {
+  // Only known runner diagnostics cross into provider context. SSH responses are untrusted;
+  // old runners without a category remain supported, but their raw message is never forwarded.
+  const safeMessages = [
+    'file does not exist',
+    'file exceeds read limit',
+    'file must be read completely before replace_text',
+    'expectedRevision must be a short string',
+    'readRevision must be a short string',
+    'expectedRevision and readRevision do not match',
+    'file changed before edit',
+    'file changed while reading',
+    'file is not valid UTF-8',
+    'read limit is too small for a UTF-8 character',
+    'offset exceeds file size',
+    'offset is not a UTF-8 boundary',
+    'read limit must be between 1 and 49152 bytes',
+    'unable to read UTF-8 boundary',
+    'file exceeds edit limit',
+    'edited file exceeds limit',
+    'file is not valid UTF-8',
+    'oldText must match exactly once',
+    'parent directory does not exist',
+    'path escapes project root',
+    'path must be a string',
+    'args must be an object',
+    'tool arguments do not match the supported schema',
+    'cwd is not a directory',
+    'write_file is disabled for a read-only call',
+    'replace_text is disabled for a read-only call',
+    'content must be a string',
+    'content exceeds write limit',
+    'oldText must be a non-empty string',
+    'newText must be a string',
+    'replacement text exceeds limit',
+    'edited file exceeds limit',
+    'path is not a directory',
+    'command cancelled',
+  ];
+  if (safeMessages.includes(raw)) return raw;
+  if (category === 'timeout') return 'command timed out';
+  if (category === 'not_found') return 'requested path was not found';
+  if (category === 'permission') return 'permission denied';
+  if (category === 'invalid_request') return 'invalid tool request or file';
+  if (category === 'conflict') return 'file changed or replacement is ambiguous';
+  return 'remote tool failed';
+};
+
+export const validateRemoteResult = (tool: RemoteToolName, value: unknown): unknown => {
   const isText = (item: unknown, limit: number): item is string =>
     typeof item === 'string' && Buffer.byteLength(item, 'utf8') <= limit;
   if (!isRecord(value)) throw new Error(`Remote ${tool} result is not an object`);
   switch (tool) {
+    case 'diagnose':
+      if (
+        !['repository', 'binary-only', 'unavailable', 'unverified'].includes(String(value.git)) ||
+        !isRecord(value.tmp) ||
+        typeof value.tmp['/tmp'] !== 'boolean' ||
+        typeof value.tmp['/var/tmp'] !== 'boolean' ||
+        !Array.isArray(value.browsers) ||
+        value.browsers.length > 4 ||
+        !value.browsers.every((name) =>
+          ['chromium', 'chromium-browser', 'google-chrome', 'firefox'].includes(String(name)),
+        ) ||
+        (value.browserFunctional !== undefined &&
+          (!Array.isArray(value.browserFunctional) ||
+            !(value.browserFunctional as unknown[]).every((name) => (value.browsers as unknown[]).includes(name)))) ||
+        !isRecord(value.binaries) ||
+        Object.keys(value.binaries).length > 16 ||
+        !Object.values(value.binaries).every((available) => typeof available === 'boolean') ||
+        !isText(value.hostDependentTests, 512)
+      )
+        throw new Error('Remote diagnose result did not match its schema');
+      break;
     case 'exec':
     case 'git':
       if (!Number.isInteger(value.exitCode) || !isText(value.stdout, 256 * 1024) || !isText(value.stderr, 256 * 1024)) {
@@ -25,13 +115,40 @@ const validateResult = (tool: RemoteToolName, value: unknown): unknown => {
       }
       break;
     case 'read_file':
-      if (!isText(value.path, 4096) || !isText(value.content, 128 * 1024)) {
+      if (
+        !isText(value.path, 4096) ||
+        !isText(value.content, 48 * 1024) ||
+        !Number.isSafeInteger(value.offset) ||
+        (value.offset as number) < 0 ||
+        !Number.isSafeInteger(value.bytesRead) ||
+        (value.bytesRead as number) < 0 ||
+        (value.bytesRead as number) > 48 * 1024 ||
+        Buffer.byteLength(value.content, 'utf8') !== value.bytesRead ||
+        !Number.isSafeInteger(value.totalBytes) ||
+        (value.totalBytes as number) < 0 ||
+        typeof value.truncated !== 'boolean' ||
+        !Number.isSafeInteger(value.nextOffset) ||
+        value.nextOffset !== (value.offset as number) + (value.bytesRead as number) ||
+        !isText(value.revision, 128) ||
+        !/^\d+:\d+:\d+:\d+:\d+$/.test(value.revision)
+      ) {
         throw new Error('Remote read_file result did not match its schema');
       }
       break;
     case 'write_file':
       if (!isText(value.path, 4096) || !Number.isInteger(value.bytesWritten) || (value.bytesWritten as number) < 0) {
         throw new Error('Remote write_file result did not match its schema');
+      }
+      break;
+    case 'replace_text':
+      if (
+        !isText(value.path, 4096) ||
+        value.matches !== 1 ||
+        !Number.isSafeInteger(value.bytesWritten) ||
+        (value.bytesWritten as number) < 0 ||
+        (value.bytesWritten as number) > 32 * 1024 * 1024
+      ) {
+        throw new Error('Remote replace_text result did not match its schema');
       }
       break;
     case 'list':
@@ -65,6 +182,11 @@ const validateResult = (tool: RemoteToolName, value: unknown): unknown => {
         !Array.isArray(value.results) ||
         value.results.length > 1000 ||
         typeof value.truncated !== 'boolean' ||
+        !isRecord(value.omittedFiles) ||
+        !Number.isSafeInteger(value.omittedFiles.tooLarge) ||
+        (value.omittedFiles.tooLarge as number) < 0 ||
+        !Number.isSafeInteger(value.omittedFiles.unreadable) ||
+        (value.omittedFiles.unreadable as number) < 0 ||
         !value.results.every(
           (entry) =>
             isRecord(entry) && isText(entry.path, 8192) && Number.isSafeInteger(entry.line) && isText(entry.text, 8192),
@@ -100,7 +222,7 @@ export interface RemoteHostServiceInstance {
   probe(target: string, port?: number): Promise<RemoteProbe>;
   test(host: RemoteHost): Promise<{ protocol: number; python: string; platform: string; root: string }>;
   install(host: RemoteHost): Promise<void>;
-  connect(host: RemoteHost, cwd: string): Promise<RemoteConnection>;
+  connect(host: RemoteHost, cwd: string, options?: { readOnly?: boolean }): Promise<RemoteConnection>;
   /** One-off call for callers that do not need a persistent per-run connection. */
   call(
     host: RemoteHost,
@@ -108,6 +230,7 @@ export interface RemoteHostServiceInstance {
     tool: RemoteToolName,
     args: Record<string, unknown>,
     signal: AbortSignal,
+    options?: { readOnly?: boolean },
   ): Promise<unknown>;
   disconnect(hostId: string): Promise<void>;
   shutdown(): Promise<void>;
@@ -371,7 +494,11 @@ export function RemoteHostService(dataDir: string, options: { configFile?: strin
     };
   };
 
-  const connect = async (host: RemoteHost, cwd: string): Promise<RemoteConnection> => {
+  const connect = async (
+    host: RemoteHost,
+    cwd: string,
+    options: { readOnly?: boolean } = {},
+  ): Promise<RemoteConnection> => {
     checkedHost(host);
     checkPath(cwd);
     await mkdir(knownHostsDir, { recursive: true, mode: 0o700 });
@@ -453,7 +580,14 @@ export function RemoteHostService(dataDir: string, options: { configFile?: strin
           return;
         }
         const fields = Object.keys(envelope).sort().join(',');
-        if ((envelope.ok && fields !== 'id,ok,result') || (!envelope.ok && fields !== 'error,id,ok')) {
+        const successFields = fields === 'id,ok,result';
+        const errorFields = fields === 'error,id,ok' || fields === 'error,errorCategory,id,ok';
+        if ((envelope.ok && !successFields) || (!envelope.ok && !errorFields)) {
+          failAll(new Error('Remote runner sent an invalid response schema'));
+          child.kill('SIGTERM');
+          return;
+        }
+        if (!envelope.ok && typeof envelope.error !== 'string') {
           failAll(new Error('Remote runner sent an invalid response schema'));
           child.kill('SIGTERM');
           return;
@@ -468,9 +602,9 @@ export function RemoteHostService(dataDir: string, options: { configFile?: strin
         pending.delete(envelope.id);
         if (item.abort) item.signal.removeEventListener('abort', item.abort);
         if (envelope.ok && Object.hasOwn(envelope, 'result')) item.resolve(envelope.result);
-        else if (!envelope.ok && typeof envelope.error === 'string')
-          item.reject(new Error(envelope.error.slice(0, 2000)));
-        else {
+        else if (!envelope.ok && typeof envelope.error === 'string') {
+          item.reject(reconstructRemoteError(envelope.error, envelope.errorCategory));
+        } else {
           item.reject(new Error('Remote runner response did not match its schema'));
           failAll(new Error('Remote runner response did not match its schema'));
           child.kill('SIGTERM');
@@ -524,12 +658,20 @@ export function RemoteHostService(dataDir: string, options: { configFile?: strin
         if (!TOOL_NAMES.has(tool)) return Promise.reject(new Error('Unsupported remote tool'));
         if (!argsValue || typeof argsValue !== 'object' || Array.isArray(argsValue))
           return Promise.reject(new Error('Remote tool arguments must be an object'));
-        // Bound a stalled/untrusted runner even when the caller has no deadline.
+        // Enforce policy in the service boundary, independently of caller-provided args
+        // and before a request reaches the SSH proxy/runner.
+        if (options.readOnly && ['exec', 'write_file', 'replace_text'].includes(tool))
+          return Promise.reject(new Error(`${tool} is disabled for a read-only call`));
+        // Inspection schemas are strict; only git accepts a readOnly policy bit.
+        // Mutating tools were rejected above before reaching the runner.
+        const boundedArgs = options.readOnly && tool === 'git' ? { ...argsValue, readOnly: true } : argsValue;
         const requestedTimeout = typeof argsValue.timeoutMs === 'number' ? argsValue.timeoutMs : 300000;
         const deadline = tool === 'exec' ? Math.min(300000, Math.max(1, requestedTimeout)) + 15000 : 30000;
         const boundedSignal = AbortSignal.any([signal, AbortSignal.timeout(deadline)]);
         return withObservation('ssh.tool', 'ssh', {}, () =>
-          request('call', { tool, args: argsValue }, boundedSignal).then((result) => validateResult(tool, result)),
+          request('call', { tool, args: boundedArgs }, boundedSignal).then((result) =>
+            validateRemoteResult(tool, result),
+          ),
         );
       },
       info() {
@@ -625,12 +767,12 @@ export function RemoteHostService(dataDir: string, options: { configFile?: strin
         clearTimeout(timer);
       }
     },
-    async connect(host, cwd) {
-      return withObservation('ssh.connect', 'ssh', {}, () => connect(host, cwd));
+    async connect(host, cwd, options) {
+      return withObservation('ssh.connect', 'ssh', {}, () => connect(host, cwd, options));
     },
-    async call(host, cwd, tool, args, signal) {
+    async call(host, cwd, tool, args, signal, options) {
       if (signal.aborted) throw signal.reason instanceof Error ? signal.reason : new Error('Remote call cancelled');
-      const connection = await connect(host, cwd);
+      const connection = await connect(host, cwd, options);
       try {
         return await connection.call(tool, args, signal);
       } finally {

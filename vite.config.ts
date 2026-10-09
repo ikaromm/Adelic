@@ -68,6 +68,8 @@ export default defineConfig({
   },
   // Playwright specs (tests/e2e/*.spec.ts) run separately with `npm run test:e2e`.
   test: {
+    // Keep the full suite predictable on the supported CI/development footprint.
+    maxWorkers: 2,
     include: ['tests/**/*.test.{ts,tsx}'],
     coverage: {
       provider: 'v8',

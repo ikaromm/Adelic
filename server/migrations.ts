@@ -270,6 +270,22 @@ export const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 16,
+    description: 'Uso em cache e tokens de raciocínio na observabilidade',
+    up(db) {
+      const columns = new Set(
+        (db.prepare('PRAGMA table_info(observability_runs)').all() as { name: string }[]).map((column) => column.name),
+      );
+      if (!columns.has('cached_input_tokens'))
+        db.exec('ALTER TABLE observability_runs ADD COLUMN cached_input_tokens INTEGER;');
+      if (!columns.has('reasoning_output_tokens'))
+        db.exec('ALTER TABLE observability_runs ADD COLUMN reasoning_output_tokens INTEGER;');
+      db.exec(`UPDATE observability_runs
+        SET cached_input_tokens=(SELECT json_extract(r.data,'$.cachedInputTokens') FROM runs r WHERE r.id=observability_runs.run_id),
+            reasoning_output_tokens=(SELECT json_extract(r.data,'$.reasoningOutputTokens') FROM runs r WHERE r.id=observability_runs.run_id);`);
+    },
+  },
 ];
 
 export const schemaVersion = migrations.at(-1)!.version;

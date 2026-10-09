@@ -263,10 +263,26 @@ export function errorMessage(error: unknown): string {
 }
 
 function sanitizeDiagnostic(raw: string) {
-  return raw
-    .replace(/((?:Bearer|token|api[_-]?key|secret)\s+)[^\s,;]+/gi, '$1[redacted]')
-    .replace(/(authorization\s*[:=]\s*)[^\s,;]+/gi, '$1[redacted]')
-    .replace(/([?&](?:token|key|secret)=)[^&\s]+/gi, '$1[redacted]');
+  return (
+    raw
+      .replace(/\b(Bearer\s+)[^\s,;]+/gi, '$1[redacted]')
+      .replace(/\b((?:proxy-)?authorization\s*[:=]\s*)(?:Basic|Bearer)\s+[^\s,;]+/gi, '$1[redacted]')
+      .replace(/\b(Basic\s+)[A-Za-z0-9+/]+={0,2}\b/gi, '$1[redacted]')
+      .replace(/\b(authorization\s*[:=]\s*)[^\s,;]+/gi, '$1[redacted]')
+      .replace(
+        /([?&](?:(?:access|refresh)[_-]?token|(?:x[_-]?)?api[_-]?key|client[_-]?secret|key|password|secret|token)=)[^&\s]+/gi,
+        '$1[redacted]',
+      )
+      // Common CLI/API diagnostics include key=value, JSON, or YAML forms. Keep the field name
+      // and delimiters for diagnosis, but never forward the credential value to an agent/UI.
+      .replace(
+        /\b((?:api[_-]?key|(?:access|refresh)[_-]?token|auth(?:orization)?|client[_-]?secret|password|passwd|passphrase|private[_-]?key|secret|token)["']?\s*[:=]\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;]+)(?=[,;\s}]|$)/gi,
+        '$1[redacted]',
+      )
+      .replace(/\b(sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9_]{20,})\b/g, '[redacted]')
+      .replace(/(https?:\/\/)[^\s/@:]+:[^\s/@]+@/gi, '$1[redacted]@')
+      .replace(/-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?-----END [^-]*PRIVATE KEY-----/g, '[redacted private key]')
+  );
 }
 
 export function isRecord(value: unknown): value is Record<string, unknown> {

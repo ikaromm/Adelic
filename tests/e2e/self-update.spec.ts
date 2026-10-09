@@ -14,6 +14,7 @@ async function openDiagnostics(page: Page, narrow = false, navigate = true) {
     .getByRole('navigation', { name: 'Navegação principal' })
     .getByRole('button', { name: 'Configurações' })
     .click();
+  await page.getByRole('button', { name: 'Avançado', exact: true }).click();
   const card = page.locator('section[aria-labelledby="diagnostics-title"]');
   await card.scrollIntoViewIfNeeded();
   return card;

@@ -10,20 +10,20 @@
   },
   "scripts": {
     "dev": "tsx server/cli.ts",
-    "build": "tsc --noEmit && vite build",
+    "build": "tsc --noEmit && vite build --configLoader runner",
     "start": "NODE_ENV=production tsx server/cli.ts",
     "desktop:build": "npm run build && node scripts/build-desktop.mjs",
     "desktop:dev": "npm run desktop:build && node node_modules/electron/install.js && env -u ELECTRON_RUN_AS_NODE electron .desktop/app",
     "package:linux": "npm run desktop:build && node scripts/package-linux.mjs",
     "desktop:smoke": "node scripts/smoke-desktop.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run",
+    "test": "vitest run --configLoader runner",
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "test:e2e": "npm run build && playwright test",
     "release": "node scripts/release.mjs",
-    "coverage": "vitest run --coverage",
+    "coverage": "vitest run --configLoader runner --coverage",
     "remote-user": "tsx scripts/remote-user.ts"
   },
   "dependencies": {

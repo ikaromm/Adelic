@@ -28,13 +28,21 @@ test.afterEach(async ({ request }) => {
   await setFallback(request, false, []);
 });
 
-test('offers another model after an overloaded failure and switches the conversation to it', async ({ page }) => {
+test('offers explicit retry and another model after an overloaded failure', async ({ page }) => {
+  let manualRetries = 0;
+  await page.route('**/api/runs/*/retry', async (route) => {
+    manualRetries += 1;
+    await route.continue();
+  });
   const input = await newConversation(page);
   await input.fill('[sobrecarga] responda');
   await input.press('Enter');
   const notice = page.locator('.retry-notice');
   await expect(notice).toContainText('Motivo: modelo sobrecarregado', { timeout: 15_000 });
   await expect(notice).toContainText('2 novas tentativas automáticas');
+  await notice.getByRole('button', { name: 'Tentar de novo' }).click();
+  await expect.poll(() => manualRetries).toBe(1);
+  await expect(notice).toContainText('Motivo: modelo sobrecarregado', { timeout: 15_000 });
   await notice.getByText('Tentar com outro modelo').click();
   const options = notice.getByRole('list', { name: 'Outros modelos' });
   // The failed default model is not offered: the other model of the same provider comes
@@ -43,10 +51,10 @@ test('offers another model after an overloaded failure and switches the conversa
   await options.getByRole('button', { name: 'Codex (E2E) · E2E Reserva' }).click();
   await expect(page.locator('.markdown-content', { hasText: 'Respondido por e2e-reserva.' })).toBeVisible();
   await expect(page.locator('.retry-notice')).toHaveCount(0);
-  // The request was sent again as a new run, and the conversation now uses the new model.
+  // The generic retry and the model switch are explicit separate new runs; the conversation uses the selected model.
   await expect(
     page.getByRole('region', { name: 'Conversa', exact: true }).getByText('[sobrecarga] responda'),
-  ).toHaveCount(2);
+  ).toHaveCount(3);
   await expect(modelPill(page)).toContainText('E2E Reserva');
 });
 
@@ -78,6 +86,7 @@ test('Settings picks the fallback models from the catalog and fits a 360px scree
     .getByRole('navigation', { name: 'Navegação principal' })
     .getByRole('button', { name: 'Configurações' })
     .click();
+  await page.getByRole('button', { name: 'Avançado', exact: true }).click();
   const toggle = page.getByRole('switch', { name: 'Trocar de modelo se o atual estiver sobrecarregado' });
   await expect(toggle).toHaveAttribute('aria-checked', 'false');
   await toggle.click();

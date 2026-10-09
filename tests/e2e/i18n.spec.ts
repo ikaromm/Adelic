@@ -25,6 +25,7 @@ test('switches to English in Settings, persists across reloads and switches back
     .getByRole('navigation', { name: 'Navegação principal' })
     .getByRole('button', { name: 'Configurações' })
     .click();
+  await page.getByRole('button', { name: 'Avançado', exact: true }).click();
   const language = page.getByRole('combobox', { name: 'Idioma / Language' });
   await expect(language).toHaveValue('auto');
   await language.selectOption('en');
@@ -50,13 +51,14 @@ test('switches to English in Settings, persists across reloads and switches back
   const input = page.getByRole('textbox', { name: 'Message to the agent' });
   await expect(input).toHaveAttribute('placeholder', 'Write a message…');
   await expect(page.getByRole('button', { name: 'Send message' })).toBeVisible();
-  await expect(page.getByRole('button', { name: /^Permissions: (Read|Write) · (Auto|Manual)$/ })).toBeVisible();
+  await expect(page.getByRole('button', { name: /^Access: / })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Plan first' })).toBeVisible();
   await page.getByRole('button', { name: /^Conversation project and mode: No project · Auto$/ }).click();
   await expect(page.getByRole('dialog', { name: 'Conversation project and mode' })).toContainText('Thorough');
   await page.keyboard.press('Escape');
   // Back to Portuguese.
   await page.getByRole('navigation', { name: 'Main navigation' }).getByRole('button', { name: 'Settings' }).click();
+  await page.getByRole('button', { name: 'Advanced', exact: true }).click();
   await page.getByRole('combobox', { name: 'Idioma / Language' }).selectOption('pt-BR');
   await expect(page.getByRole('heading', { name: 'Configurações', exact: true })).toBeVisible();
   await expect(page.locator('html')).toHaveAttribute('lang', 'pt-BR');
@@ -112,38 +114,51 @@ test('login screen, connection badge, forced approval and server errors in Engli
     await expect(badge).toHaveText('Internet');
     await expect(badge).toHaveAttribute('data-kind', 'internet');
     await expect(badge).toHaveAttribute('title', /Tailscale Funnel/);
-    // Runs from the internet use manual approval: the pill shows it, auto cannot be picked.
+    // Runs from the internet use manual approval; other approval modes are disabled.
     await remote
       .getByRole('button', { name: /^New conversation/ })
       .first()
       .click();
-    const pill = remote.getByRole('button', { name: /^Permissions: Read · Manual$/ });
+    const pill = remote.getByRole('button', { name: /^Access: Read only$/ });
     await expect(pill).toBeVisible();
-    await expect(pill).toHaveAttribute('title', /Over the internet, commands always ask for approval/);
+    await expect(pill).toHaveAttribute('title', /Manual · Internet access requires manual approval/);
     await pill.click();
-    const menu = remote.getByRole('dialog', { name: 'Permissions' });
-    await expect(menu.getByRole('button', { name: /^Read · Auto/ })).toBeDisabled();
-    await expect(menu.getByRole('button', { name: /^Write · Auto/ })).toBeDisabled();
-    await expect(menu.getByRole('button', { name: /^Read · Manual/ })).toBeEnabled();
-    await expect(menu).toContainText('Settings › Remote access');
+    const menu = remote.getByRole('dialog', { name: 'Access' });
+    await expect(menu.getByRole('button', { name: /^Safe automatic/ })).toBeDisabled();
+    await expect(menu.getByRole('button', { name: /^Manual/ })).toBeDisabled();
+    await expect(menu).toContainText('Current: Manual · Internet access requires manual approval.');
+    const bootstrap = await (await page.request.get('/api/bootstrap')).json();
+    const providerId = bootstrap.settings.defaultProviderId;
+    const provider = bootstrap.providers.find((item: { id: string }) => item.id === providerId);
+    const supportsAutomatic = (provider?.id === 'codex' || provider?.id === 'kiro') && provider.capabilities.tools;
+    if (supportsAutomatic) await expect(menu.getByRole('button', { name: /^Automatic/ })).toBeDisabled();
+    else await expect(menu.getByRole('button', { name: /^Automatic/ })).toHaveCount(0);
   } finally {
     await english.close();
     expect((await page.request.delete('/api/remote-access/account', { data: {} })).ok()).toBe(true);
   }
 });
 
-test('on this computer the badge says Local and the auto approval options stay available', async ({ page }) => {
+test('on this computer the badge says Local and approval options reflect runtime capability', async ({
+  page,
+  request,
+}) => {
   await page.goto('/');
   await expect(page.locator('.local-badge')).toHaveAttribute('data-kind', 'local');
   await page
     .getByRole('button', { name: /^Nova conversa/ })
     .first()
     .click();
-  // No lock: the pill keeps its plain title and the auto options stay available.
-  const pill = page.getByRole('button', { name: /^Permissões: (Leitura|Escrita) · (Auto|Manual)$/ });
-  await expect(pill).toHaveAttribute('title', 'Permissões');
+  const pill = page.getByRole('button', { name: /^Acesso: / });
+  await expect(pill).toBeVisible();
   await pill.click();
-  await expect(
-    page.getByRole('dialog', { name: 'Permissões' }).getByRole('button', { name: /^Leitura · Auto/ }),
-  ).toBeEnabled();
+  const menu = page.getByRole('dialog', { name: 'Acesso' });
+  await expect(menu.getByRole('button', { name: /^Automático seguro/ })).toBeEnabled();
+  await expect(menu.getByRole('button', { name: /^Manual/ })).toBeEnabled();
+  const bootstrap = await (await request.get('/api/bootstrap')).json();
+  const providerId = bootstrap.settings.defaultProviderId;
+  const provider = bootstrap.providers.find((item: { id: string }) => item.id === providerId);
+  const supportsAutomatic = (provider?.id === 'codex' || provider?.id === 'kiro') && provider.capabilities.tools;
+  if (supportsAutomatic) await expect(menu.getByRole('button', { name: /^Automático(?! seguro)/ })).toBeEnabled();
+  else await expect(menu.getByRole('button', { name: /^Automático(?! seguro)/ })).toHaveCount(0);
 });

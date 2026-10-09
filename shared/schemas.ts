@@ -178,6 +178,7 @@ export const PatchSessionSchema = z.object({
   projectId: optional(projectRef, invalid('projectId')),
   folderId: optional(projectRef, invalid('folderId')),
   archived: optional(z.boolean(), boolean('archived')),
+  pinned: optional(z.boolean(), boolean('pinned')),
   title: optional(text(160), invalid('title')),
   providerId: optional(ProviderIdSchema, invalid('providerId')),
   model: optional(z.union([z.null(), text(120)]), invalid('model')),
@@ -282,6 +283,10 @@ export const RetryRunSchema = z.object({
   model: optional(text(120), invalid('model')),
   overrideLimit: overrideLimit(),
 });
+/** Explicit confirmation for resuming only the pending delegated task. */
+export const RetryTaskSchema = z
+  .object({ confirm: required(z.literal(true), vmsg('validation.confirm.restore')) })
+  .strict();
 /** Self-update channel of a git checkout (docs/specs/self-update.md). */
 export const UpdateChannelSchema = z.enum(['master', 'develop']);
 export const UpdateCheckSchema = z

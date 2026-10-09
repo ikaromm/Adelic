@@ -1,13 +1,15 @@
 import type { Bootstrap, Session } from '../shared/contracts';
 
-/** Recent-first sidebar list, limited unless expanded; the selected conversation always stays visible. */
-export function sidebarSessions<T extends Pick<Session, 'id' | 'updatedAt'>>(
+/** Pinned-first sidebar list, limited unless expanded; the selected conversation always stays visible. */
+export function sidebarSessions<T extends Pick<Session, 'id' | 'updatedAt'> & { pinnedAt?: string }>(
   sessions: T[],
   limit: number,
   expanded: boolean,
   selectedId: string,
 ) {
-  const sorted = [...sessions].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  const sorted = [...sessions].sort(
+    (a, b) => Number(Boolean(b.pinnedAt)) - Number(Boolean(a.pinnedAt)) || b.updatedAt.localeCompare(a.updatedAt),
+  );
   if (expanded || sorted.length <= limit) return { items: sorted, hidden: 0 };
   const items = sorted.slice(0, limit);
   const selected = sorted.find((session) => session.id === selectedId);

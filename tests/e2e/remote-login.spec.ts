@@ -12,6 +12,7 @@ async function openSettings(page: Page) {
     .getByRole('navigation', { name: 'Navegação principal' })
     .getByRole('button', { name: 'Configurações' })
     .click();
+  await page.getByRole('button', { name: 'Avançado', exact: true }).click();
   const card = page.getByRole('region', { name: 'Acesso remoto' });
   await card.scrollIntoViewIfNeeded();
   return card;

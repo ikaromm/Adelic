@@ -5,3 +5,82 @@
 @import './styles/chat.css';
 @import './styles/pages.css';
 @import './styles/tools.css';
+@import './styles/settings.css';
+@import './styles/ssh-setup.css';
+@import './styles/sidebar-actions.css';
+@import './styles/run-progress.css';
+@import './styles/run-delivery.css';
+@import './styles/composer.css';
+@import './styles/model-picker.css';
+
+/* Execution settings and delivery remain in normal flow on narrow screens. */
+.execution-profile {
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin: 8px 0;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.execution-profile summary {
+  cursor: pointer;
+}
+.execution-profile dl {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+}
+.execution-profile dt {
+  font-weight: 600;
+}
+.execution-profile dd {
+  margin: 4px 0 0;
+}
+.local-directory-browser {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+.local-directory-path,
+.local-directory-create {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+.local-directory-path input,
+.local-directory-create input {
+  flex: 1 1 160px;
+  min-width: 0;
+}
+.local-directory-access {
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
+.project-profile-options {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px;
+}
+.project-profile-options label {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow-wrap: anywhere;
+}
+.composer-surface-context .execution-profile {
+  border: 0;
+  padding: 4px 2px;
+  margin: 0;
+  font-size: var(--text-xs);
+}
+.composer-surface-context .execution-profile[open] {
+  flex-basis: 100%;
+}
+.composer-surface-context .execution-profile summary {
+  color: var(--text-muted);
+}
+.modal-backdrop[hidden] {
+  display: none !important;
+}

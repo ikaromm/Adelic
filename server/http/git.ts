@@ -1,3 +1,7 @@
+import { git, HARDENED_CONFIG } from '../checkpoints.js';
+import { LOCAL_ONLY, requestKind } from './auth.js';
+import { lstat } from 'node:fs/promises';
+import { join } from 'node:path';
 import { Router, type Response } from 'express';
 import {
   GitCommitSchema,
@@ -41,6 +45,29 @@ export function gitRoutes({ store, orchestrator }: BackendContext) {
   /** Mutations: refused with 409 while a run writes there, an undo runs or another git operation runs. */
   const mutate = (project: Project, work: () => Promise<unknown>) => orchestrator.withGitOperation(project.path, work);
 
+  app.post(`${base}/init`, async (req, res) => {
+    if (requestKind(req) !== 'local') return error(res, 403, LOCAL_ONLY);
+    const project = projectOf(req.params.id, res);
+    if (!project) return;
+    if (project.remote) return error(res, 409, 'remotehosts.unsupported');
+    if (req.body?.confirm !== true) return error(res, 400, 'git.initConfirm');
+    try {
+      await mutate(project, async () => {
+        const info = await lstat(join(project.path, '.git')).catch((e: NodeJS.ErrnoException) => {
+          if (e.code === 'ENOENT') return undefined;
+          throw e;
+        });
+        if (info || (await isGitRepo(project))) return error(res, 409, 'git.initExists');
+        await git(project.path, ['init', '--template=', '--initial-branch=main'], {
+          config: HARDENED_CONFIG,
+          timeoutMs: 10000,
+        });
+        res.json({ initialized: true });
+      });
+    } catch (e) {
+      fail(res, e);
+    }
+  });
   // Cheap probe for the UI entry points (no `git status`).
   app.get(`${base}/repo`, async (req, res) => {
     const project = projectOf(req.params.id, res);

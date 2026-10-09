@@ -560,3 +560,25 @@ describe('pull request compare URL', () => {
     expect((await api('pr-url')).status).toBe(409);
   });
 });
+
+it('initializes Git only with confirmation and refuses existing or parent repositories', async () => {
+  const path = temp('adelic-git-init-');
+  const { api, base } = setup(path);
+  expect((await api('init', {})).status).toBe(400);
+  expect(existsSync(join(path, '.git'))).toBe(false);
+  const forbidden = await fetch(`${await base}/api/projects/p/git/init`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'tailscale-user-login': 'someone@example.test' },
+    body: JSON.stringify({ confirm: true }),
+  });
+  expect(forbidden.status).toBe(401);
+  expect(existsSync(join(path, '.git'))).toBe(false);
+  expect((await api('init', { confirm: true })).status).toBe(200);
+  expect(existsSync(join(path, '.git'))).toBe(true);
+  expect((await api('init', { confirm: true })).status).toBe(409);
+  const child = join(path, 'child');
+  mkdirSync(child);
+  const nested = setup(child);
+  expect((await nested.api('init', { confirm: true })).status).toBe(409);
+  expect(existsSync(join(child, '.git'))).toBe(false);
+});

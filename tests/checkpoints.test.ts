@@ -18,11 +18,13 @@ import { join } from 'node:path';
 import { gitIn, makeGitRepo } from './git-fixtures.js';
 import {
   CheckpointError,
+  LIMITS,
   NOT_GIT,
   REF_PREFIX,
   checkpointAfter,
   checkpointBefore,
   checkpointDiff,
+  classifyGitRepo,
   restoreCheckpoint,
 } from '../server/checkpoints.js';
 
@@ -202,12 +204,57 @@ describe('checkpoints on a real git repository', () => {
     await expect(restoreCheckpoint('run-1', after)).rejects.toMatchObject({ status: 410 });
   });
 
-  it('skips folders that are not git repositories', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'adelic-nogit-'));
-    dirs.push(dir);
-    writeFileSync(join(dir, 'a.txt'), 'a');
-    expect(await checkpointBefore(dir, 'run-1')).toEqual({ available: false, reason: NOT_GIT });
-    expect(existsSync(join(dir, '.git'))).toBe(false);
+  it('classifies valid worktrees, genuine absence and failed Git probes without conflating them', async () => {
+    const repo = makeRepo();
+    const worktree = join(tmpdir(), `adelic-linked-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    gitIn(repo, 'worktree', 'add', '--detach', worktree, 'HEAD');
+    dirs.push(worktree);
+    expect(readFileSync(join(worktree, '.git'), 'utf8')).toContain('gitdir:');
+    const before = repoState(repo);
+    expect(await classifyGitRepo(worktree)).toMatchObject({ status: 'available' });
+    expect(repoState(repo)).toEqual(before);
+
+    const noGit = mkdtempSync(join(tmpdir(), 'adelic-classify-nogit-'));
+    dirs.push(noGit);
+    expect(await classifyGitRepo(noGit)).toEqual({ status: 'absent' });
+
+    const brokenGit = mkdtempSync(join(tmpdir(), 'adelic-classify-broken-'));
+    dirs.push(brokenGit);
+    writeFileSync(join(brokenGit, '.git'), 'gitdir: /missing/metadata');
+    expect(await classifyGitRepo(brokenGit)).toEqual({ status: 'unknown' });
+  });
+
+  it('classifies checkpoint absence separately from a failed capture', async () => {
+    const dir = makeRepo();
+    const priorLimit = LIMITS.fileBytes;
+    try {
+      LIMITS.fileBytes = 0;
+      expect(await checkpointBefore(dir, 'failed-capture')).toMatchObject({
+        available: false,
+        captureState: 'failed',
+      });
+    } finally {
+      LIMITS.fileBytes = priorLimit;
+    }
+
+    const noGit = mkdtempSync(join(tmpdir(), 'adelic-nogit-'));
+    dirs.push(noGit);
+    writeFileSync(join(noGit, 'a.txt'), 'a');
+    expect(await checkpointBefore(noGit, 'not-applicable')).toEqual({
+      available: false,
+      captureState: 'not_applicable',
+      reason: NOT_GIT,
+    });
+    expect(existsSync(join(noGit, '.git'))).toBe(false);
+
+    const brokenGit = mkdtempSync(join(tmpdir(), 'adelic-brokengit-'));
+    dirs.push(brokenGit);
+    writeFileSync(join(brokenGit, '.git'), 'gitdir: /missing/metadata');
+    expect(await checkpointBefore(brokenGit, 'broken-git')).toEqual({
+      available: false,
+      captureState: 'failed',
+      reason: NOT_GIT,
+    });
   });
 
   it('only snapshots the project folder when it is below the repository root', async () => {

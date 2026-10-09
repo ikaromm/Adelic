@@ -1,8 +1,8 @@
 import { useMemo, useState } from 'react';
-import { ChevronDown, Folder, FolderPlus, Pencil, Plus, X } from 'lucide-react';
-import type { ProjectFolder, Session } from '../../shared/contracts';
+import { ChevronDown, Folder, FolderPlus, Pencil, Plus, Trash2, X } from 'lucide-react';
+import type { Project, ProjectFolder, Session } from '../../shared/contracts';
 import { useI18n } from '../i18n';
-import { SessionItem } from './Sidebar';
+import { SessionItem, sortSidebarSessions, type SessionSidebarPatch } from './Sidebar';
 
 /** Project-local virtual folders; they only organize the sidebar and do not touch disk paths. */
 export function ProjectFolders({
@@ -13,14 +13,24 @@ export function ProjectFolders({
   onSelect,
   onCreate,
   onRename,
+  onDelete,
+  disabled = false,
+  projects = [],
+  allFolders = folders,
+  onSessionUpdate,
 }: {
   folders: ProjectFolder[];
   sessions: Session[];
+  projects?: Project[];
+  allFolders?: ProjectFolder[];
+  onSessionUpdate?: (sessionId: string, patch: SessionSidebarPatch) => Promise<void>;
   selectedSession: string;
   now: number;
   onSelect: (sessionId: string) => void;
   onCreate: (name: string, parentId: string | null) => Promise<ProjectFolder | void>;
   onRename: (id: string, name: string) => Promise<void>;
+  onDelete: (id: string) => Promise<void>;
+  disabled?: boolean;
 }) {
   const { t } = useI18n();
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set(folders.map((folder) => folder.id)));
@@ -29,9 +39,10 @@ export function ProjectFolders({
   const [renaming, setRenaming] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState('');
   const [saving, setSaving] = useState(false);
+  const [deletingFolderId, setDeletingFolderId] = useState<string | null>(null);
   const sessionsByFolder = useMemo(() => {
     const grouped = new Map<string | null, Session[]>();
-    for (const session of sessions) {
+    for (const session of sortSidebarSessions(sessions)) {
       const key = session.folderId ?? null;
       grouped.set(key, [...(grouped.get(key) || []), session]);
     }
@@ -87,6 +98,26 @@ export function ProjectFolders({
     }
   }
 
+  async function deleteFolder(folder: ProjectFolder, hasChildren: boolean, items: Session[]) {
+    if (
+      disabled ||
+      saving ||
+      deletingFolderId ||
+      hasChildren ||
+      items.some((session) => session.activeRunId) ||
+      !window.confirm(t('folders.deleteConfirm', { name: folder.name }))
+    )
+      return;
+    setDeletingFolderId(folder.id);
+    try {
+      await onDelete(folder.id);
+    } catch {
+      // The app displays backend errors beside the conversation.
+    } finally {
+      setDeletingFolderId(null);
+    }
+  }
+
   function renderCreate() {
     return (
       <form
@@ -129,6 +160,14 @@ export function ProjectFolders({
     const isOpen = expanded.has(folder.id);
     const children = childrenByFolder.get(folder.id) || [];
     const items = sessionsByFolder.get(folder.id) || [];
+    const hasChildren = children.length > 0;
+    const hasRunningSession = items.some((session) => session.activeRunId);
+    const deleteDisabled = disabled || saving || deletingFolderId !== null || hasChildren || hasRunningSession;
+    const deleteTitle = hasChildren
+      ? t('folders.deleteHasChildren')
+      : hasRunningSession
+        ? t('folders.deleteRunning')
+        : t('folders.deleteNamed', { name: folder.name });
     return (
       <div className="project-folder-node" key={folder.id}>
         <div className="project-folder-row">
@@ -197,6 +236,16 @@ export function ProjectFolders({
               <Pencil size={12} />
             </button>
           )}
+          <button
+            type="button"
+            className="icon-button project-folder-action danger"
+            aria-label={t('folders.deleteNamed', { name: folder.name })}
+            title={deleteTitle}
+            disabled={deleteDisabled}
+            onClick={() => void deleteFolder(folder, hasChildren, items)}
+          >
+            <Trash2 size={12} />
+          </button>
         </div>
         {isOpen && (
           <div className="project-folder-contents">
@@ -208,6 +257,10 @@ export function ProjectFolders({
                 selected={session.id === selectedSession}
                 now={now}
                 onSelect={() => onSelect(session.id)}
+                projects={projects}
+                folders={allFolders}
+                onUpdate={onSessionUpdate ? (patch) => onSessionUpdate(session.id, patch) : undefined}
+                disabled={disabled}
               />
             ))}
             {children.map((child) => renderFolder(child))}
@@ -244,6 +297,10 @@ export function ProjectFolders({
           selected={session.id === selectedSession}
           now={now}
           onSelect={() => onSelect(session.id)}
+          projects={projects}
+          folders={allFolders}
+          onUpdate={onSessionUpdate ? (patch) => onSessionUpdate(session.id, patch) : undefined}
+          disabled={disabled}
         />
       ))}
       {rootFolders.map((folder) => renderFolder(folder))}

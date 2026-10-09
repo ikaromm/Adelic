@@ -6,9 +6,10 @@
 // - The worktree lives in `<dataDir>/worktrees/<sessionId>`, outside the user's repository.
 // - Commands on the worktree use an explicit GIT_DIR (the admin folder found from the main
 //   repository), never the worktree's `.git` file, which the agent can rewrite.
-// - The main checkout is only read (status with GIT_OPTIONAL_LOCKS=0), except by `apply`:
-//   `git merge --no-ff` when it is clean and on a branch, and `git merge --abort` on conflict.
-//   Nothing is ever stashed, reset or checked out there.
+// - Conversation worktree `apply` merges only when the main checkout is clean and attached.
+//   Automatic executor integration instead applies a checked patch against the captured snapshot,
+//   retaining concurrent main-checkout changes and refusing overlapping hunks. Neither path
+//   stages, resets, stashes or checks out the user's main working tree.
 // - Hooks of every event, filters (clean/smudge/process) and custom merge drivers never run.
 import { lstat, mkdir, readFile, readdir, realpath, rm } from 'node:fs/promises';
 import { basename, dirname, join, resolve, sep } from 'node:path';
@@ -137,17 +138,98 @@ export function localizeStatus<T extends Partial<WorktreeStatus> & { reasons?: S
 type StatusReasons = { reason?: Translatable; applyBlocked?: Translatable };
 const pt = (reason: Translatable) => tr(undefined, reason.key, reason.vars);
 
+/** True when a Git metadata entry exists in this folder or an ancestor. */
+async function gitMetadataNearby(path: string): Promise<boolean | undefined> {
+  let current: string;
+  try {
+    current = await realpath(path);
+  } catch {
+    return undefined;
+  }
+  for (;;) {
+    try {
+      await lstat(join(current, '.git'));
+      return true;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') return undefined;
+    }
+    const parent = dirname(current);
+    if (parent === current) return false;
+    current = parent;
+  }
+}
+
 /** Main repository of a project, when the project folder is the root of a work tree with a commit. */
 export async function mainRepo(project: Project): Promise<{ repo?: Repo; reason?: Translatable }> {
   const repo = await openRepo(project.path, false);
   if (!repo) return { reason: why('worktrees.notRepo') };
   if (repo.root !== repo.top) return { reason: why('worktrees.notRoot') };
+
+  // Bind the path identity to Git's own canonical metadata before trusting the repository.
+  try {
+    const identity = (await git(repo.top, ['rev-parse', '--show-toplevel', '--absolute-git-dir'], { repo }))
+      .toString()
+      .trim()
+      .split(/\r?\n/);
+    if (identity.length !== 2 || !identity[0] || !identity[1]) return { reason: why('worktrees.notRepo') };
+    if ((await realpath(identity[0])) !== repo.top || (await realpath(identity[1])) !== (await realpath(repo.gitDir)))
+      return { reason: why('worktrees.notRepo') };
+  } catch {
+    return { reason: why('worktrees.notRepo') };
+  }
+
   try {
     await git(repo.top, ['rev-parse', '--verify', '-q', 'HEAD^{commit}'], { repo });
   } catch {
     return { reason: why('worktrees.noCommits') };
   }
   return { repo };
+}
+
+/**
+ * Automatic worktree isolation is available only for a verified Git root. Serial fallback is
+ * reserved for an existing folder with no Git metadata in its ancestry; damaged/inaccessible
+ * metadata, nested workspaces and unborn or malformed HEADs remain blocked.
+ */
+export async function executorIsolation(
+  project: Project,
+): Promise<{ mode: 'worktree' } | { mode: 'serial'; reason: string } | { mode: 'blocked'; reason: string }> {
+  const metadata = await gitMetadataNearby(project.path);
+  if (metadata === false)
+    return {
+      mode: 'serial',
+      reason: 'A pasta autorizada não contém metadados Git; execução serial direta, sem isolamento ou paralelismo.',
+    };
+  if (metadata === undefined)
+    return { mode: 'blocked', reason: 'Não foi possível verificar a pasta autorizada e seus metadados Git.' };
+
+  const { repo, reason } = await mainRepo(project);
+  if (!repo) {
+    if (reason?.key === 'worktrees.notRoot')
+      return { mode: 'blocked', reason: 'A pasta autorizada está dentro de outro repositório Git; selecione a raiz.' };
+    if (reason?.key === 'worktrees.noCommits')
+      return {
+        mode: 'blocked',
+        reason: 'HEAD ausente ou inválido; execução serial não será habilitada para um repositório Git.',
+      };
+    return { mode: 'blocked', reason: 'Metadados Git inválidos ou inacessíveis; execução bloqueada.' };
+  }
+  try {
+    const blocked = await mainBlocked(repo);
+    if (blocked.reason && blocked.reason.key !== 'worktrees.dirty')
+      return {
+        mode: 'blocked',
+        reason: 'A estrutura Git está em estado incompatível com isolamento automático.',
+      };
+    await assertSnapshotable(repo);
+  } catch {
+    return {
+      mode: 'blocked',
+      reason: 'O estado ou snapshot do repositório não pode ser verificado com segurança; execução bloqueada.',
+    };
+  }
+  return { mode: 'worktree' };
 }
 
 /** `adelic/<8 chars of the id>-<slug of the title>`. */
@@ -481,7 +563,144 @@ export async function worktreeMissing(worktree: SessionWorktree) {
   return !(await exists(join(worktree.path, '.git')));
 }
 
-/** `git worktree prune` in the project's repository: drops admin entries of missing folders. */
+/**
+ * Executor workspaces are based on a bounded snapshot of tracked and non-ignored untracked
+ * files. Ignored files, credentials excluded by Git and the user's index are never copied.
+ */
+async function assertSnapshotable(repo: Repo) {
+  const paths = nulSplit(
+    await git(repo.root, ['ls-files', '-z', '--full-name', '--cached', '--others', '--exclude-standard'], { repo }),
+  );
+  for (const path of paths) {
+    const info = await lstat(join(repo.top, path)).catch(() => undefined);
+    if (info?.isDirectory())
+      throw new CheckpointError(`snapshot de submódulo ou repositório aninhado não suportado: ${path}`, 422);
+    if (info && !info.isFile() && !info.isSymbolicLink())
+      throw new CheckpointError(`tipo de arquivo não suportado no snapshot: ${path}`, 422);
+  }
+}
+
+async function executorRepo(project: Project) {
+  const { repo, reason } = await mainRepo(project);
+  if (!repo) throw fail(why('worktrees.cannotCreate', { reason: pt(reason!) }));
+  const blocked = await mainBlocked(repo);
+  if (blocked.reason && blocked.reason.key !== 'worktrees.dirty') throw fail(blocked.reason);
+  return repo;
+}
+
+export async function executorWorktreesAvailable(project: Project) {
+  try {
+    await executorRepo(project);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function createExecutorWorktree(project: Project, task: { id: string; title: string }, dataDir: string) {
+  const repo = await executorRepo(project);
+  await assertSnapshotable(repo);
+  const snapshotTree = await writeSnapshotTree(repo);
+  const worktree = await createWorktree(project, { id: task.id, title: task.title } as Session, dataDir);
+  try {
+    const baseTree = (await git(repo.top, ['rev-parse', `${worktree.base}^{tree}`], { repo })).toString().trim();
+    const patch = await git(
+      repo.top,
+      ['diff-tree', '--no-commit-id', '-p', '-r', '--binary', '--no-renames', baseTree, snapshotTree],
+      {
+        repo,
+        config: await hardened(repo),
+      },
+    );
+    if (patch.length) {
+      const opened = await openWorktree(project, worktree);
+      if (!opened.tree) throw fail('worktrees.folderGoneDiscard', 409);
+      await git(opened.tree.top, ['apply', '--binary', '-'], {
+        repo: opened.tree,
+        input: patch,
+        config: await hardened(opened.tree),
+      });
+    }
+    return { ...worktree, snapshotTree };
+  } catch (error) {
+    await removeWorktree(project, worktree, dataDir);
+    throw error;
+  }
+}
+
+/** Changed files owned by an executor task, measured against its captured initial tree. */
+export async function inspectExecutorWorktree(project: Project, worktree: SessionWorktree): Promise<FileChange[]> {
+  const opened = await openWorktree(project, worktree);
+  if (!opened.tree) throw fail('worktrees.folderGoneDiscard', 409);
+  const baseline =
+    worktree.snapshotTree ??
+    (await git(opened.main.top, ['rev-parse', `${worktree.base}^{tree}`], { repo: opened.main })).toString().trim();
+  await assertSnapshotable(opened.tree);
+  // Match integration: retain captured paths even if task changes .gitignore, while never
+  // introducing ignored files that were absent from the task's initial snapshot.
+  const baselinePaths = nulSplit(
+    await git(opened.tree.top, ['ls-tree', '-r', '-z', '--name-only', baseline], { repo: opened.tree }),
+  );
+  const after = await writeSnapshotTree(opened.tree, { includePaths: baselinePaths });
+  return changedFiles(opened.tree, baseline, after);
+}
+
+/** Integrates only the executor's delta from its creation snapshot onto the current main tree. */
+export async function integrateExecutorWorktree(project: Project, worktree: SessionWorktree) {
+  const opened = await openWorktree(project, worktree);
+  if (!opened.tree) throw fail('worktrees.folderGoneDiscard', 409);
+  const blocked = await mainBlocked(opened.main);
+  if (blocked.reason && blocked.reason.key !== 'worktrees.dirty') throw fail(blocked.reason);
+  const baseline =
+    worktree.snapshotTree ??
+    (await git(opened.main.top, ['rev-parse', `${worktree.base}^{tree}`], { repo: opened.main })).toString().trim();
+  await assertSnapshotable(opened.tree);
+  // The baseline contains only tracked and eligible non-ignored files captured for this task.
+  // Keep those paths in the final tree even if the task's .gitignore now hides them; files
+  // deleted from disk remain absent, and files originally ignored were never in this list.
+  const baselinePaths = nulSplit(
+    await git(opened.tree.top, ['ls-tree', '-r', '-z', '--name-only', baseline], { repo: opened.tree }),
+  );
+  const after = await writeSnapshotTree(opened.tree, { includePaths: baselinePaths });
+  const patch = await git(
+    opened.tree.top,
+    ['diff-tree', '--no-commit-id', '-p', '-r', '--binary', '--no-renames', baseline, after],
+    {
+      repo: opened.tree,
+      config: await hardened(opened.tree),
+    },
+  );
+  if (!patch.length) return { changed: false, files: [] as string[] };
+  const changes = await changedFiles(opened.tree, baseline, after);
+  const names = changes.map((file) => file.path);
+  const config = await hardened(opened.main);
+  // First recognize an exact prior application. This must precede the added-file collision
+  // guard: an added path that now contains the patch's exact contents is recovery, not a clash.
+  // Reverse --check validates the whole patch (including created/deleted files) without writing.
+  const alreadyApplied = await git(opened.main.top, ['apply', '--binary', '--reverse', '--check', '-'], {
+    repo: opened.main,
+    input: patch,
+    config,
+  }).then(
+    () => true,
+    () => false,
+  );
+  if (alreadyApplied) return { changed: false, alreadyApplied: true, files: names };
+
+  // Never let an added task file replace a file that appeared in the main checkout after capture
+  // (notably an ignored secret, which Git's ordinary status does not report). A differing file
+  // cannot pass reverse --check above, so it remains a real collision.
+  const collisions: string[] = [];
+  for (const file of changes)
+    if (file.status === 'added' && (await exists(join(opened.main.top, file.path)))) collisions.push(file.path);
+  if (collisions.length) throw fail('worktrees.ignoredFiles', 409, collisions);
+
+  await git(opened.main.top, ['apply', '--binary', '--check', '-'], { repo: opened.main, input: patch, config });
+  await git(opened.main.top, ['apply', '--binary', '-'], { repo: opened.main, input: patch, config });
+  return { changed: true, alreadyApplied: false, files: names };
+}
+
+/** git worktree prune in the project's repository: drops admin entries of missing folders. */
 export async function pruneRepo(project: Project) {
   const main = await openRepo(project.path, false);
   if (!main) return;

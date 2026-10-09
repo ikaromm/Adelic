@@ -125,6 +125,7 @@ test('the conversation menu, the summary card and the setting fit a 360px screen
     .getByRole('navigation', { name: 'Navegação principal' })
     .getByRole('button', { name: 'Configurações' })
     .click();
+  await page.getByRole('button', { name: 'Avançado', exact: true }).click();
   const toggle = page.getByRole('switch', { name: 'Compactar automaticamente conversas longas' });
   await expect(toggle).toHaveAttribute('aria-checked', 'false');
   await toggle.click();

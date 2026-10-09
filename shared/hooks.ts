@@ -35,6 +35,8 @@ export type CheckStatus = 'running' | 'passed' | 'failed' | 'timeout' | 'cancell
 /** Result of one check, stored on its run event and returned by the test endpoint. */
 export interface CheckResult {
   name: string;
+  /** Configured command that was actually dispatched by the check runner. */
+  command?: string;
   status: CheckStatus;
   exitCode?: number | null;
   durationMs?: number;

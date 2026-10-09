@@ -72,7 +72,7 @@ export interface CheckRunOptions {
  */
 export async function runCheck(check: AfterEditCheck, cwd: string, options: CheckRunOptions): Promise<CheckResult> {
   const started = Date.now();
-  const base = { name: check.name };
+  const base = { name: check.name, command: check.command };
   if (options.signal.aborted) return { ...base, status: 'cancelled', detail: abortReason(options.signal) };
   let wrapped: Awaited<ReturnType<typeof bubblewrap>>;
   try {

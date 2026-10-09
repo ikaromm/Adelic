@@ -7,6 +7,7 @@ import {
   validatePreviewUrl,
   type TerminalCommand,
 } from '../../shared/terminal';
+import type { Sandbox } from '../../shared/contracts';
 import { useI18n, type I18n } from '../i18n';
 import { useStickToBottom } from '../hooks/useStickToBottom';
 import { useTerminal } from '../hooks/useTerminal';
@@ -43,12 +44,18 @@ const statusClass = (command: TerminalCommand) =>
 export function ToolsPanel({
   projectId,
   projectName,
+  projectPath,
+  remote,
+  sandbox,
   tab,
   onTab,
   onClose,
 }: {
   projectId: string;
   projectName: string;
+  projectPath: string;
+  remote: boolean;
+  sandbox: Sandbox;
   tab: ToolsTab;
   onTab: (tab: ToolsTab) => void;
   onClose: () => void;
@@ -93,6 +100,13 @@ export function ToolsPanel({
           <X size={16} />
         </button>
       </div>
+      <div className="tools-panel-scope" title={projectPath}>
+        <strong>{projectName}</strong>
+        <span className={`tools-scope-kind ${remote ? 'remote' : 'local'}`}>
+          {t(remote ? 'tools.scope.ssh' : 'tools.scope.local')}
+        </span>
+        <code>{projectPath}</code>
+      </div>
       <div
         role="tabpanel"
         id="tools-terminal"
@@ -103,6 +117,8 @@ export function ToolsPanel({
         <TerminalTab
           projectId={projectId}
           terminal={terminal}
+          remote={remote}
+          sandbox={sandbox}
           onPreview={(url) => {
             setPreview(url);
             onTab('preview');
@@ -116,7 +132,12 @@ export function ToolsPanel({
         className="tools-tabpanel"
         hidden={tab !== 'preview'}
       >
-        <PreviewTab url={preview} onUrl={setPreview} remote={terminal.state?.remote === true} />
+        <PreviewTab
+          url={preview}
+          onUrl={setPreview}
+          remoteClient={terminal.state?.remote === true}
+          remoteProject={remote}
+        />
       </div>
     </aside>
   );
@@ -125,10 +146,14 @@ export function ToolsPanel({
 function TerminalTab({
   projectId,
   terminal,
+  remote,
+  sandbox,
   onPreview,
 }: {
   projectId: string;
   terminal: ReturnType<typeof useTerminal>;
+  remote: boolean;
+  sandbox: Sandbox;
   onPreview: (url: string) => void;
 }) {
   const { t, tRich } = useI18n();
@@ -149,6 +174,8 @@ function TerminalTab({
   }, [projectId]);
   const running = commands.filter((item) => item.status === 'running').length;
   const full = state ? running >= state.maxRunning : false;
+  const remoteReadOnly = remote && sandbox === 'read-only';
+  const canRun = Boolean(state?.enabled) && !remoteReadOnly;
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     const text = command.trim();
@@ -186,9 +213,11 @@ function TerminalTab({
     <div className="terminal-tab">
       <p className="tools-note">
         {tRich(
-          !state
-            ? 'tools.terminal.note'
-            : state.sandbox === 'workspace-write'
+          remote
+            ? remoteReadOnly
+              ? 'tools.terminal.remoteReadOnly'
+              : 'tools.terminal.remoteWrite'
+            : sandbox === 'workspace-write'
               ? 'tools.terminal.noteWrite'
               : 'tools.terminal.noteRead',
           { yes: <code>--yes</code>, ci: <code>CI=1</code> },
@@ -229,7 +258,7 @@ function TerminalTab({
           autoComplete="off"
           autoCapitalize="off"
           spellCheck={false}
-          disabled={state?.enabled === false}
+          disabled={!canRun}
           onChange={(event) => {
             setCommand(event.target.value);
             setCursor(null);
@@ -242,7 +271,7 @@ function TerminalTab({
             aria-label={t('tools.terminal.timeout')}
             value={timeoutMin}
             onChange={(event) => setTimeoutMin(Number(event.target.value))}
-            disabled={state?.enabled === false}
+            disabled={!canRun}
           >
             {TIMEOUTS.map((minutes) => (
               <option key={minutes} value={minutes}>
@@ -253,7 +282,7 @@ function TerminalTab({
         </label>
         <button
           className="primary-button"
-          disabled={!command.trim() || sending || full || !state?.enabled}
+          disabled={!command.trim() || sending || full || !canRun}
           title={full ? t('tools.terminal.full', { max: state?.maxRunning ?? 0 }) : t('tools.terminal.runTitle')}
         >
           <Play size={14} /> {t('tools.terminal.run')}
@@ -315,7 +344,17 @@ function TerminalEntry({
   );
 }
 
-function PreviewTab({ url, onUrl, remote }: { url: string; onUrl: (url: string) => void; remote: boolean }) {
+function PreviewTab({
+  url,
+  onUrl,
+  remoteClient,
+  remoteProject,
+}: {
+  url: string;
+  onUrl: (url: string) => void;
+  remoteClient: boolean;
+  remoteProject: boolean;
+}) {
   const { t, tRich } = useI18n();
   const [input, setInput] = useState(url);
   const [error, setError] = useState('');
@@ -357,7 +396,7 @@ function PreviewTab({ url, onUrl, remote }: { url: string; onUrl: (url: string) 
           {error}
         </p>
       )}
-      {remote && <p className="tools-note warning">{t('tools.preview.remote')}</p>}
+      {(remoteClient || remoteProject) && <p className="tools-note warning">{t('tools.preview.remote')}</p>}
       {current?.ok && (
         <>
           <div className="preview-actions">

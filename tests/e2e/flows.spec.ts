@@ -74,6 +74,7 @@ test('navigates to Observability and Settings and shows the scripted provider', 
   await nav.getByRole('button', { name: 'Observabilidade' }).click();
   await expect(page.getByRole('heading', { name: 'Observabilidade', level: 1 })).toBeVisible();
   await nav.getByRole('button', { name: 'Configurações' }).click();
+  await page.getByRole('button', { name: 'Avançado', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Configurações', level: 1 })).toBeVisible();
   await expect(page.locator('.provider-row', { hasText: 'Codex (E2E)' })).toContainText(
     'Provedor simulado para testes E2E',
@@ -114,6 +115,7 @@ test('generates a diagnostics report in Settings without conversation content', 
     .getByRole('navigation', { name: 'Navegação principal' })
     .getByRole('button', { name: 'Configurações' })
     .click();
+  await page.getByRole('button', { name: 'Avançado', exact: true }).click();
   await page.getByRole('button', { name: 'Gerar diagnóstico' }).click();
   const card = page.getByRole('region', { name: 'Diagnóstico' });
   await expect(card.getByText('Esquema da base')).toBeVisible();
@@ -162,6 +164,7 @@ test('update check is off by default, and when enabled shows a newer release wit
   await expect(page.locator('.update-notice')).toHaveCount(0);
   const nav = page.getByRole('navigation', { name: 'Navegação principal' });
   await nav.getByRole('button', { name: 'Configurações' }).click();
+  await page.getByRole('button', { name: 'Avançado', exact: true }).click();
   const toggle = page.getByRole('switch', { name: 'Verificar novas versões' });
   await expect(toggle).toHaveAttribute('aria-checked', 'false');
   await toggle.click();
@@ -173,6 +176,42 @@ test('update check is off by default, and when enabled shows a newer release wit
   await expect(page.getByRole('status').filter({ hasText: 'Nova versão 99.0.0' })).toBeVisible();
   await toggle.click();
   await expect(notice).toHaveCount(0);
+});
+
+test('keeps search focused when a new conversation finishes loading', async ({ page }) => {
+  await page.goto('/');
+  await expect(page.getByRole('heading', { name: 'O que vamos construir hoje?' })).toBeVisible();
+
+  let releaseCreate!: () => void;
+  const createGate = new Promise<void>((resolve) => {
+    releaseCreate = resolve;
+  });
+  let createHeld = false;
+  await page.route('**/api/sessions', async (route) => {
+    if (!createHeld && route.request().method() === 'POST') {
+      createHeld = true;
+      await createGate;
+    }
+    await route.continue();
+  });
+
+  await page.getByRole('button', { name: 'Nova conversa' }).first().click();
+  await expect.poll(() => createHeld).toBe(true);
+  await page.keyboard.press('Control+Shift+F');
+  const search = page.getByRole('dialog', { name: 'Buscar nas conversas' });
+  const box = search.getByRole('textbox', { name: 'Buscar nas conversas' });
+  await expect(box).toBeFocused();
+  await box.fill('girassol');
+  releaseCreate();
+
+  await expect(page.getByRole('textbox', { name: 'Mensagem para o agente' })).toBeVisible();
+  await expect(box).toHaveValue('girassol');
+  await expect(box).toBeFocused();
+  const composer = page.getByRole('textbox', { name: 'Mensagem para o agente' });
+  await expect(composer).toHaveValue('');
+  await page.keyboard.press('Escape');
+  await expect(search).toBeHidden();
+  await expect(composer).toBeFocused();
 });
 
 test('searches every conversation and opens the match; exports the open one as Markdown', async ({ page }) => {
@@ -253,7 +292,10 @@ test('delegates in a project and loads a task output on demand', async ({ page }
   const activity = page.getByRole('region', { name: 'Atividade desta execução' }).last();
   await expect(activity).toContainText(/tarefa/, { timeout: 15_000 });
   await activity.locator('summary').first().click();
-  const load = activity.getByRole('button', { name: 'Carregar saída completa' }).first();
+  const load = activity.getByRole('button', {
+    name: /^Carregar saída da tarefa: Inspecionar projeto \([^)]+\)$/,
+  });
+  await expect(load).toHaveCount(1);
   await load.click();
   await expect(load).toBeHidden();
   // The output was fetched from /api/tasks/:id (it is not part of the session detail).

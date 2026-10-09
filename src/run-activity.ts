@@ -1,3 +1,4 @@
+import type { CheckResult } from '../shared/hooks';
 import type { DelegatedTask, FileChange, RunEvent, RunStatus } from '../shared/contracts';
 import { t } from './i18n';
 
@@ -80,6 +81,22 @@ export function activityIsVisible(activity: RunActivity): boolean {
     activity.fallbacks.length > 0 ||
     activity.blocked.length > 0
   );
+}
+
+/** Phase groups preserve input order within a phase and never infer tool ownership. */
+export function taskPhases(tasks: DelegatedTask[]): { phase: DelegatedTask['role']; tasks: DelegatedTask[] }[] {
+  const order: DelegatedTask['role'][] = ['planner', 'worker', 'reviewer', 'synthesis'];
+  const groups = new Map<DelegatedTask['role'], DelegatedTask[]>();
+  for (const task of tasks) groups.set(task.role, [...(groups.get(task.role) || []), task]);
+  return order.filter((phase) => groups.has(phase)).map((phase) => ({ phase, tasks: groups.get(phase)! }));
+}
+
+export type TaskOutcome = 'running' | 'queued' | 'completed' | 'partial' | 'blocked' | 'failed' | 'cancelled';
+export function taskOutcome(status: string): TaskOutcome {
+  if (status === 'running' || status === 'queued' || status === 'completed' || status === 'cancelled') return status;
+  if (status === 'partial') return 'partial';
+  if (status === 'blocked' || status === 'conflict') return 'blocked';
+  return 'failed';
 }
 
 export function commandTitle(toolName?: string): string {
@@ -181,4 +198,19 @@ export function checksSummary(checks: RunEvent[]): string {
   return failed
     ? t('activity.checksFailed', { checks: total, count: failed })
     : t('activity.checksOk', { checks: total });
+}
+
+/** Collapse updates by check event identity; equal names can belong to separate dispatches. */
+export function deliveryChecks(events: RunEvent[]): CheckResult[] {
+  const results: CheckResult[] = [];
+  const indexes = new Map<string, number>();
+  for (const event of events) {
+    if (!event.check) continue;
+    const index = indexes.get(event.id);
+    if (index === undefined) {
+      indexes.set(event.id, results.length);
+      results.push(event.check);
+    } else results[index] = { ...results[index], ...event.check };
+  }
+  return results;
 }

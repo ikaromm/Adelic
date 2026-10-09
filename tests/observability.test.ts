@@ -76,7 +76,13 @@ describe('observability store and API', () => {
     expect(data.runs).toHaveLength(20);
     expect(data.overview.totals.runs).toBe(135);
     expect(data.overview.durationMs).toEqual({ p50: 500, p95: 500 });
-    expect(data.overview.usage).toEqual({ inputTokens: 1350, outputTokens: 2700, costUsd: null });
+    expect(data.overview.usage).toEqual({
+      inputTokens: 1350,
+      outputTokens: 2700,
+      costUsd: null,
+      cachedInputTokens: null,
+      reasoningOutputTokens: null,
+    });
   });
 
   it('filters component and status, and the trace contains metadata without prompt or error text', async () => {
@@ -133,7 +139,13 @@ describe('observability store and API', () => {
     const origin = await base(server);
     const data = await (await fetch(`${origin}/api/observability`)).json();
     expect(data.runs[0].usage).toBeNull();
-    expect(data.overview.usage).toEqual({ inputTokens: null, outputTokens: null, costUsd: null });
+    expect(data.overview.usage).toEqual({
+      inputTokens: null,
+      outputTokens: null,
+      costUsd: null,
+      cachedInputTokens: null,
+      reasoningOutputTokens: null,
+    });
     expect((await fetch(`${origin}/api/observability?since=not-a-date`)).status).toBe(400);
     const clientEvent = await fetch(`${origin}/api/observability/client-events`, {
       method: 'POST',
@@ -172,11 +184,52 @@ describe('observability store and API', () => {
 
   it('keeps partial usage totals unknown rather than displaying a reported subtotal as complete', async () => {
     const { store, server } = setup();
-    store.upsertObservabilityRun(run(1, { usage: { inputTokens: 10, outputTokens: 20, costUsd: 1 } }));
-    store.upsertObservabilityRun(run(2, { usage: { inputTokens: 30, outputTokens: null, costUsd: null } }));
+    store.upsertObservabilityRun(
+      run(1, {
+        usage: { inputTokens: 10, outputTokens: 20, costUsd: 1, cachedInputTokens: 5, reasoningOutputTokens: 2 },
+      }),
+    );
+    store.upsertObservabilityRun(
+      run(2, {
+        usage: {
+          inputTokens: 30,
+          outputTokens: null,
+          costUsd: null,
+          cachedInputTokens: null,
+          reasoningOutputTokens: null,
+        },
+      }),
+    );
     const data = await (await fetch(`${await base(server)}/api/observability`)).json();
-    expect(data.overview.usage).toEqual({ inputTokens: 40, outputTokens: null, costUsd: null });
+    expect(data.overview.usage).toEqual({
+      inputTokens: 40,
+      outputTokens: null,
+      costUsd: null,
+      cachedInputTokens: null,
+      reasoningOutputTokens: null,
+    });
     expect(data.runs.find((row: { runId: string }) => row.runId === 'run-1').usage.costUsd).toBe(1);
+    expect(data.runs.find((row: { runId: string }) => row.runId === 'run-1').usage).toMatchObject({
+      cachedInputTokens: 5,
+      reasoningOutputTokens: 2,
+    });
+  });
+
+  it('aggregates known cache and reasoning counts while keeping legacy rows unknown', async () => {
+    const { store, server } = setup();
+    store.upsertObservabilityRun(
+      run(1, {
+        usage: { inputTokens: 100, outputTokens: 20, costUsd: null, cachedInputTokens: 40, reasoningOutputTokens: 8 },
+      }),
+    );
+    const data = await (await fetch(`${await base(server)}/api/observability`)).json();
+    expect(data.overview.usage).toMatchObject({
+      inputTokens: 100,
+      outputTokens: 20,
+      cachedInputTokens: 40,
+      reasoningOutputTokens: 8,
+    });
+    expect(data.runs[0].usage).toMatchObject({ cachedInputTokens: 40, reasoningOutputTokens: 8 });
   });
 
   it('uses nearest-rank percentiles for a small sample', async () => {

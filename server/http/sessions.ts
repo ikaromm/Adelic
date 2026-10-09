@@ -241,6 +241,8 @@ export function sessionsRoutes({ store, orchestrator, providerList }: BackendCon
     };
     if (folderId) next.folderId = folderId;
     else delete next.folderId;
+    if (body.pinned === true) next.pinnedAt = snapshot.pinnedAt ?? new Date().toISOString();
+    else if (body.pinned === false) delete next.pinnedAt;
     if (body.archived === true) next.archivedAt = snapshot.archivedAt ?? new Date().toISOString();
     else if (body.archived === false) delete next.archivedAt;
     if (body.approvalMode === null) delete next.approvalMode;

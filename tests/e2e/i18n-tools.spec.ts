@@ -148,6 +148,7 @@ test('terminal and preview in English', async ({ page, request }) => {
 test('project orchestration and code map in English', async ({ page, request }) => {
   const name = await openProject(page, request, 'Tools en');
   await page.getByRole('navigation', { name: 'Main navigation' }).getByRole('button', { name: 'Settings' }).click();
+  await page.getByRole('button', { name: 'Advanced', exact: true }).click();
   const orchestration = page.locator('.project-orchestration-card');
   await expect(orchestration.getByRole('heading', { name: 'Project orchestration' })).toBeVisible();
   await expect(orchestration).toContainText(`${name} · changes apply from the next turn.`);

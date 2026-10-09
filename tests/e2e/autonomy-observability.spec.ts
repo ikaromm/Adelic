@@ -1,82 +1,138 @@
 import { expect, test } from './fixtures';
 
-test('conversation autonomy is explicit, saved, and can inherit again', async ({ page, request }) => {
+test('conversation approval is explicit, saved, and can inherit again', async ({ page, request }) => {
+  const before = await (await request.get('/api/bootstrap')).json();
+  const existingIds = new Set<string>(before.sessions.map((item: { id: string }) => item.id));
   await page.goto('/');
   await page
     .getByRole('button', { name: /^Nova conversa/ })
     .first()
     .click();
 
-  const autonomy = page.getByRole('button', { name: /^Autonomia:/ });
-  await expect(autonomy).toBeVisible();
-  await autonomy.click();
-  const dialog = page.getByRole('dialog', { name: 'Autonomia' });
-  await dialog.locator('.choice-option').nth(3).click();
-  await expect(page.getByRole('button', { name: 'Autonomia: Automático' })).toBeVisible();
-  const bootstrap = await (await request.get('/api/bootstrap')).json();
-  expect(bootstrap.sessions.some((session: { approvalMode?: string }) => session.approvalMode === 'automatic')).toBe(
-    true,
+  const access = page.getByRole('button', { name: /^Acesso: / });
+  await expect(access).toBeVisible();
+  await access.click();
+  const dialog = page.getByRole('dialog', { name: 'Acesso' });
+  const automatic = dialog.getByRole('button', { name: /^Automático(?! seguro)/ });
+  await expect(automatic).toBeEnabled();
+  await automatic.click();
+  await page.getByRole('button', { name: /^Acesso: / }).click();
+  await expect(page.getByRole('dialog', { name: 'Acesso' })).toContainText(
+    'Atual: Automático · Substituição salva nesta conversa.',
   );
-  await page.getByRole('button', { name: 'Autonomia: Automático' }).click();
-  await page
-    .getByRole('dialog', { name: 'Autonomia' })
-    .getByRole('button', { name: /Herdar configuração/ })
-    .click();
-  await expect(page.getByRole('button', { name: /Autonomia: Herdar configuração/ })).toBeVisible();
+  await page.keyboard.press('Escape');
+
+  await expect
+    .poll(async () => {
+      const state = await (await request.get('/api/bootstrap')).json();
+      return state.sessions.find((item: { id: string }) => !existingIds.has(item.id))?.approvalMode;
+    })
+    .toBe('automatic');
+  const afterAutomatic = await (await request.get('/api/bootstrap')).json();
+  const created = afterAutomatic.sessions.find((item: { id: string }) => !existingIds.has(item.id));
+  expect(created?.approvalMode).toBe('automatic');
+  expect(afterAutomatic.settings.approvalMode).toBe(before.settings.approvalMode);
+
+  await page.getByRole('button', { name: /^Acesso: / }).click();
+  const inherit = page.getByRole('dialog', { name: 'Acesso' }).getByRole('button', {
+    name: /Usar configuração herdada/,
+  });
+  await expect(inherit).toHaveAttribute('aria-pressed', 'false');
+  await inherit.click();
+  await expect
+    .poll(async () => {
+      const state = await (await request.get('/api/bootstrap')).json();
+      return state.sessions.find((item: { id: string }) => item.id === created.id)?.approvalMode;
+    })
+    .toBeFalsy();
+  await page.getByRole('button', { name: /^Acesso: / }).click();
+  await expect(
+    page.getByRole('dialog', { name: 'Acesso' }).getByRole('button', { name: /Usar configuração herdada/ }),
+  ).toHaveAttribute('aria-pressed', 'true');
 });
 
-test('Automatic permission labels preserve scoped approval when sandbox changes', async ({ page, request }) => {
+test('sandbox stays global while approval stays scoped to the conversation', async ({ page, request }) => {
   const before = await (await request.get('/api/bootstrap')).json();
+  const existingIds = new Set<string>(before.sessions.map((item: { id: string }) => item.id));
   try {
     await page.goto('/');
     await page.locator('.new-chat-button').click();
 
-    await page.getByRole('button', { name: /^Autonomia:/ }).click();
-    await page.getByRole('dialog', { name: 'Autonomia' }).locator('.choice-option').nth(3).click();
-    await expect(page.getByRole('button', { name: 'Autonomia: Automático' })).toBeVisible();
+    const access = page.getByRole('button', { name: /^Acesso: / });
+    await access.click();
+    const menu = page.getByRole('dialog', { name: 'Acesso' });
+    await menu.getByRole('button', { name: /^Automático(?! seguro)/ }).click();
 
-    const currentSandboxLabel = before.settings.sandbox === 'workspace-write' ? 'Escrita' : 'Leitura';
+    await expect
+      .poll(async () => {
+        const state = await (await request.get('/api/bootstrap')).json();
+        return state.sessions.find((item: { id: string }) => !existingIds.has(item.id))?.approvalMode;
+      })
+      .toBe('automatic');
+    const afterOverride = await (await request.get('/api/bootstrap')).json();
+    const overrideSession = afterOverride.sessions.find((item: { id: string }) => !existingIds.has(item.id));
+    expect(overrideSession?.approvalMode).toBe('automatic');
+
     const nextSandbox = before.settings.sandbox === 'read-only' ? 'workspace-write' : 'read-only';
-    const sandboxLabel = nextSandbox === 'workspace-write' ? 'Escrita' : 'Leitura';
-    const currentAutomaticPermissions = page.getByRole('button', {
-      name: `Permissões: ${currentSandboxLabel} · Automático`,
-    });
-    await expect(currentAutomaticPermissions).toBeVisible();
-    await currentAutomaticPermissions.click();
-    await page
-      .getByRole('dialog', { name: 'Permissões' })
-      .getByRole('button', { name: `${sandboxLabel} · Automático` })
+    await page.getByRole('button', { name: /^Acesso: / }).click();
+    const accessMenu = page.getByRole('dialog', { name: 'Acesso' });
+    await accessMenu
+      .getByRole('button', {
+        name: new RegExp(nextSandbox === 'workspace-write' ? '^Escrita no projeto' : '^Somente leitura'),
+      })
       .click();
+    await expect
+      .poll(async () => (await (await request.get('/api/bootstrap')).json()).settings.sandbox)
+      .toBe(nextSandbox);
     const afterSandbox = await (await request.get('/api/bootstrap')).json();
-    expect(afterSandbox.settings.sandbox).toBe(nextSandbox);
     expect(afterSandbox.settings.approvalMode).toBe(before.settings.approvalMode);
-    const automaticSession = afterSandbox.sessions.find(
-      (item: { approvalMode?: string }) => item.approvalMode === 'automatic',
+    expect(afterSandbox.sessions.find((item: { id: string }) => item.id === overrideSession.id)?.approvalMode).toBe(
+      'automatic',
     );
-    expect(automaticSession).toBeTruthy();
-    const automaticPermissions = page.getByRole('button', {
-      name: `Permissões: ${sandboxLabel} · Automático`,
-    });
-    await expect(automaticPermissions).toBeVisible();
+    await expect(page.getByRole('button', { name: /^Acesso: / })).toHaveAccessibleName(
+      `Acesso: ${nextSandbox === 'workspace-write' ? 'Escrita no projeto' : 'Somente leitura'}`,
+    );
 
-    await automaticPermissions.click();
+    await page.getByRole('button', { name: /^Acesso: / }).click();
     await page
-      .getByRole('dialog', { name: 'Permissões' })
-      .getByRole('button', { name: new RegExp(`${sandboxLabel} · Manual`) })
+      .getByRole('dialog', { name: 'Acesso' })
+      .getByRole('button', { name: /^Manual/ })
       .click();
-    await expect(page.getByRole('button', { name: `Permissões: ${sandboxLabel} · Manual` })).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Autonomia: Manual' })).toBeVisible();
+    await expect
+      .poll(async () => {
+        const state = await (await request.get('/api/bootstrap')).json();
+        return state.sessions.find((item: { id: string }) => item.id === overrideSession.id)?.approvalMode;
+      })
+      .toBe('manual');
     const afterManual = await (await request.get('/api/bootstrap')).json();
     expect(afterManual.settings.approvalMode).toBe(before.settings.approvalMode);
-    expect(afterManual.sessions.find((item: { id: string }) => item.id === automaticSession.id).approvalMode).toBe(
+    expect(afterManual.settings.sandbox).toBe(nextSandbox);
+    expect(afterManual.sessions.find((item: { id: string }) => item.id === overrideSession.id).approvalMode).toBe(
       'manual',
     );
+
+    await page.getByRole('button', { name: /^Acesso: / }).click();
+    await page
+      .getByRole('dialog', { name: 'Acesso' })
+      .getByRole('button', { name: /Usar configuração herdada/ })
+      .click();
+    await expect
+      .poll(async () => {
+        const state = await (await request.get('/api/bootstrap')).json();
+        return state.sessions.find((item: { id: string }) => item.id === overrideSession.id)?.approvalMode;
+      })
+      .toBeFalsy();
+    const afterInherit = await (await request.get('/api/bootstrap')).json();
+    expect(
+      afterInherit.sessions.find((item: { id: string }) => item.id === overrideSession.id)?.approvalMode,
+    ).toBeFalsy();
+    expect(afterInherit.settings.sandbox).toBe(nextSandbox);
   } finally {
     await request.patch('/api/settings', { data: { sandbox: before.settings.sandbox } });
   }
 });
 
-test('autonomy selector translates in English', async ({ page, request }) => {
+test('access menu translates in English', async ({ page, request }) => {
   await request.patch('/api/settings', { data: { language: 'en' } });
   try {
     await page.goto('/');
@@ -84,12 +140,13 @@ test('autonomy selector translates in English', async ({ page, request }) => {
       .getByRole('button', { name: /^New conversation/ })
       .first()
       .click();
-    const autonomy = page.getByRole('button', { name: /^Autonomy:/ });
-    await expect(autonomy).toBeVisible();
-    await autonomy.click();
-    const dialog = page.getByRole('dialog', { name: 'Autonomy' });
+    const access = page.getByRole('button', { name: /^Access: / });
+    await expect(access).toBeVisible();
+    await access.click();
+    const dialog = page.getByRole('dialog', { name: 'Access' });
     await expect(dialog.getByText('Automatic', { exact: true })).toBeVisible();
     await expect(dialog.getByText('Safe automatic', { exact: true })).toBeVisible();
+    await expect(dialog.getByText('Use inherited setting', { exact: true })).toBeVisible();
   } finally {
     await request.patch('/api/settings', { data: { language: 'auto' } });
   }
@@ -121,12 +178,15 @@ test('Automatic is unavailable for Claude even if its catalog advertises tools',
   await expect(modelPicker).toBeVisible();
   await modelPicker.click();
   await page.getByRole('list', { name: 'Provedores' }).getByRole('button', { name: 'Claude (E2E)' }).click();
-  await page.getByRole('option', { name: /Modelo padrão/ }).click();
+  await page
+    .getByRole('dialog', { name: 'Escolher modelo e provedor', exact: true })
+    .getByRole('button', { name: /^Modelo padrão/ })
+    .click();
   await expect(page.getByRole('button', { name: /Claude \(E2E\)/ })).toBeVisible();
-  await page.getByRole('button', { name: /^Autonomia:/ }).click();
-  const dialog = page.getByRole('dialog', { name: 'Autonomia' });
-  await expect(dialog.locator('.choice-option').nth(3)).toBeDisabled();
-  await expect(dialog).toContainText('Indisponível neste runtime');
+  await page.getByRole('button', { name: /^Acesso: / }).click();
+  const dialog = page.getByRole('dialog', { name: 'Acesso' });
+  await expect(dialog.getByRole('button', { name: /^Automático(?! seguro)/ })).toHaveCount(0);
+  await expect(dialog).toContainText('Atual:');
 });
 
 test('new conversation stays disabled until a delayed bootstrap is ready', async ({ page }) => {
@@ -221,7 +281,7 @@ test('observability expands a run timeline without exposing conversation prompts
   await expect(page.locator('.page-content')).not.toContainText(secretPrompt);
 });
 
-test('observability filters and autonomy selector fit a 390px viewport', async ({ page }) => {
+test('observability filters and access menu fit a 390px viewport', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto('/');
   const checkNoHorizontalOverflow = async () => {
@@ -244,12 +304,13 @@ test('observability filters and autonomy selector fit a 390px viewport', async (
     .getByRole('button', { name: /^Nova conversa/ })
     .first()
     .click();
-  const autonomy = page.getByRole('button', { name: /^Autonomia:/ });
-  await autonomy.click();
-  const dialog = page.getByRole('dialog', { name: 'Autonomia' });
-  await expect(dialog.locator('.choice-option').nth(1)).toContainText('Automático seguro');
-  await expect(dialog.locator('.choice-option').nth(2)).toContainText('Manual');
-  await expect(dialog.locator('.choice-option').nth(3)).toContainText('Automático');
+  const access = page.getByRole('button', { name: /^Acesso: / });
+  await access.click();
+  const dialog = page.getByRole('dialog', { name: 'Acesso' });
+  await expect(dialog.getByRole('button', { name: /Usar configuração herdada/ })).toBeVisible();
+  await expect(dialog.getByRole('button', { name: /^Automático seguro/ })).toBeVisible();
+  await expect(dialog.getByRole('button', { name: /^Manual/ })).toBeVisible();
+  await expect(dialog.getByRole('button', { name: /^Automático(?! seguro)/ })).toBeVisible();
   const box = await dialog.boundingBox();
   expect(box).not.toBeNull();
   expect(box!.x).toBeGreaterThanOrEqual(0);

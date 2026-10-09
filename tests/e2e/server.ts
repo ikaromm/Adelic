@@ -46,6 +46,7 @@ import { startFakeMemory } from './fake-memory.js';
 import { tagListener } from '../../server/http/auth.js';
 import { FunnelService, type TailscaleRunner } from '../../server/funnel.js';
 import { createFakeUpdater } from './fake-updater.js';
+import { installRecoveryFixture } from './task-recovery-fixture.js';
 
 const port = Number(process.env.E2E_PORT || 4399);
 // Optional simulated ai-memory (E2E_MEMORY_PORT); otherwise ADELIC_MEMORY_URL points nowhere.
@@ -383,6 +384,7 @@ const { app, orchestrator } = createBackend(
     : {},
   updater.service,
 );
+installRecoveryFixture(app, store, dataDir);
 app.post('/e2e/update/reset', (_req, res) => res.json(updater.reset()));
 // Test isolation (tests/e2e/fixtures.ts calls it before each test): cancels runs an earlier test
 // left going (a [lento] answer, a held plan task) and clears the update lock, so one failure

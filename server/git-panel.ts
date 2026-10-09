@@ -13,6 +13,7 @@ import { join, resolve, sep } from 'node:path';
 import type { GitCommitInfo, GitFileEntry, GitStatus, Project } from '../shared/contracts.js';
 import {
   CheckpointError,
+  classifyGitRepo,
   HARDENED_BASE,
   HARDENED_CONFIG,
   LIMITS,
@@ -41,7 +42,7 @@ export async function projectRepo(project: Pick<Project, 'path'>): Promise<Repo>
 }
 
 export async function isGitRepo(project: Pick<Project, 'path'>) {
-  return Boolean(await openRepo(project.path, false));
+  return (await classifyGitRepo(project.path)).status === 'available';
 }
 
 /**

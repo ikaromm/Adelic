@@ -6,8 +6,11 @@ export const REMOTE_RUNNER_SOURCE = String.raw`#!/usr/bin/env python3
 import json
 import os
 import platform
+import fcntl
+import hashlib
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -17,15 +20,19 @@ from pathlib import Path
 
 MAX_FRAME = 1024 * 1024
 MAX_TEXT = 128 * 1024
+MAX_EDIT_FILE = 32 * 1024 * 1024
+MAX_READ_CHUNK = 48 * 1024
 MAX_OUTPUT = 256 * 1024
+read_progress = {}
 MAX_TIMEOUT = 300000
-TOOLS = {"exec", "read_file", "write_file", "list", "stat", "search", "git"}
+TOOLS = {"exec", "read_file", "write_file", "replace_text", "list", "stat", "search", "git", "diagnose"}
 GIT_READ_COMMANDS = {"status", "diff", "log"}
 lock = threading.RLock()
 running = {}
 last_heartbeat = time.monotonic()
 stopping = threading.Event()
 write_lock = threading.Lock()
+edit_lock = threading.Lock()
 
 def send(value):
     data = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8") + b"\n"
@@ -61,15 +68,55 @@ def cwd_for(args):
     return path
 
 def read_file(args):
-    validate_keys(args, ("path",), ("path",))
+    validate_keys(args, ("path", "offset", "limit", "revision"), ("path",))
     path = within_root(args.get("path"))
     if not path.is_file():
         raise ValueError("file does not exist")
+    offset = args.get("offset", 0)
+    limit = args.get("limit", MAX_READ_CHUNK)
+    if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+        raise ValueError("offset must be a non-negative integer")
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1 or limit > MAX_READ_CHUNK:
+        raise ValueError("read limit must be between 1 and 49152 bytes")
+    supplied_revision = args.get("revision")
+    if supplied_revision is not None and (not isinstance(supplied_revision, str) or len(supplied_revision) > 256):
+        raise ValueError("revision must be a short string")
+    before = path.stat()
+    if offset > before.st_size:
+        raise ValueError("offset exceeds file size")
     with path.open("rb") as stream:
-        data = stream.read(MAX_TEXT + 1)
-    if len(data) > MAX_TEXT:
-        raise ValueError("file exceeds read limit")
-    return {"path": str(path), "content": data.decode("utf-8")}
+        stream.seek(offset)
+        data = stream.read(min(limit + 4, before.st_size - offset))
+    data = data[:limit]
+    # Return only complete UTF-8 characters; nextOffset is therefore safe to resume.
+    try:
+        content = data.decode("utf-8")
+    except UnicodeDecodeError as error:
+        if error.reason == "unexpected end of data" and error.end == len(data):
+            data = data[:error.start]
+            content = data.decode("utf-8")
+        elif offset > 0 and error.start == 0 and error.reason == "invalid start byte":
+            raise ValueError("offset is not a UTF-8 boundary")
+        else:
+            raise ValueError("file is not valid UTF-8")
+    if not data and before.st_size > offset:
+        raise ValueError("read limit is too small for a UTF-8 character")
+    after = path.stat()
+    revision = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+    revision_text = ":".join(str(part) for part in revision)
+    if offset > 0 and supplied_revision != revision_text:
+        raise ValueError("file changed while reading")
+    after_revision = (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+    if revision != after_revision:
+        raise ValueError("file changed while reading")
+    next_offset = offset + len(data)
+    truncated = next_offset < before.st_size
+    # Keep edit compatibility for persistent SSH runners; pagination correctness does not
+    # depend on this cache because every continuation carries and validates its revision.
+    read_progress[str(path)] = {"revision": revision, "next": next_offset, "complete": not truncated}
+    return {"path": str(path), "content": data.decode("utf-8"), "offset": offset,
+            "bytesRead": len(data), "totalBytes": before.st_size, "truncated": truncated,
+            "nextOffset": next_offset, "revision": revision_text}
 
 def write_file(args):
     validate_keys(args, ("path", "content", "readOnly"), ("path", "content"))
@@ -97,6 +144,115 @@ def write_file(args):
         except FileNotFoundError:
             pass
     return {"path": str(path), "bytesWritten": len(data)}
+
+def replace_text(args):
+    validate_keys(args, ("path", "oldText", "newText", "readOnly", "expectedRevision", "readRevision"), ("path", "oldText", "newText"))
+    if args.get("readOnly") is True:
+        raise ValueError("replace_text is disabled for a read-only call")
+    with edit_lock:
+        path = within_root(args.get("path"))
+        # Lock files live in per-user temporary storage, never in the deliverable tree.
+        # Local bwrap executors bind this same host directory so independent processes
+        # contend on the same flock; SSH runners share it across their own processes.
+        # Use the dedicated lock directory mounted at this stable namespace path.
+        # The runner's private TMPDIR is process-local and must not isolate edit locks.
+        lock_dir = Path("/tmp") / ("adelic-locks-" + str(os.getuid()))
+        lock_dir.mkdir(mode=0o700, exist_ok=True)
+        lock_info = lock_dir.lstat()
+        if not stat.S_ISDIR(lock_info.st_mode) or lock_info.st_uid != os.getuid() or stat.S_IMODE(lock_info.st_mode) & 0o077:
+            raise ValueError("invalid edit lock directory")
+        relative_resource = path.relative_to(ROOT).as_posix()
+        lock_name = hashlib.sha256(os.fsencode(WORKSPACE_ID + "\0" + relative_resource)).hexdigest() + ".lock"
+        lock_path = lock_dir / lock_name
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise ValueError("invalid edit lock")
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            return _replace_text(args)
+        finally:
+            os.close(fd)
+
+def _replace_text(args):
+    validate_keys(args, ("path", "oldText", "newText", "readOnly", "expectedRevision", "readRevision"), ("path", "oldText", "newText"))
+    if args.get("readOnly") is True:
+        raise ValueError("replace_text is disabled for a read-only call")
+    path = within_root(args.get("path"))
+    old_text = args.get("oldText")
+    new_text = args.get("newText")
+    if not isinstance(old_text, str) or not old_text:
+        raise ValueError("oldText must be a non-empty string")
+    if not isinstance(new_text, str):
+        raise ValueError("newText must be a string")
+    old_bytes = old_text.encode("utf-8")
+    new_bytes = new_text.encode("utf-8")
+    if len(old_bytes) > MAX_TEXT or len(new_bytes) > MAX_TEXT:
+        raise ValueError("replacement text exceeds limit")
+    if not path.is_file():
+        raise ValueError("file does not exist")
+    expected_revision = args.get("expectedRevision")
+    legacy_revision = args.get("readRevision")
+    if expected_revision is not None and (not isinstance(expected_revision, str) or not expected_revision or len(expected_revision) > 256):
+        raise ValueError("expectedRevision must be a short string")
+    if legacy_revision is not None and (not isinstance(legacy_revision, str) or not legacy_revision or len(legacy_revision) > 256):
+        raise ValueError("readRevision must be a short string")
+    if expected_revision and legacy_revision and expected_revision != legacy_revision:
+        raise ValueError("expectedRevision and readRevision do not match")
+    supplied_revision = expected_revision or legacy_revision
+    progress = read_progress.get(str(path))
+    before = path.stat()
+    current_revision = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+    current_revision_text = ":".join(str(part) for part in current_revision)
+    if before.st_size > MAX_EDIT_FILE:
+        raise ValueError("file exceeds edit limit")
+    if supplied_revision:
+        if supplied_revision != current_revision_text:
+            raise ValueError("file changed before edit")
+    elif not (progress and progress["complete"] and progress["revision"] == current_revision):
+        raise ValueError("file must be read completely before replace_text")
+    with path.open("rb") as stream:
+        content = stream.read(MAX_EDIT_FILE + 1)
+    if len(content) > MAX_EDIT_FILE:
+        raise ValueError("file exceeds edit limit")
+    checked = path.stat()
+    checked_revision = (checked.st_dev, checked.st_ino, checked.st_size, checked.st_mtime_ns, checked.st_ctime_ns)
+    if checked_revision != current_revision or len(content) != before.st_size:
+        raise ValueError("file changed before edit")
+    content.decode("utf-8")
+    first = content.find(old_bytes)
+    second = content.find(old_bytes, first + 1) if first >= 0 else -1
+    if first < 0 or second >= 0:
+        raise ValueError("oldText must match exactly once")
+    updated = content[:first] + new_bytes + content[first + len(old_bytes):]
+    if len(updated) > MAX_EDIT_FILE:
+        raise ValueError("edited file exceeds limit")
+    fd, temporary = tempfile.mkstemp(prefix=".adelic-", dir=str(path.parent))
+    try:
+        os.fchmod(fd, stat.S_IMODE(path.stat().st_mode))
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(updated)
+            stream.flush()
+            os.fsync(stream.fileno())
+        latest = path.stat()
+        latest_revision = (latest.st_dev, latest.st_ino, latest.st_size, latest.st_mtime_ns, latest.st_ctime_ns)
+        if latest_revision != current_revision:
+            raise ValueError("file changed before edit")
+        os.replace(temporary, path)
+        directory_fd = os.open(str(path.parent), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        except OSError:
+            # The atomic replace already succeeded; some filesystems do not support directory fsync.
+            pass
+        finally:
+            os.close(directory_fd)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+    read_progress.pop(str(path), None)
+    return {"path": str(path), "matches": 1, "bytesWritten": len(updated)}
 
 def list_dir(args):
     validate_keys(args, ("path", "recursive", "limit"), ())
@@ -154,6 +310,7 @@ def search(args):
     if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1 or limit > 1000:
         raise ValueError("limit must be between 1 and 1000")
     results = []
+    omitted = {"tooLarge": 0, "unreadable": 0}
     response_bytes = 2
     for base, dirs, files in os.walk(root, followlinks=False):
         dirs[:] = [name for name in dirs if name != ".git" and (Path(base) / name).resolve().is_relative_to(ROOT)]
@@ -162,21 +319,25 @@ def search(args):
             try:
                 resolved = file_path.resolve(strict=True)
                 resolved.relative_to(ROOT)
-                if not resolved.is_file() or resolved.stat().st_size > MAX_TEXT:
+                if not resolved.is_file():
+                    continue
+                if resolved.stat().st_size > MAX_TEXT:
+                    omitted["tooLarge"] += 1
                     continue
                 content = resolved.read_text(encoding="utf-8")
             except (OSError, UnicodeError, ValueError):
+                omitted["unreadable"] += 1
                 continue
             for number, line in enumerate(content.splitlines(), 1):
                 if query in line:
                     match = {"path": str(resolved), "line": number, "text": line[:2000]}
                     response_bytes += len(json.dumps(match, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) + 1
                     if response_bytes > 512 * 1024:
-                        return {"results": results, "truncated": True}
+                        return {"results": results, "truncated": True, "omittedFiles": omitted}
                     results.append(match)
                     if len(results) >= limit:
-                        return {"results": results, "truncated": True}
-    return {"results": results, "truncated": False}
+                        return {"results": results, "truncated": True, "omittedFiles": omitted}
+    return {"results": results, "truncated": False, "omittedFiles": omitted}
 
 def terminate_process(proc, descendants=None):
     descendants = descendants or set()
@@ -299,11 +460,43 @@ def run_process(command, cwd, timeout, request_id):
         proc.stdout.close()
         proc.stderr.close()
 
+def diagnose_capabilities():
+    names = ("git", "node", "npm", "python3", "pytest", "ssh", "bwrap", "chromium", "chromium-browser", "google-chrome", "firefox")
+    binaries = {name: shutil.which(name) is not None for name in names}
+    git_marker = (ROOT / ".git").exists()
+    git_state = "unavailable" if not binaries["git"] else "binary-only"
+    if binaries["git"]:
+        try:
+            check = subprocess.run(["git", "-C", str(ROOT), "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", "--no-optional-locks", "rev-parse", "--show-toplevel"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=3, check=False, env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"})
+            top = Path(check.stdout.decode("utf-8", errors="strict").strip()).resolve(strict=True) if check.returncode == 0 else None
+            if top is not None and top.is_dir():
+                git_state = "repository"
+            elif git_marker:
+                git_state = "unverified"
+        except (OSError, UnicodeError, subprocess.TimeoutExpired, ValueError):
+            git_state = "unverified" if git_marker else "binary-only"
+    browsers = [name for name in ("chromium", "chromium-browser", "google-chrome", "firefox") if binaries[name]]
+    browser_functional = []
+    for name in browsers:
+        try:
+            result = subprocess.run([shutil.which(name), "--version"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3, check=False)
+            if result.returncode == 0:
+                browser_functional.append(name)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    return {"git": git_state,
+            "tmp": {path: os.path.isdir(path) and os.access(path, os.W_OK) for path in ("/tmp", "/var/tmp")},
+            "browsers": browsers,
+            "browserFunctional": browser_functional,
+            "binaries": binaries,
+            "hostDependentTests": "Browser executables are listed separately from --version success; this does not verify GUI/browser automation. /tmp and /var/tmp are private writable scratch directories in this executor. Tests requiring desktop GUI, host services, host-only files, a host SSH account/agent or external networking may still require the host and may not run here."}
+
 def execute(tool, args, request_id):
     if not isinstance(args, dict):
         raise ValueError("args must be an object")
     if tool == "read_file": return read_file(args)
     if tool == "write_file": return write_file(args)
+    if tool == "replace_text": return replace_text(args)
     if tool == "list": return list_dir(args)
     if tool == "stat": return stat_path(args)
     if tool == "search": return search(args)
@@ -312,6 +505,9 @@ def execute(tool, args, request_id):
         if args.get("readOnly") is True:
             raise ValueError("exec cannot guarantee a read-only filesystem")
         return run_process(args.get("command"), cwd_for(args), args.get("timeoutMs", 120000), request_id)
+    if tool == "diagnose":
+        validate_keys(args, (), ())
+        return diagnose_capabilities()
     if tool == "git":
         validate_keys(args, ("args", "operation", "cwd", "timeoutMs", "readOnly"), ())
         operation = args.get("operation")
@@ -353,7 +549,8 @@ def process_request(request):
         if request.get("method") == "info":
             if set(request) != {"id", "method"}:
                 raise ValueError("info request does not match the supported schema")
-            send({"id": request_id, "ok": True, "result": {"protocol": 1, "python": platform.python_version(), "platform": platform.system(), "root": str(ROOT)}})
+            capabilities = diagnose_capabilities()
+            send({"id": request_id, "ok": True, "result": {"protocol": 1, "python": platform.python_version(), "platform": platform.system(), "root": str(ROOT), "capabilities": capabilities}})
             return
         if request.get("method") != "call" or request.get("tool") not in TOOLS:
             raise ValueError("unsupported method or tool")
@@ -362,8 +559,60 @@ def process_request(request):
         result = execute(request["tool"], request.get("args", {}), request_id)
         send({"id": request_id, "ok": True, "result": result})
     except Exception as exc:
-        message = str(exc)[:2000] or type(exc).__name__
-        send({"id": request_id, "ok": False, "error": message})
+        # Categorize by exception type and fixed, known validation cases. Never send arbitrary
+        # exception text (which may contain paths, request values or credentials) over JSONL.
+        detail = str(exc) if isinstance(exc, (ValueError, UnicodeError)) else ""
+        if isinstance(exc, TimeoutError):
+            category, message = "timeout", "command timed out"
+        elif isinstance(exc, FileNotFoundError) or detail == "file does not exist":
+            category, message = "not_found", "file does not exist"
+        elif isinstance(exc, PermissionError):
+            category, message = "permission", "permission denied"
+        elif detail in ("file exceeds read limit", "offset exceeds file size", "offset is not a UTF-8 boundary", "read limit must be between 1 and 49152 bytes", "read limit is too small for a UTF-8 character", "unable to read UTF-8 boundary"):
+            category, message = "invalid_request", detail
+        elif detail == "file exceeds edit limit":
+            category, message = "invalid_request", "file exceeds edit limit"
+        elif isinstance(exc, UnicodeError) or detail == "file is not valid UTF-8":
+            category, message = "invalid_request", "file is not valid UTF-8"
+        elif detail in ("oldText must match exactly once", "file must be read completely before replace_text", "file changed before edit", "file changed while reading"):
+            category, message = "conflict", detail
+        elif detail == "parent directory does not exist":
+            category, message = "not_found", "parent directory does not exist"
+        elif detail == "path escapes project root":
+            category, message = "invalid_request", "path escapes project root"
+        elif isinstance(exc, FileExistsError):
+            category, message = "conflict", "destination already exists"
+        elif isinstance(exc, RuntimeError) and str(exc) == "command cancelled":
+            category, message = "executor", "command cancelled"
+        elif isinstance(exc, ValueError):
+            category, message = "invalid_request", "invalid tool request or file"
+        else:
+            category, message = "executor", "remote tool failed"
+        safe_messages = {
+            "path must be a string", "path escapes project root", "args must be an object",
+            "tool arguments do not match the supported schema", "cwd is not a directory",
+            "write_file is disabled for a read-only call", "content must be a string",
+            "content exceeds write limit", "replace_text is disabled for a read-only call",
+            "file exceeds read limit", "file exceeds edit limit", "file is not valid UTF-8",
+            "file must be read completely before replace_text", "file changed before edit", "file changed while reading",
+            "offset exceeds file size", "offset is not a UTF-8 boundary",
+            "read limit must be between 1 and 49152 bytes", "read limit is too small for a UTF-8 character",
+            "unable to read UTF-8 boundary",
+            "oldText must be a non-empty string", "newText must be a string",
+            "replacement text exceeds limit", "edited file exceeds limit", "path is not a directory",
+            "limit must be between 1 and 20000", "recursive must be a boolean",
+            "query must be a non-empty string", "query is too long", "search path is not a directory",
+            "limit must be between 1 and 1000", "command must be a non-empty string under 32768 characters",
+            "command must be a string or a non-empty string array", "timeoutMs must be between 1 and 300000",
+            "exec cannot guarantee a read-only filesystem", "only read-only git commands are allowed",
+            "cannot safely read Git filter configuration", "Git filter configuration exceeds limit",
+            "unknown tool", "request id must be a short string or integer",
+            "info request does not match the supported schema", "unsupported method or tool",
+            "call request does not match the supported schema",
+        }
+        if detail in safe_messages:
+            message = detail
+        send({"id": request_id, "ok": False, "error": message, "errorCategory": category})
     finally:
         if isinstance(request_id, (str, int)) and not isinstance(request_id, bool):
             with lock:
@@ -381,18 +630,30 @@ def watchdog():
             return
 
 def main():
-    global ROOT, last_heartbeat
+    global ROOT, WORKSPACE_ID, last_heartbeat
+    options = sys.argv[1:]
+    if len(options) < 2 or options[0] != "--root":
+        raise SystemExit("usage: runner.py --root ABSOLUTE_PATH [--workspace-id HASH] [--runtime-path /opt/adelic-runtimes/node/bin]")
+    raw_root = Path(options[1])
     runtime_path = ""
-    if len(sys.argv) == 5 and sys.argv[3] == "--runtime-path" and sys.argv[4] == "/opt/adelic-runtimes/node/bin":
-        runtime_path = "/opt/adelic-runtimes/node/bin:"
-    elif len(sys.argv) != 3:
-        raise SystemExit("usage: runner.py --root ABSOLUTE_PATH [--runtime-path /opt/adelic-runtimes/node/bin]")
-    if sys.argv[1] != "--root":
-        raise SystemExit("usage: runner.py --root ABSOLUTE_PATH")
-    raw_root = Path(sys.argv[2])
+    supplied_workspace_id = None
+    index = 2
+    while index < len(options):
+        if options[index] == "--runtime-path" and index + 1 < len(options) and options[index + 1] == "/opt/adelic-runtimes/node/bin":
+            runtime_path = "/opt/adelic-runtimes/node/bin:"
+            index += 2
+        elif options[index] == "--workspace-id" and index + 1 < len(options) and len(options[index + 1]) == 64 and all(char in "0123456789abcdef" for char in options[index + 1]):
+            supplied_workspace_id = options[index + 1]
+            index += 2
+        else:
+            raise SystemExit("invalid runner option")
     if not raw_root.is_absolute():
         raise SystemExit("root must be absolute")
     ROOT = raw_root.resolve(strict=True)
+    root_info = ROOT.stat()
+    WORKSPACE_ID = supplied_workspace_id or hashlib.sha256(
+        os.fsencode(str(ROOT) + "\0" + str(root_info.st_dev) + ":" + str(root_info.st_ino))
+    ).hexdigest()
     if not ROOT.is_dir():
         raise SystemExit("root must be a directory")
     if platform.system() != "Linux":
@@ -405,7 +666,7 @@ def main():
         os.makedirs(path, mode=0o700, exist_ok=True)
         os.environ[name] = path
     os.environ.clear()
-    os.environ.update({"PATH": runtime_path + "/usr/local/bin:/usr/bin:/bin", "HOME": os.path.join(temp, "home"), "TMPDIR": os.path.join(temp, "tmp"), "CODEX_HOME": os.path.join(temp, "codex_home"), "KIRO_HOME": os.path.join(temp, "kiro_home"), "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"})
+    os.environ.update({"PATH": runtime_path + "/usr/local/bin:/usr/bin:/bin", "HOME": os.path.join(temp, "home"), "TMPDIR": os.path.join(temp, "tmp"), "CODEX_HOME": os.path.join(temp, "codex_home"), "KIRO_HOME": os.path.join(temp, "kiro_home"), "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "GIT_CONFIG_NOSYSTEM": "1", "GIT_OPTIONAL_LOCKS": "0"})
     for key in ("HOME", "TMPDIR", "CODEX_HOME", "KIRO_HOME"):
         os.makedirs(os.environ[key], mode=0o700, exist_ok=True)
     last_heartbeat = time.monotonic()

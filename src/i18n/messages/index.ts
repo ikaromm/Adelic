@@ -12,6 +12,7 @@ export { default as 'commands-card' } from './commands-card';
 export { default as common } from './common';
 export { default as compaction } from './compaction';
 export { default as composer } from './composer';
+export { default as delivery } from './delivery';
 export { default as diagnostics } from './diagnostics';
 export { default as 'error-boundary' } from './error-boundary';
 export { default as folders } from './folders';
@@ -42,3 +43,9 @@ export { default as 'spend-limits' } from './spend-limits';
 export { default as tools } from './tools';
 export { default as voice } from './voice';
 export { default as worktree } from './worktree';
+
+export { default as 'composer-access' } from './composer-access';
+
+export { default as 'model-picker' } from './model-picker';
+
+export { default as 'sidebar-actions' } from './sidebar-actions';

@@ -21,7 +21,8 @@ export interface RemoteProbe {
   fingerprint: string;
   hostKey: string;
 }
-export type RemoteToolName = 'exec' | 'read_file' | 'write_file' | 'list' | 'stat' | 'search' | 'git';
+export type RemoteToolName =
+  'exec' | 'read_file' | 'write_file' | 'replace_text' | 'list' | 'stat' | 'search' | 'git' | 'diagnose';
 export interface RemoteRuntime {
   label: string;
   root: string;

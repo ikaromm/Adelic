@@ -6,7 +6,7 @@ import path from 'node:path';
 import { CodexProvider } from '../server/providers/codex';
 import { ClaudeProvider } from '../server/providers/claude';
 import { kiroToolEvent, KiroProvider, parseKiroDoctorAuth, parseKiroModelCatalog } from '../server/providers/kiro';
-import { JsonRpcProcess } from '../server/providers/process';
+import { errorMessage, JsonRpcProcess } from '../server/providers/process';
 import { boundedPrompt } from '../server/providers/common';
 import { CommandScope, runCommand } from '../server/providers/command';
 import { bubblewrap } from '../server/providers/sandbox';
@@ -43,6 +43,31 @@ function fixtureCodex(binary: string, dataDir?: string) {
 }
 
 describe('provider runtime helpers', () => {
+  it('preserves useful process failure causes while redacting common credential formats', () => {
+    const message = errorMessage(
+      new Error(
+        'Request failed: ECONNREFUSED; token=topsecret API_KEY: "another-secret" Authorization: Bearer bearer-secret https://executor.test/run?api-key=query-secret&refresh_token=refresh-secret https://user:password@example.test sk-12345678901234567890',
+      ),
+    );
+    expect(message).toContain('ECONNREFUSED');
+    expect(message).toContain('Request failed');
+    const structuredAndBasic = errorMessage(
+      new Error('response={"api_key":"sentinel-json"} Authorization: Basic sentinel-basic'),
+    );
+    expect(structuredAndBasic).not.toContain('sentinel-json');
+    expect(structuredAndBasic).not.toContain('sentinel-basic');
+    for (const secret of [
+      'topsecret',
+      'another-secret',
+      'bearer-secret',
+      'query-secret',
+      'refresh-secret',
+      'user:password',
+      'sk-12345678901234567890',
+    ])
+      expect(message).not.toContain(secret);
+    expect(message).toContain('[redacted]');
+  });
   it('refuses Claude automatic mode because the integration cannot restrict native tools', async () => {
     const provider = new ClaudeProvider();
     const input: RunInput = {

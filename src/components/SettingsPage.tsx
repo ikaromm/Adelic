@@ -1,5 +1,5 @@
-import { ArrowUp, Bot, Brain, Code2, Command, Languages, Layers3, Shield, X } from 'lucide-react';
-import { type FormEvent, useEffect, useId, useState } from 'react';
+import { ArrowUp, Bot, Brain, Code2, Command, Languages, Layers3, Search, Shield, X } from 'lucide-react';
+import { type FormEvent, useEffect, useId, useRef, useState } from 'react';
 import {
   AUTO_COMPACT_DEFAULT_TOKENS,
   AUTO_COMPACT_MAX_TOKENS,
@@ -36,6 +36,7 @@ import { RemoteAccessCard } from './RemoteAccessCard';
 import { RemoteHostsCard } from './RemoteHostsCard';
 import { LANGUAGE_PREFERENCES, t as translate, useI18n, type LanguagePreference } from '../i18n';
 import { modeLabel } from '../ComposerMenus';
+import type { ReactNode } from 'react';
 
 export function SettingsPage({
   data,
@@ -65,6 +66,8 @@ export function SettingsPage({
   onSpendLimits,
   onProjectSpendLimits,
   notice,
+  searchRequest,
+  onResumeProject,
 }: {
   data: Bootstrap;
   project?: Project;
@@ -114,10 +117,170 @@ export function SettingsPage({
   onSpendLimits: (patch: SpendLimitsPatch) => void;
   onProjectSpendLimits: (patch: { monthlyTokens?: number | null; monthlyCostUsd?: number | null }) => void;
   notice: string;
+  searchRequest?: { id: number; query: string };
+  onResumeProject?: () => void;
 }) {
   const { t, preference, setLocale } = useI18n();
   const [memoryWorkspace, setMemoryWorkspace] = useState(project?.memoryWorkspace || '');
   const [memoryProject, setMemoryProject] = useState(project?.memoryProject || '');
+  const [settingsQuery, setSettingsQuery] = useState('');
+  const [settingsCategory, setSettingsCategory] = useState('all');
+  const [settingsView, setSettingsView] = useState<'basic' | 'advanced'>('basic');
+  const projectScope = Boolean(project);
+  const searchRequestRef = useRef(searchRequest);
+  searchRequestRef.current = searchRequest;
+  useEffect(() => {
+    const request = searchRequestRef.current;
+    if (!request) return;
+    setSettingsQuery(request.query);
+    setSettingsCategory('all');
+  }, [searchRequest?.id]);
+  const categories = [
+    { id: 'all', label: t('settings.navigation.all') },
+    { id: 'general', label: t('settings.navigation.general') },
+    ...(project ? [{ id: 'project', label: t('settings.navigation.project') }] : []),
+    { id: 'agents', label: t('settings.navigation.agents') },
+    { id: 'usage', label: t('settings.navigation.usage') },
+    { id: 'memory', label: t('settings.navigation.memory') },
+    { id: 'security', label: t('settings.navigation.security') },
+    { id: 'tools', label: t('settings.navigation.tools') },
+    { id: 'diagnostics', label: t('settings.navigation.diagnostics') },
+  ];
+  const catalog = [
+    {
+      id: 'general',
+      category: 'general',
+      enabled: true,
+      text: `${t('settings.general.title')} ${t('settings.general.detail')} ${t('settings.language.label')} ${t('settings.language.detail')} idioma language interface`,
+    },
+    {
+      id: 'project-tools',
+      category: 'project',
+      advanced: true,
+      enabled: Boolean(project && !project.remote),
+      text: `${project?.name ?? ''} ${t('projectTools.orchestration.title')} ${t('projectTools.orchestration.detail', { project: project?.name ?? '' })} ${t('projectTools.graph.title')} ${t('projectTools.graph.detail')} orchestration graphify grafo agente delegação`,
+    },
+    {
+      id: 'project-autonomy',
+      category: 'project',
+      enabled: Boolean(project),
+      text: `${project?.name ?? ''} ${t('settings.projectAutonomy.title')} ${t('settings.projectAutonomy.detail')} ${t('settings.projectAutonomy.remoteDetail')} aprovação autonomia`,
+    },
+    {
+      id: 'remote-project',
+      category: 'project',
+      enabled: Boolean(project?.remote),
+      text: `${project?.name ?? ''} ${project?.remote?.path ?? ''} ${t('remoteHosts.projectTitle')} ${t('remoteHosts.projectRestrictions')} SSH remoto`,
+    },
+    {
+      id: 'project-hooks',
+      category: 'project',
+      advanced: true,
+      enabled: Boolean(project && !project.remote),
+      text: `${project?.name ?? ''} ${t('hooks.title')} ${t('hooks.detail')} checks testes comandos bloqueados`,
+    },
+    {
+      id: 'project-usage',
+      category: 'usage',
+      enabled: Boolean(project),
+      text: `${project?.name ?? ''} ${t('spendLimits.project.title')} ${t('spendLimits.project.detail', { project: project?.name ?? '' })} tokens custo limite uso`,
+    },
+    {
+      id: 'memory-scope',
+      category: 'project',
+      enabled: Boolean(project),
+      text: `${project?.name ?? ''} ${t('settings.memoryScope.title')} ${t('settings.memoryScope.detail')} workspace projeto notas`,
+    },
+    {
+      id: 'agents',
+      category: 'agents',
+      advanced: true,
+      enabled: true,
+      text: `${t('settings.agents.title')} ${t('settings.agents.detail')} ${t('settings.agents.default')} ${t('settings.agents.mode')} ${t('settings.agents.style')} ${t('settings.agents.retry')} ${t('settings.fallback.label')} ${t('settings.fallback.detail')} ${t('settings.compact.label')} ${t('settings.compact.detail')} ${t('settings.notifications.label')} ${t('settings.notifications.detail')} ${t('settings.voice.label')} ${t('settings.voice.detail')} ${t('settings.automations.label')} ${data.providers.flatMap((provider) => [provider.name, provider.detail, ...provider.models.flatMap((model) => [model.name, model.id])]).join(' ')} ${data.settings.modelFallback?.models.map((model) => modelLabel(data.providers, model)).join(' ') ?? ''} modelo model retry tentativas compactar voz ditado notificações`,
+    },
+    {
+      id: 'usage',
+      category: 'usage',
+      enabled: true,
+      text: `${t('spendLimits.title')} ${t('spendLimits.detail')} ${t('spendLimits.enable')} ${t('spendLimits.dailyTokens')} ${t('spendLimits.monthlyTokens')} ${t('spendLimits.dailyCost')} ${t('spendLimits.monthlyCost')} tokens custo consumo gastos`,
+    },
+    {
+      id: 'memory',
+      category: 'memory',
+      enabled: true,
+      text: `${t('settings.memory.title')} ${t('settings.memory.detail')} ${t('settings.memory.allow')} ${t('settings.memory.allowDetail')} ${data.integrations
+        .filter((item) => item.kind === 'memory' || item.kind === 'sandbox')
+        .flatMap((item) => [item.name, item.detail])
+        .join(' ')} memória memory contexto`,
+    },
+    {
+      id: 'permissions',
+      category: 'security',
+      advanced: true,
+      enabled: true,
+      text: `${t('settings.permissions.title')} ${t('settings.permissions.detail')} ${t('settings.permissions.readOnly')} ${t('settings.permissions.write')} ${t('settings.permissions.manual')} ${t('settings.permissions.auto')} ${t('settings.permissions.terminal')} ${t('settings.permissions.limit')} sandbox segurança execução terminal acesso remoto`,
+    },
+    {
+      id: 'remote-access',
+      category: 'security',
+      advanced: true,
+      enabled: true,
+      text: `${t('remoteAccess.title')} ${t('remoteAccess.detail')} ${t('remoteAccess.manualApproval')} internet tailnet funnel senha sessão`,
+    },
+    {
+      id: 'remote-hosts',
+      category: 'security',
+      advanced: true,
+      enabled: isLoopbackPage(),
+      text: `${t('remoteHosts.title')} ${t('remoteHosts.detail')} host SSH remoto`,
+    },
+    {
+      id: 'skills',
+      category: 'tools',
+      advanced: true,
+      enabled: true,
+      text: `${t('settings.skills.title')} ${t('settings.skills.detail')} ${data.skills.flatMap((skill) => [skill.name, skill.description ?? '']).join(' ')} skills procedures habilidades`,
+    },
+    {
+      id: 'commands',
+      category: 'tools',
+      advanced: true,
+      enabled: true,
+      text: `${t('commandsCard.title')} ${t('commandsCard.detail', { slash: '/', args: 'args' })} comandos atalhos`,
+    },
+    {
+      id: 'mcp',
+      category: 'tools',
+      advanced: true,
+      enabled: !project?.remote,
+      text: `${t('mcp.title')} ${t('mcp.detail')} MCP servers tools ferramentas`,
+    },
+    {
+      id: 'diagnostics',
+      category: 'diagnostics',
+      advanced: true,
+      enabled: true,
+      text: `${t('diagnostics.title')} ${t('diagnostics.detail')} ${t('diagnostics.updateCheck')} ${t('diagnostics.checkNow')} versão atualizar diagnóstico`,
+    },
+  ];
+  const normalizedQuery = normalizeSettingsSearch(settingsQuery);
+  const terms = normalizedQuery.split(/\s+/).filter(Boolean);
+  const visibleIds = new Set(
+    catalog
+      .filter((entry) => entry.enabled && (settingsCategory === 'all' || entry.category === settingsCategory))
+      .filter((entry) => settingsView === 'advanced' || Boolean(terms.length) || !entry.advanced)
+      .filter((entry) => {
+        if (!terms.length) return true;
+        const text = normalizeSettingsSearch(entry.text);
+        return terms.every((term) => text.includes(term));
+      })
+      .map((entry) => entry.id),
+  );
+  const showCard = (id: string) => visibleIds.has(id);
+  const resultCount = visibleIds.size;
+  const hiddenAdvancedCount = catalog.filter(
+    (entry) => entry.enabled && entry.advanced && (settingsCategory === 'all' || entry.category === settingsCategory),
+  ).length;
   return (
     <section className="page-content">
       <div className="page-heading">
@@ -126,447 +289,579 @@ export function SettingsPage({
           <h1>{t('settings.title')}</h1>
           <p>{t('settings.subtitle')}</p>
         </div>
+        {searchRequest && onResumeProject && (
+          <div className="settings-resume-project">
+            <button type="button" className="secondary-button" onClick={onResumeProject}>
+              {t('settings.navigation.resumeProject')}
+            </button>
+            <span>{t('settings.navigation.draftPreserved')}</span>
+          </div>
+        )}
       </div>
       {notice && <div className="inline-notice error-notice">{notice}</div>}
+      <div className="settings-discovery">
+        <label className="settings-search">
+          <Search size={16} aria-hidden="true" />
+          <span className="visually-hidden">{t('settings.navigation.searchLabel')}</span>
+          <input
+            type="search"
+            value={settingsQuery}
+            placeholder={t('settings.navigation.searchPlaceholder')}
+            onChange={(event) => {
+              setSettingsQuery(event.target.value);
+              setSettingsCategory('all');
+            }}
+          />
+          {settingsQuery && (
+            <button type="button" className="settings-search-clear" onClick={() => setSettingsQuery('')}>
+              <X size={14} aria-hidden="true" />
+              {t('settings.navigation.clear')}
+            </button>
+          )}
+        </label>
+        <div className="settings-view-toggle" role="group" aria-label={t('settings.navigation.view')}>
+          <button
+            type="button"
+            aria-pressed={settingsView === 'basic'}
+            className={settingsView === 'basic' ? 'active' : ''}
+            onClick={() => setSettingsView('basic')}
+          >
+            {t('settings.navigation.basic')}
+          </button>
+          <button
+            type="button"
+            aria-pressed={settingsView === 'advanced'}
+            className={settingsView === 'advanced' ? 'active' : ''}
+            onClick={() => setSettingsView('advanced')}
+          >
+            {t('settings.navigation.advanced')}
+          </button>
+        </div>
+        <nav className="settings-category-nav" aria-label={t('settings.navigation.categories')}>
+          {categories.map((category) => (
+            <button
+              type="button"
+              key={category.id}
+              className={settingsCategory === category.id ? 'active' : ''}
+              aria-pressed={settingsCategory === category.id}
+              onClick={() => {
+                setSettingsCategory(category.id);
+                setSettingsQuery('');
+              }}
+            >
+              {category.label}
+            </button>
+          ))}
+        </nav>
+        <div className="settings-result-meta" role="status" aria-live="polite">
+          {project
+            ? t('settings.navigation.projectScope', { name: project.name })
+            : t('settings.navigation.localScope')}
+          <span>{t('settings.navigation.results', { count: resultCount })}</span>
+        </div>
+      </div>
+      {settingsView === 'basic' && !settingsQuery && hiddenAdvancedCount > 0 && (
+        <div className="settings-advanced-note">
+          <span>{t('settings.navigation.advancedHidden', { count: hiddenAdvancedCount })}</span>
+          <button type="button" className="secondary-button" onClick={() => setSettingsView('advanced')}>
+            {t('settings.navigation.showAdvanced')}
+          </button>
+        </div>
+      )}
       <div className="settings-layout">
         <div className="settings-main">
-          <section className="settings-card" aria-labelledby="settings-general-title">
-            <div className="settings-card-heading">
-              <div className="settings-card-icon">
-                <Languages size={17} />
-              </div>
-              <div>
-                <h2 id="settings-general-title">{t('settings.general.title')}</h2>
-                <p>{t('settings.general.detail')}</p>
-              </div>
-            </div>
-            <div className="setting-row">
-              <div>
-                <strong id="settings-language-label">{t('settings.language.label')}</strong>
-                <span>{t('settings.language.detail')}</span>
-              </div>
-              <select
-                aria-labelledby="settings-language-label"
-                value={preference}
-                onChange={(event) => {
-                  const next = event.target.value as LanguagePreference;
-                  setLocale(next);
-                  onSetting('language', next);
-                }}
-              >
-                {LANGUAGE_PREFERENCES.map((value) => (
-                  <option key={value} value={value}>
-                    {t(
-                      value === 'auto'
-                        ? 'settings.language.auto'
-                        : value === 'en'
-                          ? 'settings.language.en'
-                          : 'settings.language.ptBR',
-                    )}
-                  </option>
-                ))}
-              </select>
-            </div>
-          </section>
-          {project && !project.remote && (
-            <ProjectTools
-              project={project}
-              data={data}
-              coordination={coordination}
-              graphifyStatus={graphifyStatus}
-              graphQueryResult={graphQueryResult}
-              projectQuery={projectQuery}
-              projectBusy={projectBusy}
-              coordinatorProviderId={coordinatorProviderId}
-              onProjectQueryChange={onProjectQueryChange}
-              onProjectQuery={onProjectQuery}
-              onOrchestration={onOrchestration}
-              onGraphifyEnabled={onGraphifyEnabled}
-              onIndexGraphify={onIndexGraphify}
-              onRefreshProject={onRefreshProject}
-            />
-          )}
-          {project && (
-            <section className="settings-card">
+          <SettingsEntry id="general" visible={showCard('general')}>
+            <section className="settings-card" aria-labelledby="settings-general-title">
               <div className="settings-card-heading">
-                <div className="settings-card-icon amber">
-                  <Shield size={17} />
+                <div className="settings-card-icon">
+                  <Languages size={17} />
                 </div>
                 <div>
-                  <h2>{t('settings.projectAutonomy.title')}</h2>
-                  <p>
-                    {t(project.remote ? 'settings.projectAutonomy.remoteDetail' : 'settings.projectAutonomy.detail')}
-                  </p>
+                  <h2 id="settings-general-title">{t('settings.general.title')}</h2>
+                  <p>{t('settings.general.detail')}</p>
                 </div>
               </div>
-              <label className="setting-row">
-                <strong>{t('settings.projectAutonomy.mode')}</strong>
+              <div className="setting-row">
+                <div>
+                  <strong id="settings-language-label">{t('settings.language.label')}</strong>
+                  <span>{t('settings.language.detail')}</span>
+                </div>
                 <select
-                  value={project.approvalMode || 'inherit'}
-                  disabled={!localApprovalControls}
-                  title={!localApprovalControls ? t('settings.projectAutonomy.localOnly') : undefined}
-                  onChange={(event) =>
-                    onProjectApprovalMode(
-                      event.target.value === 'inherit' ? null : (event.target.value as ApprovalMode),
-                    )
-                  }
+                  aria-labelledby="settings-language-label"
+                  value={preference}
+                  onChange={(event) => {
+                    const next = event.target.value as LanguagePreference;
+                    setLocale(next);
+                    onSetting('language', next);
+                  }}
                 >
-                  <option value="inherit">{t('settings.projectAutonomy.inherit')}</option>
-                  <option value="auto-safe">{t('composer.autonomy.mode.autoSafe')}</option>
-                  <option value="manual">{t('composer.autonomy.mode.manual')}</option>
-                  <option value="automatic">{t('composer.autonomy.mode.automatic')}</option>
+                  {LANGUAGE_PREFERENCES.map((value) => (
+                    <option key={value} value={value}>
+                      {t(
+                        value === 'auto'
+                          ? 'settings.language.auto'
+                          : value === 'en'
+                            ? 'settings.language.en'
+                            : 'settings.language.ptBR',
+                      )}
+                    </option>
+                  ))}
                 </select>
-              </label>
-              <small className="setting-help">{t('settings.projectAutonomy.hint')}</small>
+              </div>
             </section>
+          </SettingsEntry>
+          {project && !project.remote && (
+            <SettingsEntry
+              id="project-tools"
+              projectScope={projectScope}
+              visible={showCard('project-tools')}
+              ariaLabel={t('settings.navigation.projectToolsRegion')}
+            >
+              <ProjectTools
+                project={project}
+                data={data}
+                coordination={coordination}
+                graphifyStatus={graphifyStatus}
+                graphQueryResult={graphQueryResult}
+                projectQuery={projectQuery}
+                projectBusy={projectBusy}
+                coordinatorProviderId={coordinatorProviderId}
+                onProjectQueryChange={onProjectQueryChange}
+                onProjectQuery={onProjectQuery}
+                onOrchestration={onOrchestration}
+                onGraphifyEnabled={onGraphifyEnabled}
+                onIndexGraphify={onIndexGraphify}
+                onRefreshProject={onRefreshProject}
+              />
+            </SettingsEntry>
+          )}
+          {project && (
+            <SettingsEntry id="project-autonomy" projectScope={projectScope} visible={showCard('project-autonomy')}>
+              <section className="settings-card" aria-labelledby="settings-project-autonomy-title">
+                <div className="settings-card-heading">
+                  <div className="settings-card-icon amber">
+                    <Shield size={17} />
+                  </div>
+                  <div>
+                    <h2 id="settings-project-autonomy-title">{t('settings.projectAutonomy.title')}</h2>
+                    <p>
+                      {t(project.remote ? 'settings.projectAutonomy.remoteDetail' : 'settings.projectAutonomy.detail')}
+                    </p>
+                  </div>
+                </div>
+                <label className="setting-row">
+                  <strong>{t('settings.projectAutonomy.mode')}</strong>
+                  <select
+                    value={project.approvalMode || 'inherit'}
+                    disabled={!localApprovalControls}
+                    title={!localApprovalControls ? t('settings.projectAutonomy.localOnly') : undefined}
+                    onChange={(event) =>
+                      onProjectApprovalMode(
+                        event.target.value === 'inherit' ? null : (event.target.value as ApprovalMode),
+                      )
+                    }
+                  >
+                    <option value="inherit">{t('settings.projectAutonomy.inherit')}</option>
+                    <option value="auto-safe">{t('composer.autonomy.mode.autoSafe')}</option>
+                    <option value="manual">{t('composer.autonomy.mode.manual')}</option>
+                    <option value="automatic">{t('composer.autonomy.mode.automatic')}</option>
+                  </select>
+                </label>
+                <small className="setting-help">{t('settings.projectAutonomy.hint')}</small>
+              </section>
+            </SettingsEntry>
           )}
           {project?.remote && (
-            <section className="settings-card">
+            <SettingsEntry id="remote-project" projectScope={projectScope} visible={showCard('remote-project')}>
+              <section className="settings-card" aria-labelledby="settings-remote-project-title">
+                <div className="settings-card-heading">
+                  <div className="settings-card-icon blue">
+                    <Code2 size={17} />
+                  </div>
+                  <div>
+                    <h2 id="settings-remote-project-title">{t('remoteHosts.projectTitle')}</h2>
+                    <p>{t('remoteHosts.projectRestrictions')}</p>
+                  </div>
+                </div>
+                <div className="remote-git-location">
+                  <strong>{project.remote.path}</strong>
+                </div>
+              </section>
+            </SettingsEntry>
+          )}
+
+          {project && !project.remote && (
+            <SettingsEntry id="project-hooks" projectScope={projectScope} visible={showCard('project-hooks')}>
+              <HooksCard project={project} />
+            </SettingsEntry>
+          )}
+
+          {project && (
+            <SettingsEntry id="project-usage" projectScope={projectScope} visible={showCard('project-usage')}>
+              <ProjectSpendCard
+                projectName={project.name}
+                limits={project.spendLimits}
+                globalEnabled={data.settings.spendLimits?.enabled === true}
+                report={usage}
+                onChange={onProjectSpendLimits}
+              />
+            </SettingsEntry>
+          )}
+
+          {project && (
+            <SettingsEntry id="memory-scope" projectScope={projectScope} visible={showCard('memory-scope')}>
+              <section className="settings-card" aria-labelledby="settings-memory-scope-title">
+                <div className="settings-card-heading">
+                  <div className="settings-card-icon purple">
+                    <Brain size={17} />
+                  </div>
+                  <div>
+                    <h2 id="settings-memory-scope-title">{t('settings.memoryScope.title')}</h2>
+                    <p>{t('settings.memoryScope.detail')}</p>
+                  </div>
+                </div>
+                <label className="setting-row">
+                  <strong>{t('settings.memoryScope.workspace')}</strong>
+                  <input value={memoryWorkspace} onChange={(e) => setMemoryWorkspace(e.target.value)} />
+                </label>
+                <label className="setting-row">
+                  <strong>{t('settings.memoryScope.project')}</strong>
+                  <input value={memoryProject} onChange={(e) => setMemoryProject(e.target.value)} />
+                </label>
+                <button
+                  className="secondary-button"
+                  disabled={!memoryWorkspace.trim() || !memoryProject.trim()}
+                  onClick={() => onProjectMemoryScope(memoryWorkspace.trim(), memoryProject.trim())}
+                >
+                  {t('settings.memoryScope.save')}
+                </button>
+              </section>
+            </SettingsEntry>
+          )}
+          <SettingsEntry id="agents" visible={showCard('agents')}>
+            <section className="settings-card" aria-labelledby="settings-agents-title">
               <div className="settings-card-heading">
-                <div className="settings-card-icon blue">
-                  <Code2 size={17} />
+                <div className="settings-card-icon">
+                  <Bot size={17} />
                 </div>
                 <div>
-                  <h2>{t('remoteHosts.projectTitle')}</h2>
-                  <p>{t('remoteHosts.projectRestrictions')}</p>
+                  <h2 id="settings-agents-title">{t('settings.agents.title')}</h2>
+                  <p>{t('settings.agents.detail')}</p>
                 </div>
               </div>
-              <div className="remote-git-location">
-                <strong>{project.remote.path}</strong>
+              <div className="setting-row">
+                <div>
+                  <strong>{t('settings.agents.default')}</strong>
+                  <span>{t('settings.agents.defaultDetail')}</span>
+                </div>
+                <select
+                  value={data.settings.defaultProviderId}
+                  onChange={(event) => onSetting('defaultProviderId', event.target.value)}
+                >
+                  {data.providers.map((provider) => (
+                    <option key={provider.id} value={provider.id}>
+                      {provider.name}
+                      {provider.available ? '' : t('settings.agents.unavailableSuffix')}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="setting-row">
+                <div>
+                  <strong>{t('settings.agents.mode')}</strong>
+                  <span>{t('settings.agents.modeDetail')}</span>
+                </div>
+                <select
+                  value={data.settings.defaultMode}
+                  onChange={(event) => onSetting('defaultMode', event.target.value)}
+                >
+                  <option value="auto">{modeLabel('auto')}</option>
+                  <option value="fast">{modeLabel('fast')}</option>
+                  <option value="deep">{modeLabel('deep')}</option>
+                </select>
+              </div>
+              <div className="setting-row">
+                <div>
+                  <strong>{t('settings.agents.style')}</strong>
+                  <span>{t('settings.agents.styleDetail')}</span>
+                </div>
+                <select
+                  value={data.settings.responseStyle}
+                  onChange={(event) => onSetting('responseStyle', event.target.value)}
+                >
+                  <option value="concise">{t('settings.agents.style.concise')}</option>
+                  <option value="balanced">{t('settings.agents.style.balanced')}</option>
+                </select>
+              </div>
+              <div className="setting-row">
+                <div>
+                  <strong>{t('settings.agents.retry')}</strong>
+                  <span>{t('settings.agents.retryDetail')}</span>
+                </div>
+                <button
+                  className={`toggle ${data.settings.autoRetry !== false ? 'on' : ''}`}
+                  role="switch"
+                  aria-checked={data.settings.autoRetry !== false}
+                  aria-label={t('settings.agents.retry')}
+                  onClick={() => onSetting('autoRetry', data.settings.autoRetry === false)}
+                >
+                  <span />
+                </button>
+              </div>
+              <ModelFallbackSetting
+                providers={data.providers}
+                value={data.settings.modelFallback ?? { enabled: false, models: [] }}
+                onChange={onModelFallback}
+              />
+              <AutoCompactSetting
+                enabled={data.settings.autoCompact === true}
+                tokens={data.settings.autoCompactTokens ?? AUTO_COMPACT_DEFAULT_TOKENS}
+                onEnabled={(enabled) => onSetting('autoCompact', enabled)}
+                onTokens={(tokens) => onSetting('autoCompactTokens', tokens)}
+              />
+              <NotificationSetting
+                enabled={notificationsEnabled(data.settings)}
+                onChange={(enabled) => onSetting('notifications', enabled)}
+              />
+              <VoiceSetting
+                enabled={data.settings.voiceDictation !== false}
+                onChange={(enabled) => onSetting('voiceDictation', enabled)}
+              />
+              <div className="setting-row">
+                <div>
+                  <strong>{t('settings.automations.label')}</strong>
+                  <span>{t('settings.automations.detail')}</span>
+                </div>
+                <button
+                  className={`toggle ${data.settings.automations ? 'on' : ''}`}
+                  role="switch"
+                  aria-checked={data.settings.automations === true}
+                  aria-label={t('settings.automations.label')}
+                  onClick={() => onSetting('automations', !data.settings.automations)}
+                >
+                  <span />
+                </button>
               </div>
             </section>
-          )}
-
-          {project && !project.remote && <HooksCard project={project} />}
-
-          {project && (
-            <ProjectSpendCard
-              projectName={project.name}
-              limits={project.spendLimits}
-              globalEnabled={data.settings.spendLimits?.enabled === true}
+          </SettingsEntry>
+          <SettingsEntry id="usage" visible={showCard('usage')}>
+            <SpendLimitsCard
+              limits={data.settings.spendLimits}
               report={usage}
-              onChange={onProjectSpendLimits}
+              error={usageError}
+              onChange={onSpendLimits}
             />
-          )}
-
-          {project && (
-            <section className="settings-card">
+          </SettingsEntry>
+          <SettingsEntry id="memory" visible={showCard('memory')}>
+            <section className="settings-card" aria-labelledby="settings-memory-title">
               <div className="settings-card-heading">
                 <div className="settings-card-icon purple">
                   <Brain size={17} />
                 </div>
                 <div>
-                  <h2>{t('settings.memoryScope.title')}</h2>
-                  <p>{t('settings.memoryScope.detail')}</p>
+                  <h2 id="settings-memory-title">{t('settings.memory.title')}</h2>
+                  <p>{t('settings.memory.detail')}</p>
                 </div>
               </div>
-              <label className="setting-row">
-                <strong>{t('settings.memoryScope.workspace')}</strong>
-                <input value={memoryWorkspace} onChange={(e) => setMemoryWorkspace(e.target.value)} />
-              </label>
-              <label className="setting-row">
-                <strong>{t('settings.memoryScope.project')}</strong>
-                <input value={memoryProject} onChange={(e) => setMemoryProject(e.target.value)} />
-              </label>
-              <button
-                className="secondary-button"
-                disabled={!memoryWorkspace.trim() || !memoryProject.trim()}
-                onClick={() => onProjectMemoryScope(memoryWorkspace.trim(), memoryProject.trim())}
-              >
-                {t('settings.memoryScope.save')}
-              </button>
+              <div className="setting-row">
+                <div>
+                  <strong>{t('settings.memory.allow')}</strong>
+                  <span>{t('settings.memory.allowDetail')}</span>
+                </div>
+                <button
+                  className={`toggle ${data.settings.memoryEnabled ? 'on' : ''}`}
+                  role="switch"
+                  aria-checked={data.settings.memoryEnabled}
+                  aria-label={t('settings.memory.allow')}
+                  onClick={() => onSetting('memoryEnabled', !data.settings.memoryEnabled)}
+                >
+                  <span />
+                </button>
+              </div>
+              <DetachedMemorySetting
+                value={data.settings.detachedMemory}
+                memoryEnabled={data.settings.memoryEnabled}
+                onChange={onDetachedMemory}
+              />
+              <div className="integration-list">
+                {data.integrations
+                  .filter((item) => item.kind === 'memory' || item.kind === 'sandbox')
+                  .map((item) => (
+                    <div className="integration-row" key={item.id}>
+                      <div className={`integration-icon ${item.kind}`}>
+                        {item.kind === 'memory' ? <Brain size={15} /> : <Shield size={15} />}
+                      </div>
+                      <div>
+                        <strong>{item.name}</strong>
+                        <span>{item.detail}</span>
+                      </div>
+                      <span className={`integration-status-pill ${item.status}`}>{integrationName(item.status)}</span>
+                    </div>
+                  ))}
+              </div>
             </section>
+          </SettingsEntry>
+          <SettingsEntry id="permissions" visible={showCard('permissions')}>
+            <section className="settings-card" aria-labelledby="settings-permissions-title">
+              <div className="settings-card-heading">
+                <div className="settings-card-icon amber">
+                  <Shield size={17} />
+                </div>
+                <div>
+                  <h2 id="settings-permissions-title">{t('settings.permissions.title')}</h2>
+                  <p>{t('settings.permissions.detail')}</p>
+                </div>
+              </div>
+              <div className="sandbox-options">
+                <label className={data.settings.sandbox === 'read-only' ? 'sandbox-option selected' : 'sandbox-option'}>
+                  <input
+                    type="radio"
+                    name="sandbox"
+                    checked={data.settings.sandbox === 'read-only'}
+                    onChange={() => onSetting('sandbox', 'read-only')}
+                  />
+                  <div>
+                    <strong>{t('settings.permissions.readOnly')}</strong>
+                    <span>{t('settings.permissions.readOnlyDetail')}</span>
+                  </div>
+                  <Shield size={16} />
+                </label>
+                <label
+                  className={data.settings.sandbox === 'workspace-write' ? 'sandbox-option selected' : 'sandbox-option'}
+                >
+                  <input
+                    type="radio"
+                    name="sandbox"
+                    checked={data.settings.sandbox === 'workspace-write'}
+                    onChange={() => onSetting('sandbox', 'workspace-write')}
+                  />
+                  <div>
+                    <strong>{t('settings.permissions.write')}</strong>
+                    <span>{t('settings.permissions.writeDetail')}</span>
+                  </div>
+                  <Code2 size={16} />
+                </label>
+              </div>
+              <div className="setting-row">
+                <div>
+                  <strong>
+                    {data.settings.approvalMode === 'manual'
+                      ? t('settings.permissions.manual')
+                      : t('settings.permissions.auto')}
+                  </strong>
+                  <span>
+                    {data.settings.approvalMode === 'manual'
+                      ? t('settings.permissions.manualDetail')
+                      : t('settings.permissions.autoDetail')}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  className="secondary-button"
+                  onClick={() =>
+                    onSetting('approvalMode', data.settings.approvalMode === 'manual' ? 'auto-safe' : 'manual')
+                  }
+                >
+                  {data.settings.approvalMode === 'manual'
+                    ? t('settings.permissions.useAuto')
+                    : t('settings.permissions.manual')}
+                </button>
+              </div>
+              <div className="setting-row">
+                <div>
+                  <strong>{t('settings.permissions.terminal')}</strong>
+                  <span>{t('settings.permissions.terminalDetail')}</span>
+                </div>
+                <button
+                  className={`toggle ${data.settings.terminalRemote === true ? 'on' : ''}`}
+                  role="switch"
+                  aria-checked={data.settings.terminalRemote === true}
+                  aria-label={t('settings.permissions.terminal')}
+                  disabled={!isLoopbackPage()}
+                  onClick={() => onSetting('terminalRemote', data.settings.terminalRemote !== true)}
+                >
+                  <span />
+                </button>
+              </div>
+              <p className="permission-limit">{t('settings.permissions.limit')}</p>
+            </section>
+          </SettingsEntry>
+          <SettingsEntry id="remote-access" visible={showCard('remote-access')}>
+            <RemoteAccessCard
+              internetManualApproval={data.settings.internetManualApproval !== false}
+              onInternetManualApproval={(enabled) => onSetting('internetManualApproval', enabled)}
+            />
+          </SettingsEntry>
+          {isLoopbackPage() && (
+            <SettingsEntry id="remote-hosts" visible={showCard('remote-hosts')}>
+              <RemoteHostsCard onChooseProject={onResumeProject} />
+            </SettingsEntry>
           )}
-          <section className="settings-card">
-            <div className="settings-card-heading">
-              <div className="settings-card-icon">
-                <Bot size={17} />
-              </div>
-              <div>
-                <h2>{t('settings.agents.title')}</h2>
-                <p>{t('settings.agents.detail')}</p>
-              </div>
-            </div>
-            <div className="setting-row">
-              <div>
-                <strong>{t('settings.agents.default')}</strong>
-                <span>{t('settings.agents.defaultDetail')}</span>
-              </div>
-              <select
-                value={data.settings.defaultProviderId}
-                onChange={(event) => onSetting('defaultProviderId', event.target.value)}
-              >
-                {data.providers.map((provider) => (
-                  <option key={provider.id} value={provider.id}>
-                    {provider.name}
-                    {provider.available ? '' : t('settings.agents.unavailableSuffix')}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div className="setting-row">
-              <div>
-                <strong>{t('settings.agents.mode')}</strong>
-                <span>{t('settings.agents.modeDetail')}</span>
-              </div>
-              <select
-                value={data.settings.defaultMode}
-                onChange={(event) => onSetting('defaultMode', event.target.value)}
-              >
-                <option value="auto">{modeLabel('auto')}</option>
-                <option value="fast">{modeLabel('fast')}</option>
-                <option value="deep">{modeLabel('deep')}</option>
-              </select>
-            </div>
-            <div className="setting-row">
-              <div>
-                <strong>{t('settings.agents.style')}</strong>
-                <span>{t('settings.agents.styleDetail')}</span>
-              </div>
-              <select
-                value={data.settings.responseStyle}
-                onChange={(event) => onSetting('responseStyle', event.target.value)}
-              >
-                <option value="concise">{t('settings.agents.style.concise')}</option>
-                <option value="balanced">{t('settings.agents.style.balanced')}</option>
-              </select>
-            </div>
-            <div className="setting-row">
-              <div>
-                <strong>{t('settings.agents.retry')}</strong>
-                <span>{t('settings.agents.retryDetail')}</span>
-              </div>
-              <button
-                className={`toggle ${data.settings.autoRetry !== false ? 'on' : ''}`}
-                role="switch"
-                aria-checked={data.settings.autoRetry !== false}
-                aria-label={t('settings.agents.retry')}
-                onClick={() => onSetting('autoRetry', data.settings.autoRetry === false)}
-              >
-                <span />
-              </button>
-            </div>
-            <ModelFallbackSetting
-              providers={data.providers}
-              value={data.settings.modelFallback ?? { enabled: false, models: [] }}
-              onChange={onModelFallback}
-            />
-            <AutoCompactSetting
-              enabled={data.settings.autoCompact === true}
-              tokens={data.settings.autoCompactTokens ?? AUTO_COMPACT_DEFAULT_TOKENS}
-              onEnabled={(enabled) => onSetting('autoCompact', enabled)}
-              onTokens={(tokens) => onSetting('autoCompactTokens', tokens)}
-            />
-            <NotificationSetting
-              enabled={notificationsEnabled(data.settings)}
-              onChange={(enabled) => onSetting('notifications', enabled)}
-            />
-            <VoiceSetting
-              enabled={data.settings.voiceDictation !== false}
-              onChange={(enabled) => onSetting('voiceDictation', enabled)}
-            />
-            <div className="setting-row">
-              <div>
-                <strong>{t('settings.automations.label')}</strong>
-                <span>{t('settings.automations.detail')}</span>
-              </div>
-              <button
-                className={`toggle ${data.settings.automations ? 'on' : ''}`}
-                role="switch"
-                aria-checked={data.settings.automations === true}
-                aria-label={t('settings.automations.label')}
-                onClick={() => onSetting('automations', !data.settings.automations)}
-              >
-                <span />
-              </button>
-            </div>
-          </section>
-          <SpendLimitsCard
-            limits={data.settings.spendLimits}
-            report={usage}
-            error={usageError}
-            onChange={onSpendLimits}
-          />
-          <section className="settings-card">
-            <div className="settings-card-heading">
-              <div className="settings-card-icon purple">
-                <Brain size={17} />
-              </div>
-              <div>
-                <h2>{t('settings.memory.title')}</h2>
-                <p>{t('settings.memory.detail')}</p>
-              </div>
-            </div>
-            <div className="setting-row">
-              <div>
-                <strong>{t('settings.memory.allow')}</strong>
-                <span>{t('settings.memory.allowDetail')}</span>
-              </div>
-              <button
-                className={`toggle ${data.settings.memoryEnabled ? 'on' : ''}`}
-                role="switch"
-                aria-checked={data.settings.memoryEnabled}
-                aria-label={t('settings.memory.allow')}
-                onClick={() => onSetting('memoryEnabled', !data.settings.memoryEnabled)}
-              >
-                <span />
-              </button>
-            </div>
-            <DetachedMemorySetting
-              value={data.settings.detachedMemory}
-              memoryEnabled={data.settings.memoryEnabled}
-              onChange={onDetachedMemory}
-            />
-            <div className="integration-list">
-              {data.integrations
-                .filter((item) => item.kind === 'memory' || item.kind === 'sandbox')
-                .map((item) => (
-                  <div className="integration-row" key={item.id}>
-                    <div className={`integration-icon ${item.kind}`}>
-                      {item.kind === 'memory' ? <Brain size={15} /> : <Shield size={15} />}
-                    </div>
-                    <div>
-                      <strong>{item.name}</strong>
-                      <span>{item.detail}</span>
-                    </div>
-                    <span className={`integration-status-pill ${item.status}`}>{integrationName(item.status)}</span>
-                  </div>
-                ))}
-            </div>
-          </section>
-          <section className="settings-card">
-            <div className="settings-card-heading">
-              <div className="settings-card-icon amber">
-                <Shield size={17} />
-              </div>
-              <div>
-                <h2>{t('settings.permissions.title')}</h2>
-                <p>{t('settings.permissions.detail')}</p>
-              </div>
-            </div>
-            <div className="sandbox-options">
-              <label className={data.settings.sandbox === 'read-only' ? 'sandbox-option selected' : 'sandbox-option'}>
-                <input
-                  type="radio"
-                  name="sandbox"
-                  checked={data.settings.sandbox === 'read-only'}
-                  onChange={() => onSetting('sandbox', 'read-only')}
-                />
-                <div>
-                  <strong>{t('settings.permissions.readOnly')}</strong>
-                  <span>{t('settings.permissions.readOnlyDetail')}</span>
+          <SettingsEntry id="skills" visible={showCard('skills')}>
+            <section className="settings-card" aria-labelledby="settings-skills-title">
+              <div className="settings-card-heading">
+                <div className="settings-card-icon blue">
+                  <Layers3 size={17} />
                 </div>
-                <Shield size={16} />
-              </label>
-              <label
-                className={data.settings.sandbox === 'workspace-write' ? 'sandbox-option selected' : 'sandbox-option'}
-              >
-                <input
-                  type="radio"
-                  name="sandbox"
-                  checked={data.settings.sandbox === 'workspace-write'}
-                  onChange={() => onSetting('sandbox', 'workspace-write')}
-                />
                 <div>
-                  <strong>{t('settings.permissions.write')}</strong>
-                  <span>{t('settings.permissions.writeDetail')}</span>
+                  <h2 id="settings-skills-title">{t('settings.skills.title')}</h2>
+                  <p>{t('settings.skills.detail')}</p>
                 </div>
-                <Code2 size={16} />
-              </label>
-            </div>
-            <div className="setting-row">
-              <div>
-                <strong>
-                  {data.settings.approvalMode === 'manual'
-                    ? t('settings.permissions.manual')
-                    : t('settings.permissions.auto')}
-                </strong>
-                <span>
-                  {data.settings.approvalMode === 'manual'
-                    ? t('settings.permissions.manualDetail')
-                    : t('settings.permissions.autoDetail')}
-                </span>
               </div>
-              <button
-                type="button"
-                className="secondary-button"
-                onClick={() =>
-                  onSetting('approvalMode', data.settings.approvalMode === 'manual' ? 'auto-safe' : 'manual')
-                }
-              >
-                {data.settings.approvalMode === 'manual'
-                  ? t('settings.permissions.useAuto')
-                  : t('settings.permissions.manual')}
-              </button>
-            </div>
-            <div className="setting-row">
-              <div>
-                <strong>{t('settings.permissions.terminal')}</strong>
-                <span>{t('settings.permissions.terminalDetail')}</span>
-              </div>
-              <button
-                className={`toggle ${data.settings.terminalRemote === true ? 'on' : ''}`}
-                role="switch"
-                aria-checked={data.settings.terminalRemote === true}
-                aria-label={t('settings.permissions.terminal')}
-                disabled={!isLoopbackPage()}
-                onClick={() => onSetting('terminalRemote', data.settings.terminalRemote !== true)}
-              >
-                <span />
-              </button>
-            </div>
-            <p className="permission-limit">{t('settings.permissions.limit')}</p>
-          </section>
-          <RemoteAccessCard
-            internetManualApproval={data.settings.internetManualApproval !== false}
-            onInternetManualApproval={(enabled) => onSetting('internetManualApproval', enabled)}
-          />
-          {isLoopbackPage() && <RemoteHostsCard />}
-          <section className="settings-card">
-            <div className="settings-card-heading">
-              <div className="settings-card-icon blue">
-                <Layers3 size={17} />
-              </div>
-              <div>
-                <h2>{t('settings.skills.title')}</h2>
-                <p>{t('settings.skills.detail')}</p>
-              </div>
-            </div>
-            {data.skills.length === 0 ? (
-              <div className="muted-empty">{t('settings.skills.empty')}</div>
-            ) : (
-              <div className="skills-list">
-                {data.skills.map((skill) => (
-                  <div className="skill-row" key={skill.id}>
-                    <div className="skill-symbol">
-                      <Command size={14} />
+              {data.skills.length === 0 ? (
+                <div className="muted-empty">
+                  {t('settings.skills.empty')} {t('settings.skills.emptyHint')}
+                </div>
+              ) : (
+                <div className="skills-list">
+                  {data.skills.map((skill) => (
+                    <div className="skill-row" key={skill.id}>
+                      <div className="skill-symbol">
+                        <Command size={14} />
+                      </div>
+                      <div className="skill-text">
+                        <strong>{skill.name}</strong>
+                        <span>{skill.description || t('settings.skills.noDescription')}</span>
+                      </div>
+                      <button
+                        className={`toggle small ${skill.enabled ? 'on' : ''}`}
+                        role="switch"
+                        aria-checked={skill.enabled}
+                        aria-label={t('settings.skills.toggle', { name: skill.name })}
+                        onClick={() => onSkill(skill.id, !skill.enabled)}
+                      >
+                        <span />
+                      </button>
                     </div>
-                    <div className="skill-text">
-                      <strong>{skill.name}</strong>
-                      <span>{skill.description || t('settings.skills.noDescription')}</span>
-                    </div>
-                    <button
-                      className={`toggle small ${skill.enabled ? 'on' : ''}`}
-                      role="switch"
-                      aria-checked={skill.enabled}
-                      aria-label={t('settings.skills.toggle', { name: skill.name })}
-                      onClick={() => onSkill(skill.id, !skill.enabled)}
-                    >
-                      <span />
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
-          </section>
-          <CommandsCard projects={data.projects} project={project} />
-          {!project?.remote && <McpCard project={project} onProjectUpdated={onProjectUpdated} />}
-          <DiagnosticsCard
-            updateCheck={data.settings.updateCheck === true}
-            onUpdateCheck={(enabled) => onSetting('updateCheck', enabled)}
-            updateChannel={data.settings.updateChannel ?? 'master'}
-            onUpdateChannel={(channel) => onSetting('updateChannel', channel)}
-          />
+                  ))}
+                </div>
+              )}
+            </section>
+          </SettingsEntry>
+          <SettingsEntry
+            id="commands"
+            scopeLabel={projectScope ? t('settings.navigation.scopeMixed') : undefined}
+            visible={showCard('commands')}
+          >
+            <CommandsCard projects={data.projects} project={project} />
+          </SettingsEntry>
+          {!project?.remote && (
+            <SettingsEntry
+              id="mcp"
+              scopeLabel={projectScope ? t('settings.navigation.scopeMixed') : undefined}
+              visible={showCard('mcp')}
+            >
+              <McpCard project={project} onProjectUpdated={onProjectUpdated} />
+            </SettingsEntry>
+          )}
+          <SettingsEntry id="diagnostics" visible={showCard('diagnostics')}>
+            <DiagnosticsCard
+              updateCheck={data.settings.updateCheck === true}
+              onUpdateCheck={(enabled) => onSetting('updateCheck', enabled)}
+              updateChannel={data.settings.updateChannel ?? 'master'}
+              onUpdateChannel={(channel) => onSetting('updateChannel', channel)}
+            />
+          </SettingsEntry>
         </div>
         <aside className="settings-aside">
           <div className="provider-panel">
@@ -605,7 +900,62 @@ export function SettingsPage({
           </div>
         </aside>
       </div>
+      {resultCount === 0 && (
+        <div className="settings-no-results" role="status">
+          <strong>{t('settings.navigation.noResults')}</strong>
+          <span>{t('settings.navigation.noResultsHint', { query: settingsQuery })}</span>
+          <button
+            type="button"
+            className="secondary-button"
+            onClick={() => {
+              setSettingsQuery('');
+              setSettingsCategory('all');
+            }}
+          >
+            {t('settings.navigation.reset')}
+          </button>
+        </div>
+      )}
     </section>
+  );
+}
+
+function normalizeSettingsSearch(value: string) {
+  return value
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLocaleLowerCase();
+}
+
+function SettingsEntry({
+  id,
+  visible,
+  ariaLabel,
+  projectScope = false,
+  scopeLabel,
+  children,
+}: {
+  id: string;
+  visible: boolean;
+  ariaLabel?: string;
+  projectScope?: boolean;
+  scopeLabel?: string;
+  children: ReactNode;
+}) {
+  const { t } = useI18n();
+  return (
+    <div
+      className="settings-entry"
+      id={`settings-entry-${id}`}
+      hidden={!visible}
+      role={ariaLabel ? 'region' : undefined}
+      aria-label={ariaLabel}
+    >
+      <span className={`settings-scope-badge ${projectScope ? 'project' : 'global'}`}>
+        {scopeLabel || (projectScope ? t('settings.navigation.scopeProject') : t('settings.navigation.scopeGlobal'))}
+      </span>
+      {children}
+    </div>
   );
 }
 

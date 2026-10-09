@@ -3,6 +3,7 @@ import { createServer, type Server } from 'node:http';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { performance } from 'node:perf_hooks';
 import { DatabaseSync } from 'node:sqlite';
 import { createBackend } from '../server/index.js';
 import { migrate, migrations } from '../server/migrations.js';
@@ -281,7 +282,14 @@ function setup(
   opts.before?.(store);
   const provider = scriptedProvider();
   const backend = createBackend(store, provider.providers, undefined, undefined, { retries: 0 });
-  const flush = () => vi.advanceTimersByTimeAsync(0);
+  const flush = async () => {
+    await vi.advanceTimersByTimeAsync(0);
+    // Fake timers advance scheduler work, not subprocess I/O (for example the async Git probe).
+    // Let the real event loop process bounded I/O turns without advancing or sleeping fake time.
+    const deadline = performance.now() + 40;
+    for (let turns = 0; turns < 10_000 && performance.now() < deadline; turns++)
+      await new Promise<void>((resolve) => setImmediate(resolve));
+  };
   const runEnded = async () => {
     for (let i = 0; i < 50 && backend.orchestrator.isActive(get().conversationId ?? ''); i++) await flush();
   };
@@ -862,7 +870,7 @@ describe('migration 10', () => {
     );
     db.exec(`INSERT INTO projects VALUES('p','{}'); INSERT INTO projects VALUES('q','{}');`);
     const result = migrate(db, dir);
-    expect(result.applied).toEqual([9, 10, 11, 12, 13, 14, 15]);
+    expect(result.applied).toEqual([9, 10, 11, 12, 13, 14, 15, 16]);
     db.exec(`PRAGMA foreign_keys=ON;
       INSERT INTO automations VALUES('a','p','{}');
       INSERT INTO automations VALUES('b','q','{}');`);

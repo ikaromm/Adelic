@@ -2,16 +2,20 @@ import { describe, expect, it } from 'vitest';
 import type { DelegatedTask, RunEvent } from '../shared/contracts';
 import {
   activityForRun,
+  deliveryChecks,
   activityIsVisible,
   actionNeedsDisclosure,
   checksSummary,
   commandPreview,
   runStatusLabel,
   statusLabel,
+  taskOutcome,
+  taskPhases,
 } from '../src/run-activity';
 
 const task = (id: string, runId: string): DelegatedTask => ({
   id,
+  agentId: `agent-${id}`,
   runId,
   sessionId: 's',
   projectId: null,
@@ -144,5 +148,51 @@ describe('project checks in the run activity', () => {
       '1 verificação · rodando',
     );
     expect(checksSummary([])).toBe('');
+  });
+});
+
+describe('delivery check lifecycle', () => {
+  it('retains running checks without a command and counts completed results once', () => {
+    const checks: RunEvent[] = [
+      { ...event('check1', 'run', 'check'), check: { name: 'lint', status: 'running' } },
+      { ...event('check1', 'run', 'check'), check: { name: 'lint', status: 'running', output: 'progress' } },
+      { ...event('check1', 'run', 'check'), check: { name: 'lint', status: 'passed', command: 'npm run lint' } },
+      { ...event('check4', 'run', 'check'), check: { name: 'lint', status: 'running' } },
+    ];
+    expect(deliveryChecks(checks)).toEqual([
+      { name: 'lint', status: 'passed', output: 'progress', command: 'npm run lint' },
+      { name: 'lint', status: 'running' },
+    ]);
+  });
+});
+
+describe('agent phase and task outcomes', () => {
+  it('groups planned phases in stable orchestration order and classifies mixed results', () => {
+    const tasks: DelegatedTask[] = [
+      { ...task('review', 'r'), role: 'reviewer', status: 'completed' },
+      {
+        ...task('worker-blocked', 'r'),
+        role: 'worker',
+        status: 'blocked' as unknown as DelegatedTask['status'],
+        error: 'worktree conflict',
+      },
+      { ...task('planner', 'r'), role: 'planner', status: 'completed' },
+      {
+        ...task('worker-partial', 'r'),
+        role: 'worker',
+        status: 'partial' as unknown as DelegatedTask['status'],
+      },
+    ];
+    expect(taskPhases(tasks).map(({ phase, tasks: grouped }) => [phase, grouped.map(({ id }) => id)])).toEqual([
+      ['planner', ['planner']],
+      ['worker', ['worker-blocked', 'worker-partial']],
+      ['reviewer', ['review']],
+    ]);
+    expect(taskOutcome('completed')).toBe('completed');
+    expect(taskOutcome('blocked')).toBe('blocked');
+    expect(taskOutcome('conflict')).toBe('blocked');
+    expect(taskOutcome('partial')).toBe('partial');
+    expect(taskOutcome('failed')).toBe('failed');
+    expect(tasks[1]?.error).toContain('conflict');
   });
 });

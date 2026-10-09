@@ -102,16 +102,53 @@ export function projectOrchestration(project: Pick<Project, 'orchestration'>): O
   return { ...DEFAULT_ORCHESTRATION, ...project.orchestration };
 }
 export type AgentRole = 'planner' | 'worker' | 'reviewer' | 'synthesis';
+export type TaskDeliveryStatus = 'implemented' | 'partial' | 'blocked' | 'not_implemented' | 'unverified';
+export interface TaskRecovery {
+  /** retry resumes only this failed task; inspect opens persisted task/artifact evidence. */
+  action: 'retry' | 'inspect' | 'none' | 'recover_worktree';
+  reason: string;
+}
+/** Delivery assessment is separate from whether the agent process itself stopped cleanly. */
+export interface TaskDeliveryResult {
+  status: TaskDeliveryStatus;
+  reason: string;
+  /** Machine-observed facts only; never copied from a worker's self-assessment. */
+  evidence: string[];
+  recovery: TaskRecovery;
+  recordedAt: string;
+}
+export interface TaskIntegration {
+  /** Whether provider output reached the main project; independent of provider process status. */
+  status: 'not_required' | 'applied' | 'blocked';
+  /** Worktree cleanup is deliberately tracked separately from patch application. */
+  cleanup: 'not_required' | 'complete' | 'pending';
+  reason?: string;
+  recordedAt: string;
+}
 export interface DelegatedTask {
   id: string;
+  /** Stable id for this delegated agent instance; separate from its task and provider call ids. */
+  agentId: string;
+  /** Persisted link to the single run started by retrying this task. */
+  retryRunId?: string;
+  /** Linked retry run state, derived by the store for recovery eligibility. */
+  retryRunStatus?: RunStatus;
+  /** True with positive delivery evidence, false only for complete no-change evidence; absent means unknown. */
+  retryRunDelivered?: boolean;
+  /** Store-derived lineage state; distinguishes an empty history from historical unknown evidence. */
+  retryHistoryState?: 'none' | 'empty' | 'delivered' | 'unknown';
+  /** Retry reservation survives concurrent requests and process reloads. */
+  retryStartedAt?: string;
   projectId: string | null;
   sessionId: string;
   runId: string;
+  /** The lifecycle phase; also supplies the event phase tag. */
   role: AgentRole;
   title: string;
   instructions: string;
   scope: string[];
   dependsOn: string[];
+  /** Effective values observed by the orchestrator, including selected model and adapted effort. */
   effort?: ReasoningEffort;
   providerId: ProviderId;
   model?: string;
@@ -122,6 +159,15 @@ export interface DelegatedTask {
   summary?: string;
   output?: string;
   error?: string;
+  /** Tool activity captured from provider events; not worker-authored. */
+  toolCalls?: { callId?: string; name: string; status: string; recordedAt: string }[];
+  delivery?: TaskDeliveryResult;
+  /** Provider/process status above is not rewritten by integration or cleanup outcomes. */
+  integration?: TaskIntegration;
+  /** Retained isolated executor checkout when integration failed or execution was partial. */
+  recoveryWorktree?: SessionWorktree;
+  /** Why writes had to use serialized execution instead of an isolated worktree. */
+  isolationReason?: string;
 }
 export interface ProjectBrief {
   projectId: string;
@@ -193,6 +239,8 @@ export interface Session {
   updatedAt: string;
   /** Archived conversations remain searchable and can be restored with PATCH archived=false. */
   archivedAt?: string;
+  /** Sidebar favorite; stored with the conversation, independent of project/files. */
+  pinnedAt?: string;
   activeRunId?: string;
   nativeSessionId?: string;
   /** "Planejar antes": every message first produces a read-only plan to approve (docs/specs/plan-mode.md). */
@@ -217,6 +265,8 @@ export interface SessionWorktree {
   branch: string;
   /** Commit the branch started from. */
   base: string;
+  /** Tree of tracked and non-ignored untracked files captured at creation, for safe dirty-project integration. */
+  snapshotTree?: string;
   createdAt: string;
 }
 /** GET /api/sessions/:id/worktree. */
@@ -296,6 +346,14 @@ export interface MessageHandoff {
   /** Set when a model summary was requested but the local one was used, with the reason. */
   fallback?: string;
 }
+export interface RunArtifactsSnapshot {
+  status: 'available' | 'unknown';
+  reason?: string;
+  files: { path: string; status: 'added' | 'modified' | 'deleted' }[];
+  omitted?: number;
+  truncated?: boolean;
+  capturedAt?: string;
+}
 export interface Run {
   id: string;
   sessionId: string;
@@ -303,11 +361,17 @@ export interface Run {
   status: RunStatus;
   route: RoutePlan;
   startedAt: string;
+  /** Originating delegated task when this run is a persisted task retry. */
+  retryOfTaskId?: string;
   completedAt?: string;
   durationMs?: number;
   firstTokenMs?: number;
   inputTokens?: number;
   outputTokens?: number;
+  /** Subset of inputTokens served from the provider cache, when reported. */
+  cachedInputTokens?: number;
+  /** Subset of outputTokens used for reasoning, when reported; never add again. */
+  reasoningOutputTokens?: number;
   costUsd?: number;
   error?: string;
   /** Automatic retries that happened before the final outcome (0 or absent: none). */
@@ -328,6 +392,12 @@ export interface Run {
   fallback?: { from: ModelRef; to: ModelRef; reason: string };
   /** Snapshot of the project files around a run that could write; see docs/specs/checkpoints.md. */
   checkpoint?: RunCheckpoint;
+  /** Bounded observed changes; independent of Git checkpoints and not an undo backup. */
+  artifacts?: RunArtifactsSnapshot;
+  /** Canonical operational root captured for this run, including worktree selection. */
+  artifactRoot?: string;
+  /** Git availability observed at run start; unknown remains absent. */
+  gitAvailable?: boolean;
   /** Plan mode: a read-only planning run, or the run of one task of an approved plan. */
   plan?: RunPlanRef;
   /** Its messages were discarded by "Editar" on an earlier message; kept for history and audit. */
@@ -415,8 +485,10 @@ export interface FileChange {
   binary?: boolean;
 }
 export interface RunCheckpoint {
-  /** False when no checkpoint could be taken (not a git repository, too large, git failed). */
+  /** False when no checkpoint could be taken. */
   available: boolean;
+  /** Structured classification for unavailable captures; absent historical values are unknown. */
+  captureState?: 'not_applicable' | 'failed';
   reason?: string;
   /** Real path of the snapshotted folder. */
   root?: string;
@@ -485,6 +557,10 @@ export interface RunEvent {
   textKey?: string;
   textVars?: Record<string, string | number | { key: string }>;
   createdAt: string;
+  /** Delegated lifecycle correlation; absent for ordinary run events. */
+  taskId?: string;
+  agentId?: string;
+  phase?: AgentRole;
   toolName?: string;
   toolCallId?: string;
   status?: string;
@@ -662,7 +738,17 @@ export interface MemoryPage {
 
 export type StreamEvent =
   | { type: 'message'; message: Message }
-  | { type: 'delta'; sessionId: string; runId: string; messageId: string; text: string }
+  | {
+      type: 'delta';
+      sessionId: string;
+      runId: string;
+      messageId: string;
+      text: string;
+      /** Present for direct streamed output from a delegated task. */
+      taskId?: string;
+      agentId?: string;
+      phase?: AgentRole;
+    }
   | { type: 'event'; event: RunEvent }
   | { type: 'approval'; approval: Approval }
   | { type: 'run'; run: Run }
@@ -715,6 +801,7 @@ export interface RunInput {
    * providers keep failing closed on any MCP server. Never set for detached conversations.
    */
   mcpServers?: RunMcpServer[];
+  executorContext?: { git: 'available' | 'unavailable' | 'unknown'; checks: string[] };
   remote?: RemoteRuntime;
 }
 export type ProviderEvent =
@@ -723,12 +810,23 @@ export type ProviderEvent =
   | { type: 'tool'; name: string; description: string; status: string; toolCallId?: string }
   | { type: 'approval'; approval: Approval }
   | { type: 'session'; nativeSessionId: string }
-  | { type: 'usage'; inputTokens?: number; outputTokens?: number; costUsd?: number };
+  | {
+      type: 'usage';
+      inputTokens?: number;
+      outputTokens?: number;
+      cachedInputTokens?: number;
+      reasoningOutputTokens?: number;
+      costUsd?: number;
+    };
 export interface RunResult {
   text: string;
   nativeSessionId?: string;
   inputTokens?: number;
   outputTokens?: number;
+  /** Subset of inputTokens served from the provider cache, when reported. */
+  cachedInputTokens?: number;
+  /** Subset of outputTokens used for reasoning, when reported; never add again. */
+  reasoningOutputTokens?: number;
   costUsd?: number;
   stopReason: 'completed' | 'cancelled';
 }

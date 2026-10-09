@@ -50,6 +50,7 @@ test('configures checks in Settings, tests one, and runs them after a run edits 
     .getByRole('navigation', { name: 'Navegação principal' })
     .getByRole('button', { name: 'Configurações' })
     .click();
+  await page.getByRole('button', { name: 'Avançado', exact: true }).click();
   const card = page.getByRole('region', { name: 'Verificações e bloqueios' });
   await expect(card).toBeVisible();
   await card.getByRole('button', { name: 'Adicionar verificação' }).click();
@@ -84,7 +85,8 @@ test('configures checks in Settings, tests one, and runs them after a run edits 
   await expect(checks.getByText(/Verificação: conteúdo passou \(\d+ s\)/)).toBeVisible();
   await expect(checks.getByText('Verificação: sem rede falhou (código 4)')).toBeVisible();
   await checks.getByText('Verificação: sem rede falhou (código 4)').click();
-  await expect(checks.getByLabel('Saída da verificação sem rede')).toHaveText('sem conexão');
+  await expect(checks.getByLabel('Saída da verificação sem rede')).toContainText('echo sem conexão >&2; exit 4');
+  await expect(checks.getByLabel('Saída da verificação sem rede')).toContainText('sem conexão');
   expect(readFileSync(join(repo, 'README.md'), 'utf8')).toContain('linha alterada pelo agente 1');
 });
 
@@ -129,6 +131,7 @@ test('fits the settings card and the check results on a small screen', async ({ 
     .getByRole('navigation', { name: 'Navegação principal' })
     .getByRole('button', { name: 'Configurações' })
     .click();
+  await page.getByRole('button', { name: 'Avançado', exact: true }).click();
   const card = page.getByRole('region', { name: 'Verificações e bloqueios' });
   await expect(card.getByRole('listitem', { name: 'Verificação 1' }).getByLabel('Comando')).toHaveValue('echo ok');
   await card.scrollIntoViewIfNeeded();

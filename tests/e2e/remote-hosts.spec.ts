@@ -129,7 +129,9 @@ test('pins a probed SSH key before creating a remote project and shows its worki
     .getByRole('navigation', { name: 'Navegação principal' })
     .getByRole('button', { name: 'Configurações' })
     .click();
+  await page.getByRole('button', { name: 'Avançado', exact: true }).click();
   const hosts = page.getByRole('region', { name: 'Servidores SSH' });
+  await hosts.getByText('Ou informar destino manualmente').click();
   await hosts.getByLabel('Destino SSH').fill('e2e@remote.invalid');
   await hosts.getByLabel('Porta').fill('2222');
   await hosts.getByRole('button', { name: 'Consultar chave SSH' }).click();
@@ -145,16 +147,14 @@ test('pins a probed SSH key before creating a remote project and shows its worki
   await save.click();
   const hostResponse = await hostCreated;
   savedHost.id = ((await hostResponse.json()) as { id: string }).id;
+  await hosts.getByText('Mais ações e detalhes').click();
   await expect(hosts.getByText(fingerprint)).toBeVisible();
 
   await page.getByRole('button', { name: 'Adicionar projeto' }).click();
   const form = page.getByRole('dialog', { name: 'Novo projeto' });
   await form.getByLabel('Nome do projeto').fill(projectName);
   await form.getByLabel('Localização do código').selectOption('remote');
-  await form
-    .locator('select')
-    .nth(1)
-    .selectOption({ label: `${hostName} · e2e@remote.invalid:2222` });
+  await form.locator('select').nth(1).selectOption(savedHost.id);
   await form.getByLabel('Caminho remoto').fill('/home/e2e/work');
   await form.getByRole('button', { name: 'Listar diretórios' }).click();
   await form.getByRole('button', { name: 'src', exact: true }).click();
@@ -190,6 +190,7 @@ test('pins a probed SSH key before creating a remote project and shows its worki
     .getByRole('navigation', { name: 'Navegação principal' })
     .getByRole('button', { name: 'Configurações' })
     .click();
+  await page.getByRole('button', { name: 'Avançado', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Mapa de código (Graphify)' })).toHaveCount(0);
   await expect(page.getByRole('heading', { name: 'Verificações e bloqueios' })).toHaveCount(0);
   await expect(page.getByRole('heading', { name: 'Servidores MCP' })).toHaveCount(0);
@@ -229,9 +230,11 @@ test('loads SSH aliases automatically and keeps host details clear of action but
     .getByRole('navigation', { name: 'Navegação principal' })
     .getByRole('button', { name: 'Configurações' })
     .click();
+  await page.getByRole('button', { name: 'Avançado', exact: true }).click();
   const card = page.getByRole('region', { name: 'Servidores SSH' });
   await expect(card.getByLabel('Servidor do ~/.ssh/config')).toBeEnabled();
   await card.getByLabel('Servidor do ~/.ssh/config').selectOption('e2e-config-alias');
+  await card.getByText('Ou informar destino manualmente').click();
   await expect(card.getByLabel('Destino SSH')).toHaveValue('e2e-config-alias');
   await expect(card.getByLabel('Porta')).toHaveValue('');
   await card.getByRole('button', { name: 'Consultar chave SSH' }).click();
@@ -241,7 +244,7 @@ test('loads SSH aliases automatically and keeps host details clear of action but
   for (const width of [1920, 1024, 390]) {
     await page.setViewportSize({ width, height: 900 });
     const info = await card.locator('.remote-host-info').boundingBox();
-    const actions = await card.locator('.remote-host-actions').boundingBox();
+    const actions = await card.locator('.ssh-host-details').boundingBox();
     expect(info).not.toBeNull();
     expect(actions).not.toBeNull();
     expect(actions!.y).toBeGreaterThanOrEqual(info!.y + info!.height);

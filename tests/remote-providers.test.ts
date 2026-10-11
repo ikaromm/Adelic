@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import net from 'node:net';
@@ -202,6 +202,107 @@ readline.createInterface({input:process.stdin}).on('line',(line)=>{
       await provider.shutdown();
     }
   });
+  it('dispatches validated argument-vector checks through Codex into an isolated read-only executor', async () => {
+    await access('/usr/bin/bwrap');
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'adelic-local-readonly-provider-'));
+    dirs.push(directory);
+    const workspace = path.join(directory, 'workspace');
+    await mkdir(path.join(workspace, 'node_modules/typescript/lib'), { recursive: true });
+    const compiler = path.join(workspace, 'node_modules/typescript/lib/typescript.js');
+    await writeFile(compiler, 'fixture compiler');
+    const scratchName = `adelic-reviewer-${process.pid}-${Date.now()}`;
+    const script = [
+      'const fs=require("node:fs");',
+      'const checks=[];',
+      'for(const p of ["/workspace/forbidden.txt", "/workspace/node_modules/typescript/lib/typescript.js"]) {',
+      'try { fs.writeFileSync(p, "changed"); checks.push("write-allowed"); }',
+      'catch(e) { checks.push(e.code === "EROFS" ? "write-denied" : "unexpected-"+e.code); }',
+      '}',
+      `const scratch="/var/tmp/${scratchName}"; fs.writeFileSync(scratch,"scratch"); fs.unlinkSync(scratch);`,
+      'console.log(checks.join(";"));',
+    ].join('');
+    const runtime = await createLocalExecutor(workspace, 'read-only');
+    const resultLog = path.join(directory, 'tool-result.json');
+    const fake = path.join(directory, 'codex.mjs');
+    await writeFile(
+      fake,
+      `#!/usr/bin/env node
+import readline from 'node:readline';
+import fs from 'node:fs';
+const resultLog=${JSON.stringify(resultLog)};
+const send=(m)=>process.stdout.write(JSON.stringify(m)+'\\n');
+const thread='readonly-check-thread';
+readline.createInterface({input:process.stdin}).on('line',(line)=>{
+ const m=JSON.parse(line);
+ if(m.method==='initialize')send({jsonrpc:'2.0',id:m.id,result:{}});
+ else if(m.method==='config/read')send({jsonrpc:'2.0',id:m.id,result:{config:{mcp_servers:{}}}});
+ else if(m.method==='thread/start')send({jsonrpc:'2.0',id:m.id,result:{thread:{id:thread}}});
+ else if(m.method==='turn/start'){
+  send({jsonrpc:'2.0',id:m.id,result:{turn:{id:'readonly-check-turn'}}});
+  send({jsonrpc:'2.0',method:'turn/started',params:{threadId:thread,turn:{id:'readonly-check-turn'}}});
+  send({jsonrpc:'2.0',id:701,method:'item/tool/call',params:{threadId:thread,turnId:'readonly-check-turn',callId:'readonly-check',tool:'adelic_remote_exec',arguments:{command:['node','-e',${JSON.stringify(script)}],timeoutMs:10000}}});
+ } else if(m.id===701){ fs.writeFileSync(resultLog,JSON.stringify(m.result)); send({jsonrpc:'2.0',method:'turn/completed',params:{threadId:thread,turn:{id:'readonly-check-turn',status:'completed'}}}); }
+});
+`,
+      { mode: 0o700 },
+    );
+    const provider = new CodexProvider(
+      async () => fake,
+      undefined,
+      undefined,
+      undefined,
+      async (command, args) => ({ command, args }),
+    );
+    const events: { name: string; status: string; description: string }[] = [];
+    try {
+      await expect(
+        provider.run(
+          {
+            ...input(workspace, runtime),
+            sandbox: 'read-only',
+            approvalMode: 'automatic',
+          },
+          (event) => {
+            if (event.type === 'tool')
+              events.push({ name: event.name, status: event.status, description: event.description });
+          },
+          new AbortController().signal,
+        ),
+      ).resolves.toMatchObject({ stopReason: 'completed' });
+      expect(events).toContainEqual(expect.objectContaining({ name: 'exec', status: 'running' }));
+      expect(events).toContainEqual(expect.objectContaining({ name: 'exec', status: 'completed' }));
+      expect(events[0]?.description).toContain('node -e');
+      const toolResponse = JSON.parse(await readFile(resultLog, 'utf8')) as {
+        contentItems: Array<{ text: string }>;
+      };
+      const commandResult = JSON.parse(toolResponse.contentItems[0]!.text) as {
+        exitCode: number;
+        stdout: string;
+      };
+      expect(commandResult.exitCode).toBe(0);
+      expect(commandResult.stdout.trim()).toBe('write-denied;write-denied');
+      expect(await readFile(compiler, 'utf8')).toBe('fixture compiler');
+      await expect(readFile(path.join(workspace, 'forbidden.txt'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+      await expect(readFile(path.join('/var/tmp', scratchName), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+      await runtime.close();
+      const reopened = await createLocalExecutor(workspace, 'read-only');
+      try {
+        await expect(
+          reopened.call(
+            'read_file',
+            { path: 'node_modules/typescript/lib/typescript.js' },
+            new AbortController().signal,
+          ),
+        ).resolves.toMatchObject({ content: 'fixture compiler' });
+      } finally {
+        await reopened.close();
+      }
+    } finally {
+      await runtime.close();
+      await provider.shutdown();
+    }
+  });
+
   it('derives executor guidance from provider, runtime and effective sandbox permissions', () => {
     const base = {
       executorContext: { git: 'available' as const, checks: ['npm test', 'npm test'] },
@@ -226,8 +327,18 @@ readline.createInterface({input:process.stdin}).on('line',(line)=>{
       sandbox: 'read-only',
       remote: { label: 'ssh', root: '/p', executionKind: 'ssh', call: async () => undefined },
     });
-    expect(codexReadOnly).toContain('somente leitura');
+    expect(codexReadOnly).toContain('SSH/read-only serve apenas para inspeção');
     expect(codexReadOnly).toContain('ferramentas nativas Codex em read-only');
+    const codexLocalReadOnly = executorContextInstructions({
+      ...base,
+      providerId: 'codex',
+      sandbox: 'read-only',
+      remote: { label: 'local', root: '/p', executionKind: 'isolated-local', call: async () => undefined },
+    });
+    expect(codexLocalReadOnly).toContain('Quando o executor LOCAL isolado confirmar efetivamente o sandbox');
+    expect(codexLocalReadOnly).toContain('Até essa confirmação, ou se ela falhar');
+    expect(codexLocalReadOnly).toContain('vetor de argumentos');
+    expect(codexLocalReadOnly).toContain('scratch privado');
     const kiroWrite = executorContextInstructions({
       ...base,
       providerId: 'kiro',
@@ -242,7 +353,7 @@ readline.createInterface({input:process.stdin}).on('line',(line)=>{
       sandbox: 'read-only',
       remote: { label: 'ssh', root: '/p', executionKind: 'ssh', call: async () => undefined },
     });
-    expect(kiroReadOnly).toContain('somente leitura');
+    expect(kiroReadOnly).toContain('SSH/read-only serve apenas para inspeção');
     expect(kiroReadOnly).not.toContain('nativas Codex');
     const localOnly = executorContextInstructions({ ...base, providerId: 'opencode', sandbox: 'read-only' });
     expect(localOnly).toContain('Não há executor');
@@ -277,6 +388,15 @@ readline.createInterface({input:process.stdin}).on('line',(line)=>{
     const diagnose = REMOTE_TOOL_SPECS.find((tool) => tool.remoteName === 'diagnose')!;
     expect(validateRemoteArguments(diagnose, {})).toEqual({});
     expect(validateRemoteArguments(diagnose, { command: 'install' })).toBeUndefined();
+    const exec = REMOTE_TOOL_SPECS.find((tool) => tool.remoteName === 'exec')!;
+    expect(validateRemoteArguments(exec, { command: ['npm', 'run', 'typecheck'] })).toEqual({
+      command: ['npm', 'run', 'typecheck'],
+    });
+    expect(validateRemoteArguments(exec, { command: 'npm run typecheck' })).toEqual({
+      command: 'npm run typecheck',
+    });
+    expect(validateRemoteArguments(exec, { command: [] })).toBeUndefined();
+    expect(validateRemoteArguments(exec, { command: ['node', 'x'.repeat(8193)] })).toBeUndefined();
   });
 
   it('explains HTTP 409 and read-only policy refusals without suggesting argument retries', () => {
@@ -808,6 +928,138 @@ readline.createInterface({input:process.stdin}).on('line',async (line)=>{
     }
   });
 
+  it('blocks equivalent string and argv commands before automatic provider dispatch', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'adelic-remote-blocked-argv-'));
+    dirs.push(directory);
+    const fake = path.join(directory, 'codex.mjs');
+    const requestLog = path.join(directory, 'requests.jsonl');
+    await writeFile(
+      fake,
+      `#!/usr/bin/env node
+import readline from 'node:readline';
+import fs from 'node:fs';
+const log=${JSON.stringify(requestLog)};
+const send=(m)=>process.stdout.write(JSON.stringify(m)+'\\n');
+const thread='blocked-argv-thread';
+const commands=[
+ {command:['npm','test']},
+ {command:'npm test'},
+ {command:['npm','run','typecheck']},
+ {command:'npm run typecheck'},
+ {command:['bash','-c','--','npm test']},
+ {command:['bash','-co','posix','npm test']},
+ {command:['bash','+O','extglob','-c','npm test']},
+ {command:"bash -lc 'npm test pwd'; bash -lc 'npm test\\npwd'"}
+];
+const ask=(index)=>send({jsonrpc:'2.0',id:701+index,method:'item/tool/call',params:{threadId:thread,turnId:'blocked-turn',callId:'blocked-'+index,tool:'adelic_remote_exec',arguments:commands[index]}});
+readline.createInterface({input:process.stdin}).on('line',(line)=>{
+ const m=JSON.parse(line);
+ fs.appendFileSync(log,JSON.stringify(m)+'\\n');
+ if(m.method==='initialize')send({jsonrpc:'2.0',id:m.id,result:{}});
+ else if(m.method==='config/read')send({jsonrpc:'2.0',id:m.id,result:{config:{mcp_servers:{}}}});
+ else if(m.method==='thread/start')send({jsonrpc:'2.0',id:m.id,result:{thread:{id:thread}}});
+ else if(m.method==='turn/start'){
+  send({jsonrpc:'2.0',id:m.id,result:{turn:{id:'blocked-turn'}}});
+  send({jsonrpc:'2.0',method:'turn/started',params:{threadId:thread,turn:{id:'blocked-turn'}}});
+  ask(0);
+ } else if(Number.isInteger(m.id)&&m.id>=701&&m.id<=708){
+  if(m.id<708)ask(m.id-700);
+  else send({jsonrpc:'2.0',method:'turn/completed',params:{threadId:thread,turn:{id:'blocked-turn',status:'completed'}}});
+ }
+});
+`,
+      { mode: 0o700 },
+    );
+    const calls: unknown[] = [];
+    const runtime: RemoteRuntime = {
+      label: 'blocked-host',
+      root: '/remote/project',
+      executionKind: 'ssh',
+      call: async (...args) => {
+        calls.push(args);
+        return 'must not execute';
+      },
+    };
+    const provider = new CodexProvider(
+      async () => fake,
+      undefined,
+      undefined,
+      undefined,
+      async (command, args) => ({ command, args }),
+    );
+    const approvals: {
+      status?: string;
+      title?: string;
+      command?: string;
+      blocked?: string;
+      decision?: unknown;
+      detail?: string;
+    }[] = [];
+    const tools: { status: string; description: string; toolCallId?: string }[] = [];
+    const commandsInInput = ['npm test', 'npm run typecheck'];
+    try {
+      await expect(
+        provider.run(
+          {
+            ...input(process.cwd(), runtime),
+            approvalMode: 'automatic',
+            blockedCommands: commandsInInput,
+          },
+          (event) => {
+            if (event.type === 'approval') approvals.push(event.approval);
+            if (event.type === 'tool') tools.push(event);
+          },
+          new AbortController().signal,
+        ),
+      ).resolves.toMatchObject({ stopReason: 'completed' });
+      const requests = (await readFile(requestLog, 'utf8'))
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line) as { id?: number; result?: { error?: string } });
+      expect(
+        Array.from({ length: 8 }, (_, index) => requests.find((request) => request.id === 701 + index)?.result?.error),
+      ).toEqual(Array.from({ length: 8 }, () => 'blocked_by_project_rule'));
+      expect(calls).toEqual([]);
+      expect(tools).toHaveLength(8);
+      expect(tools.every((event) => event.status === 'denied')).toBe(true);
+      expect(approvals).toHaveLength(8);
+      expect(approvals.map((approval) => approval.command)).toEqual([
+        'npm test',
+        'npm test',
+        'npm run typecheck',
+        'npm run typecheck',
+        "bash -c -- 'npm test'",
+        "bash -co posix 'npm test'",
+        "bash +O extglob -c 'npm test'",
+        "bash -lc 'npm test pwd'; bash -lc 'npm test\npwd'",
+      ]);
+      expect(approvals.map((approval) => approval.blocked)).toEqual([
+        'npm test',
+        'npm test',
+        'npm run typecheck',
+        'npm run typecheck',
+        'npm test',
+        'npm test',
+        'npm test',
+        'npm test',
+      ]);
+      expect(approvals.every((approval) => approval.status === 'denied')).toBe(true);
+      expect(approvals.every((approval) => approval.title === 'Comando bloqueado pelas regras do projeto')).toBe(true);
+      expect(
+        approvals.every(
+          (approval) =>
+            (approval.decision as { source?: string; rule?: string }).source === 'project-rule' &&
+            (approval.decision as { source?: string; rule?: string }).rule === 'blocked-command',
+        ),
+      ).toBe(true);
+      expect(
+        approvals.every((approval) => String(approval.detail).includes('[redigidos no registro automático]')),
+      ).toBe(true);
+    } finally {
+      await provider.shutdown();
+    }
+  });
+
   it('auto-approves fixed SSH and isolated local tools only in an automatic run', async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), 'adelic-remote-automatic-'));
     dirs.push(directory);
@@ -1018,7 +1270,7 @@ readline.createInterface({input:process.stdin}).on('line',(line)=>{
  else if(m.method==='turn/start'){
   send({jsonrpc:'2.0',id:m.id,result:{turn:{id:'turn-1'}}});
   send({jsonrpc:'2.0',method:'turn/started',params:{threadId:thread,turn:{id:'turn-1'}}});
-  send({jsonrpc:'2.0',id:701,method:'item/tool/call',params:{threadId:thread,turnId:'turn-1',callId:'blocked-call',tool:'adelic_remote_exec',arguments:{command:'rm -rf *'}}});
+  send({jsonrpc:'2.0',id:701,method:'item/tool/call',params:{threadId:thread,turnId:'turn-1',callId:'blocked-call',tool:'adelic_remote_exec',arguments:{command:JSON.parse(process.env.ADELIC_TEST_BLOCKED_COMMAND||'["bash","-lc","npm test"]')}}});
  }
  else if(m.id===701)send({jsonrpc:'2.0',method:'turn/completed',params:{threadId:thread,turn:{id:'turn-1',status:'completed'}}});
 });
@@ -1040,7 +1292,7 @@ readline.createInterface({input:process.stdin}).on('line',(line)=>{
  else if(m.method==='session/prompt'){
   const bridge=servers.find((item)=>item.name==='adelic_remote');
   const socketPath=bridge.env.find((item)=>item.name==='ADELIC_REMOTE_SOCKET').value;
-  const socket=net.createConnection(socketPath,()=>socket.write(JSON.stringify({id:'blocked-call',tool:'exec',args:{command:'rm -rf *'}})+'\\n'));
+  const socket=net.createConnection(socketPath,()=>socket.write(JSON.stringify({id:'blocked-call',tool:'exec',args:{command:JSON.parse(process.env.ADELIC_TEST_BLOCKED_COMMAND||'["bash","-lc","npm test"]')}})+'\\n'));
   let data='';socket.on('data',(chunk)=>{data+=chunk.toString();if(data.includes('\\n')){send({jsonrpc:'2.0',id:m.id,result:{stopReason:'end_turn'}});socket.end();}});
  }
 });
@@ -1086,7 +1338,7 @@ readline.createInterface({input:process.stdin}).on('line',(line)=>{
                 ...input(directory, runtime),
                 providerId: scenario.provider,
                 approvalMode: scenario.mode,
-                blockedCommands: ['rm *'],
+                blockedCommands: ['npm test'],
               },
               (event) => {
                 if (event.type === 'approval') approvals.push(event.approval as unknown as Record<string, unknown>);
@@ -1098,8 +1350,8 @@ readline.createInterface({input:process.stdin}).on('line',(line)=>{
           expect(approvals).toHaveLength(1);
           expect(approvals[0]).toMatchObject({
             status: 'denied',
-            command: 'rm -rf *',
-            blocked: 'rm *',
+            command: expect.any(String),
+            blocked: 'npm test',
             decision: { source: 'project-rule', rule: 'blocked-command' },
           });
           expect(tools).toContainEqual(expect.objectContaining({ name: 'exec', status: 'denied' }));

@@ -12,6 +12,7 @@ import {
   writeFile,
   realpath,
   rmdir,
+  rm,
   stat,
   type FileHandle,
 } from 'node:fs/promises';
@@ -169,9 +170,54 @@ export async function createLocalExecutor(
   const workspaceIdentity = createHash('sha256')
     .update(`${workspace}\0${workspaceStat.dev}:${workspaceStat.ino}`)
     .digest('hex');
-  return new LocalExecutorFactory(workspace, sandbox, () =>
+  const executor = new LocalExecutorFactory(workspace, sandbox, () =>
     spawnLocalExecutorProcess(workspace, sandbox, hostHome, nodeBinary, workspaceIdentity),
   );
+  if (sandbox === 'read-only') await verifyLocalReadOnlyIsolation(executor);
+  return executor;
+}
+
+async function verifyLocalReadOnlyIsolation(executor: LocalExecutorFactory): Promise<void> {
+  const nonce = `${process.getuid?.() ?? 'user'}-${process.pid}-${Date.now()}`;
+  const marker = `/workspace/.adelic-isolation-check-${nonce}`;
+  const scratch = `/var/tmp/.adelic-isolation-check-${nonce}`;
+  const probe = [
+    'import errno, os, sys',
+    'try:',
+    ' f=os.open(sys.argv[1], os.O_CREAT|os.O_EXCL|os.O_WRONLY, 0o600); os.close(f)',
+    ' os.unlink(sys.argv[1]); print("workspace-writable")',
+    'except OSError as e:',
+    ' print("workspace-EROFS" if e.errno == errno.EROFS else "workspace-error-" + str(e.errno))',
+    'try:',
+    ' f=os.open(sys.argv[2], os.O_CREAT|os.O_EXCL|os.O_WRONLY, 0o600); os.close(f); os.unlink(sys.argv[2]); print("scratch-writable")',
+    'except OSError as e:',
+    ' print("scratch-error-" + str(e.errno))',
+  ].join('\n');
+  try {
+    const result = await executor.call(
+      'exec',
+      { command: ['/usr/bin/python3', '-c', probe, marker, scratch], timeoutMs: 5000 },
+      AbortSignal.timeout(7000),
+    );
+    if (
+      !result ||
+      typeof result !== 'object' ||
+      (result as { exitCode?: unknown }).exitCode !== 0 ||
+      (result as { stdout?: unknown }).stdout !== 'workspace-EROFS\nscratch-writable\n'
+    ) {
+      throw new Error('O diagnóstico não confirmou que o projeto é somente leitura e o scratch isolado é gravável.');
+    }
+  } catch (cause) {
+    await executor.close();
+    const error = new Error(
+      'O executor local não foi habilitado porque o isolamento somente leitura não pôde ser verificado.',
+      { cause },
+    ) as Error & { category?: string };
+    error.category = 'executor';
+    throw error;
+  } finally {
+    await rm(path.join(executor.workspace, path.basename(marker)), { force: true }).catch(() => undefined);
+  }
 }
 
 async function sharedEditLockDirectory(): Promise<string> {
@@ -503,6 +549,8 @@ async function spawnLocalExecutorProcess(
         TMPDIR: '/var/tmp',
         XDG_CACHE_HOME: '/var/tmp/.cache',
         npm_config_cache: '/var/tmp/.npm',
+        npm_config_userconfig: '/var/tmp/.npm-user.npmrc',
+        npm_config_globalconfig: '/var/tmp/.npm-global.npmrc',
       },
       stdio: ['pipe', 'pipe', 'pipe', ...handles.map((handle) => handle.fd)],
       windowsHide: true,
@@ -696,8 +744,10 @@ class LocalExecutorProcess implements LocalExecutor {
       return Promise.reject(signal.reason instanceof Error ? signal.reason : new Error('Execução cancelada.'));
     if (this.closed || this.failed)
       return Promise.reject(this.failed ?? new Error('Executor local isolado está fechado.'));
-    if (this.sandbox === 'read-only' && (tool === 'exec' || tool === 'write_file' || tool === 'replace_text'))
+    if (this.sandbox === 'read-only' && (tool === 'write_file' || tool === 'replace_text'))
       return Promise.reject(new Error('A ferramenta de escrita está desativada no modo somente leitura.'));
+    if (this.sandbox === 'read-only' && tool === 'exec' && !Array.isArray(args.command))
+      return Promise.reject(new Error('Validação somente leitura aceita apenas comandos sem shell.'));
     if (
       tool === 'exec' &&
       args.timeoutMs !== undefined &&
@@ -731,6 +781,9 @@ class LocalExecutorProcess implements LocalExecutor {
           id,
           method: 'call',
           tool,
+          // A read-only exec is allowed only inside the verified bubblewrap filesystem
+          // boundary. The remote runner must continue rejecting readOnly=true because
+          // that flag alone cannot make its host filesystem safe.
           args: this.sandbox === 'read-only' && tool === 'git' ? { ...args, readOnly: true } : args,
         });
         if (Buffer.byteLength(frame, 'utf8') > MAX_FRAME)

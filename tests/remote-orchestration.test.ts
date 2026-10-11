@@ -1,10 +1,11 @@
 import { createServer, type Server } from 'node:http';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createBackend } from '../server/index.js';
 import { Store } from '../server/store.js';
+import { remoteToolByName, validateRemoteArguments } from '../server/providers/remote-tools.js';
 import type { ProviderInfo, ProviderRegistry, RunInput, Session } from '../shared/contracts.js';
 
 const resources: { server: Server; store: Store; shutdown: () => Promise<void>; dir: string }[] = [];
@@ -128,6 +129,63 @@ async function runAndWait(orchestrator: ReturnType<typeof setup>['orchestrator']
 }
 
 describe('remote run routing', () => {
+  it('dispatches provider-validated argv checks through the verified local read-only executor', async () => {
+    const { store, orchestrator } = setup([]);
+    const project = store.getProject('project')!;
+    delete project.remote;
+    project.path = process.cwd();
+    store.putProject(project);
+    store.setSettings({ ...store.getSettings()!, sandbox: 'read-only' });
+    const controller = new AbortController();
+    const { remote } = orchestrator.remoteFor(
+      project,
+      'read-only',
+      controller.signal,
+      'local-readonly-checks',
+      'automatic',
+      'codex',
+    );
+    const exec = remoteToolByName('adelic_remote_exec')!;
+    try {
+      const command = ['pwd'];
+      const args = validateRemoteArguments(exec, { command, timeoutMs: 300_000 });
+      expect(args).toEqual({ command, timeoutMs: 300_000 });
+      const result = await remote!.call('exec', args!, controller.signal);
+      expect(result).toMatchObject({ exitCode: 0 });
+      expect(validateRemoteArguments(exec, { command: ['npm', 'test'] })).toEqual({
+        command: ['npm', 'test'],
+      });
+      const readonlyExec = await remote!.call(
+        'exec',
+        { command: ['python3', '-c', 'from pathlib import Path; Path("blocked-by-readonly-probe").write_text("x")'] },
+        controller.signal,
+      );
+      expect(readonlyExec).toMatchObject({ exitCode: 1 });
+      expect(existsSync(join(process.cwd(), 'blocked-by-readonly-probe'))).toBe(false);
+      await expect(
+        remote!.call('write_file', { path: 'blocked-by-readonly-probe', content: 'x' }, controller.signal),
+      ).rejects.toMatchObject({ status: 409 });
+    } finally {
+      controller.abort();
+      await orchestrator.shutdown();
+    }
+  }, 120_000);
+
+  it('keeps the orchestrator SSH runtime from dispatching shell calls in read-only mode', async () => {
+    const { store, orchestrator } = setup([]);
+    const project = store.getProject('project')!;
+    const controller = new AbortController();
+    const { remote } = orchestrator.remoteFor(project, 'read-only', controller.signal, 'readonly-http-test');
+    expect(remote).toBeDefined();
+    await expect(
+      remote!.call(
+        'exec',
+        { command: ['python3', '-c', 'from pathlib import Path; Path("unsafe").touch()'] },
+        controller.signal,
+      ),
+    ).rejects.toMatchObject({ status: 409 });
+  });
+
   it('skips an available local-only fallback and carries the SSH target to Kiro', async () => {
     const { store, session, orchestrator, calls } = setup([
       { providerId: 'claude', model: 'local' },

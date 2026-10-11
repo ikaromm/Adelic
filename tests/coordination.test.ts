@@ -1,15 +1,77 @@
 import { describe, expect, it } from 'vitest';
-import type { ProviderInfo } from '../shared/contracts.js';
+import type { DelegatedTask, ProviderInfo } from '../shared/contracts.js';
 import {
   boundedCoordinatorContext,
+  canSkipCoordinationPlanner,
   graphifyPaths,
   isSimpleInspectionRequest,
+  minimalContinuationContext,
   parseTaskPlan,
+  requiresResolvedContinuity,
   resolveAgent,
   summarizeReview,
+  synthesisExecutionFacts,
 } from '../server/coordination.js';
 
 describe('delegated task contracts', () => {
+  it("reports completed and blocked task evidence without the synthesis call's transient status", () => {
+    const makeTask = (
+      role: DelegatedTask['role'],
+      status: DelegatedTask['status'],
+      extras: Partial<DelegatedTask> = {},
+    ): DelegatedTask => ({
+      id: role,
+      agentId: `${role}-agent`,
+      projectId: 'project',
+      sessionId: 'session',
+      runId: 'run',
+      role,
+      title: role,
+      instructions: 'task',
+      scope: [],
+      dependsOn: [],
+      providerId: 'codex',
+      status,
+      createdAt: '2026-10-09T00:00:00.000Z',
+      ...extras,
+    });
+    const tasks = [
+      makeTask('worker', 'completed', {
+        integration: {
+          status: 'blocked',
+          cleanup: 'pending',
+          reason: 'Conflict',
+          recordedAt: '2026-10-09T00:00:01.000Z',
+        },
+        delivery: {
+          status: 'partial',
+          reason: 'Integração bloqueada; entrega não integrada',
+          evidence: ['integration:blocked', 'recovery:workspace-retained'],
+          recovery: { action: 'recover_worktree', reason: 'Inspecionar checkout' },
+          recordedAt: '2026-10-09T00:00:01.000Z',
+        },
+      }),
+      makeTask('reviewer', 'completed', { output: 'Revisão estática; typecheck não executado.' }),
+      makeTask('worker', 'failed', { id: 'failed', error: 'verificação indisponível' }),
+      makeTask('synthesis', 'running', { id: 'current-synthesis' }),
+      makeTask('synthesis', 'completed', { id: 'previous-synthesis' }),
+    ];
+    const facts = JSON.parse(synthesisExecutionFacts(tasks)) as Record<string, unknown>[];
+    expect(facts.map((fact) => fact.role)).toEqual(['worker', 'reviewer', 'worker']);
+    expect(facts[0]).toMatchObject({
+      process: { status: 'completed' },
+      integration: { status: 'blocked', cleanup: 'pending', reason: 'Conflict' },
+      delivery: {
+        status: 'partial',
+        reason: 'Integração bloqueada; entrega não integrada',
+        evidence: ['integration:blocked', 'recovery:workspace-retained'],
+        recovery: { action: 'recover_worktree', available: true },
+      },
+    });
+    expect(facts[1]).toMatchObject({ process: { status: 'completed' } });
+    expect(facts[2]).toMatchObject({ process: { status: 'failed', error: 'verificação indisponível' } });
+    expect(JSON.stringify(facts)).not.toContain('synthesis');
+  });
   it('accepts bounded task plans with forward dependencies', () => {
     expect(
       parseTaskPlan(
@@ -156,6 +218,96 @@ describe('delegated task contracts', () => {
     expect(isSimpleInspectionRequest('Read README and list two features')).toBe(true);
     expect(isSimpleInspectionRequest('Leia o README e liste dois recursos')).toBe(true);
   });
+  it('skips planning for bounded work while treating preservation as a constraint, not new work', () => {
+    expect(canSkipCoordinationPlanner('Now keep the Blocked filter persistent.')).toBe(true);
+    expect(canSkipCoordinationPlanner('Add a filter button to src/Tasks.tsx')).toBe(true);
+    expect(
+      canSkipCoordinationPlanner('Add a status filter to the task list, preserving existing dependency behavior.'),
+    ).toBe(true);
+    expect(canSkipCoordinationPlanner('Create a status filter and keep the current dependency rules unchanged.')).toBe(
+      true,
+    );
+    expect(canSkipCoordinationPlanner('Add a status filter; maintain established dependency semantics.')).toBe(true);
+    expect(canSkipCoordinationPlanner('Add a status filter without changing current dependency behavior.')).toBe(true);
+    expect(canSkipCoordinationPlanner('Implement task dependencies across TypeScript, SQLite, and UI.')).toBe(false);
+    expect(canSkipCoordinationPlanner('Add a button to the UI. Also migrate the database and change the API.')).toBe(
+      false,
+    );
+    expect(canSkipCoordinationPlanner('Now implement it.')).toBe(true);
+    expect(canSkipCoordinationPlanner('Design a new architecture for the project')).toBe(false);
+    expect(canSkipCoordinationPlanner('Now change the Architecture Across Multiple Modules in the project.')).toBe(
+      false,
+    );
+    expect(
+      canSkipCoordinationPlanner(
+        'Change the architecture across multiple modules while preserving existing dependency behavior.',
+      ),
+    ).toBe(false);
+  });
+  it('resolves bounded continuation intent only from a matching recent user goal', () => {
+    const longAssistant = 'assistant response '.repeat(200);
+    const history = [
+      {
+        role: 'user',
+        content: 'PREVIOUS_GOAL_RETENTION_RULE: implement retention policy of seven days in retention.ts',
+      },
+      { role: 'assistant', content: longAssistant },
+    ];
+    const current = 'Now implement it in retention.ts.';
+    expect(requiresResolvedContinuity(current)).toBe(true);
+    expect(minimalContinuationContext(history, current)).toContain(
+      'PREVIOUS_GOAL_RETENTION_RULE: implement retention policy of seven days in retention.ts',
+    );
+    const chainedHistory = [
+      ...history,
+      { role: 'user', content: 'Now implement it in retention.ts.' },
+      { role: 'assistant', content: longAssistant },
+    ];
+    const chained = minimalContinuationContext(chainedHistory, 'Now implement it in retention.ts.');
+    expect(chained).toContain('seven days');
+    expect(chained).toContain('retention.ts');
+    expect(chained?.length).toBeLessThan(1300);
+    expect(minimalContinuationContext(history, 'Now implement it in billing.ts.')).toBeUndefined();
+    expect(
+      minimalContinuationContext(
+        [{ role: 'user', content: 'Migrate the database and change the API across multiple modules.' }],
+        'Now implement it.',
+      ),
+    ).toBeUndefined();
+    expect(minimalContinuationContext([], current)).toBeUndefined();
+  });
+
+  it('falls back when an intermediate refinement expands scope across work areas', () => {
+    const history = [
+      { role: 'user', content: 'Implement retention policy of seven days in retention.ts.' },
+      { role: 'assistant', content: 'analysis '.repeat(500) },
+      { role: 'user', content: 'Now also migrate storage and change the API.' },
+    ];
+    expect(minimalContinuationContext(history, 'Now implement it in retention.ts.')).toBeUndefined();
+    expect(
+      minimalContinuationContext(
+        [{ role: 'user', content: 'Implement retention policy of seven days in retention.ts.' }],
+        'Now also migrate storage and change the API.',
+      ),
+    ).toBeUndefined();
+  });
+
+  it('preserves refinement requirements beyond the former excerpt boundary', () => {
+    const requirement =
+      'Also ' +
+      'keep the existing implementation stable '.repeat(5) +
+      'retain failed records for seven days before cleanup.';
+    const result = minimalContinuationContext(
+      [
+        { role: 'user', content: 'Implement retention policy in retention.ts.' },
+        { role: 'assistant', content: 'intermediate response '.repeat(500) },
+        { role: 'user', content: requirement },
+      ],
+      'Now implement it in retention.ts.',
+    );
+    expect(result).toContain(requirement);
+  });
+
   it('keeps a single explicit filename on the simple inspection path', () => {
     expect(isSimpleInspectionRequest('Leia src/App.tsx')).toBe(true);
   });

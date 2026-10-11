@@ -85,6 +85,33 @@ describe('blocked command patterns', () => {
     expect(blockedBy(['rm -rf *'], 'ls | rm -rf build')).toBe('rm -rf *');
     expect(blockedBy(['rm -rf *'], '(cd x && rm -rf y)')).toBe('rm -rf *');
     expect(blockedBy(['curl *'], "sh -c 'curl '\\''x'\\'''")).toBe('curl *');
+    const blocked = ['npm test'];
+    const variants: Array<string | string[]> = [
+      "bash -lc 'npm test\npwd'",
+      ['bash', '-lc', 'npm test\npwd'],
+      ['bash', '-l', '-c', 'npm test', 'arg0'],
+      ['bash', '-c', '-l', 'npm test'],
+      ['bash', '-O', 'extglob', '-c', 'npm test'],
+      ['bash', '-c', '--', 'npm test'],
+      ['bash', '-co', 'posix', 'npm test'],
+      ['bash', '+O', 'extglob', '-c', 'npm test'],
+      "pwd && bash -lc 'npm test\npwd'",
+      "bash -l -c 'npm test' arg0",
+      "bash -xe -c 'npm test'",
+      "sh -e -c 'npm test'",
+      "env FOO=1 bash -c 'npm test'",
+      "/usr/bin/env bash -c 'npm test'",
+      ['env', '-S', "bash -c 'npm test'"],
+      "env FOO=1 /usr/bin/bash -xe -c 'npm test'",
+    ];
+    for (const command of variants) {
+      expect(blockedBy(blocked, command), JSON.stringify(command)).toBe('npm test');
+    }
+    const distinctScripts = "bash -lc 'npm test pwd'; bash -lc 'npm test\npwd'";
+    expect(commandCandidates(distinctScripts)).toContain('npm test');
+    expect(blockedBy(blocked, distinctScripts)).toBe('npm test');
+    expect(blockedBy(['npm test*'], ['bash', '-c', "npm test 'quoted'"])).toBe('npm test*');
+    expect(blockedBy(blocked, ['bash', '-lc', 'npm run typecheck'])).toBeUndefined();
   });
 });
 
@@ -169,7 +196,18 @@ describe('check helpers', () => {
       GITHUB_TOKEN: 't',
       LC_ALL: 'C',
     });
-    expect(env).toMatchObject({ PATH: '/usr/bin', HOME: '/h', LC_ALL: 'C', TMPDIR: '/tmp', CI: '1' });
+    expect(env).toMatchObject({
+      PATH: '/usr/bin',
+      HOME: '/h',
+      LC_ALL: 'C',
+      TMPDIR: '/tmp',
+      CI: '1',
+      GIT_OPTIONAL_LOCKS: '0',
+      npm_config_cache: '/tmp/adelic-npm-cache',
+      npm_config_userconfig: '/dev/null',
+      npm_config_script_shell: '/bin/sh',
+      npm_config_offline: 'true',
+    });
     expect(env).not.toHaveProperty('ADELIC_MEMORY_TOKEN');
     expect(env).not.toHaveProperty('GITHUB_TOKEN');
   });
@@ -269,6 +307,45 @@ describe.skipIf(!existsSync('/usr/bin/bwrap'))('checks inside the real bubblewra
     const readOnly = await runCheck(check('touch x'), dir, { sandbox: 'read-only', signal: never });
     expect(readOnly.status).toBe('failed');
   });
+  it('runs Git and the no-emit typecheck read-only, denies project writes and discards scratch on pass/failure', async () => {
+    const dir = process.cwd();
+    const before = execFileSync('git', ['status', '--porcelain'], { cwd: dir, encoding: 'utf8' });
+    const typecheck = await runCheck(check('npm run typecheck', { timeoutSec: 120 }), dir, {
+      sandbox: 'read-only',
+      signal: never,
+    });
+    expect(typecheck.status, typecheck.output ?? typecheck.detail).toBe('passed');
+    const git = await runCheck(check('git status --short --branch'), dir, { sandbox: 'read-only', signal: never });
+    expect(git.status, git.output ?? git.detail).toBe('passed');
+
+    const marker = `.adelic-review-write-${process.pid}-${Date.now()}`;
+    const denied = await runCheck(check(`printf forbidden > ${marker}`), dir, { sandbox: 'read-only', signal: never });
+    expect(denied.status).toBe('failed');
+    expect(existsSync(join(dir, marker))).toBe(false);
+    expect(execFileSync('git', ['status', '--porcelain'], { cwd: dir, encoding: 'utf8' })).toBe(before);
+
+    const dependencyMarker = `.adelic-review-dependency-${process.pid}-${Date.now()}`;
+    const dependencyWrite = await runCheck(check(`printf forbidden > node_modules/${dependencyMarker}`), dir, {
+      sandbox: 'read-only',
+      signal: never,
+    });
+    expect(dependencyWrite.status).toBe('failed');
+    expect(existsSync(join(dir, 'node_modules', dependencyMarker))).toBe(false);
+
+    const scratch = `adelic-review-scratch-${process.pid}-${Date.now()}`;
+    const passedScratch = await runCheck(check(`printf ok > /tmp/${scratch}; test -s /tmp/${scratch}`), dir, {
+      sandbox: 'read-only',
+      signal: never,
+    });
+    expect(passedScratch.status, passedScratch.output ?? passedScratch.detail).toBe('passed');
+    expect(existsSync(join('/tmp', scratch))).toBe(false);
+    const failedScratch = await runCheck(check(`printf leftover > /tmp/${scratch}; exit 7`), dir, {
+      sandbox: 'read-only',
+      signal: never,
+    });
+    expect(failedScratch.status).toBe('failed');
+    expect(existsSync(join('/tmp', scratch))).toBe(false);
+  }, 20_000);
   it('kills the whole process group on timeout and on cancel', async () => {
     const dir = tempDir();
     // `sleep` in the background with its pid written to the project (visible outside).

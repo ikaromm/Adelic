@@ -68,6 +68,15 @@ describe('Kiro ACP auto-approval', () => {
       { id: 54, toolCall: permission("bash -c 'ls'") },
       { id: 55, toolCall: { toolCallId: 'w', title: 'Writing: x.txt', rawInput: { path: 'x.txt', content: 'x' } } },
       { id: 56, toolCall: permission('grep -n version package.json | head -1; ls') },
+      { id: 57, toolCall: permission('/usr/bin/bash -lc "npm test"') },
+      {
+        id: 58,
+        toolCall: { toolCallId: 'tc-argv', title: 'Running: npm test', rawInput: { command: ['npm', 'test'] } },
+      },
+      { id: 59, toolCall: permission("bash -c -- 'npm test'") },
+      { id: 60, toolCall: permission("bash -co posix 'npm test'") },
+      { id: 61, toolCall: permission("bash +O extglob -c 'npm test'") },
+      { id: 62, toolCall: permission("bash -lc 'npm test pwd'; bash -lc 'npm test\npwd'") },
     ];
     await writeFile(
       script,
@@ -99,7 +108,7 @@ else if(m.method==='session/cancel')send({jsonrpc:'2.0',id:m.id,result:{}});
       plan: { level: 'fast', reason: 'direct', tools: true, memory: false, effort: 'low', contextBudget: 80 },
       sandbox: 'workspace-write',
       approvalMode: 'auto-safe',
-      blockedCommands: ['cat *'],
+      blockedCommands: ['cat *', 'npm test'],
     };
     try {
       const approvals: Approval[] = [];
@@ -124,7 +133,7 @@ else if(m.method==='session/cancel')send({jsonrpc:'2.0',id:m.id,result:{}});
       expect(responses.get(51)).toBe('once');
       expect(responses.get(56)).toBe('once');
       // Unsafe, wrapped and non-shell requests were pending and the user denied them.
-      for (const id of [52, 54, 55]) expect(responses.get(id)).toBe('reject');
+      for (const id of [52, 54, 55, 57, 58, 59, 60, 61, 62]) expect(responses.get(id)).toBe('reject');
       // Blocked before the classifier could approve the otherwise safe `cat`.
       expect(responses.get(53)).toBe('reject');
       expect([...responses.values()]).not.toContain('always');
@@ -132,6 +141,15 @@ else if(m.method==='session/cancel')send({jsonrpc:'2.0',id:m.id,result:{}});
       expect(byCommand('ls -la')).toMatchObject({ status: 'approved', kind: 'command' });
       expect(byCommand('ls -la')!.detail).toMatch(/Comando de leitura permitido/);
       expect(byCommand('cat package.json')).toMatchObject({ status: 'denied', blocked: 'cat *' });
+      expect(byCommand('/usr/bin/bash -lc "npm test"')).toMatchObject({ status: 'denied', blocked: 'npm test' });
+      expect(byCommand('npm test')).toMatchObject({ status: 'denied', blocked: 'npm test' });
+      for (const command of [
+        "bash -c -- 'npm test'",
+        "bash -co posix 'npm test'",
+        "bash +O extglob -c 'npm test'",
+        "bash -lc 'npm test pwd'; bash -lc 'npm test\npwd'",
+      ])
+        expect(byCommand(command), command).toMatchObject({ status: 'denied', blocked: 'npm test' });
       expect(byCommand('rm package.json')).toMatchObject({ status: 'pending' });
       expect(approvals.find((a) => a.title.startsWith('Writing'))).toMatchObject({ status: 'pending' });
 
@@ -152,7 +170,7 @@ else if(m.method==='session/cancel')send({jsonrpc:'2.0',id:m.id,result:{}});
         const autoResponses = new Map(
           allResponses.slice(requests.length).map((r) => [r.id, r.result.outcome.optionId]),
         );
-        for (const id of [51, 52, 53, 54, 55, 56]) expect(autoResponses.get(id)).toBe('reject');
+        for (const id of [51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62]) expect(autoResponses.get(id)).toBe('reject');
         expect(automaticApprovals.filter((approval) => approval.status === 'pending')).toEqual([]);
         expect(automaticApprovals.find((approval) => approval.command === 'rm package.json')).toMatchObject({
           status: 'denied',

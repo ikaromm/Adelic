@@ -1,6 +1,6 @@
 import type { ProviderEvent, RunInput } from '../../shared/contracts';
 import type { RemoteRuntime, RemoteToolName } from '../../shared/remote-hosts';
-import { blockedBy } from '../../shared/hooks';
+import { blockedBy, commandText } from '../../shared/hooks';
 import { isRecord } from './process';
 
 const MAX_REMOTE_APPROVAL_DETAIL = 1024 * 1024;
@@ -16,7 +16,17 @@ export const REMOTE_TOOL_SPECS = [
     inputSchema: {
       type: 'object',
       properties: {
-        command: { type: 'string', maxLength: 8192 },
+        command: {
+          oneOf: [
+            { type: 'string', minLength: 1, maxLength: 8192 },
+            {
+              type: 'array',
+              minItems: 1,
+              maxItems: 256,
+              items: { type: 'string', maxLength: 8192 },
+            },
+          ],
+        },
         cwd: { type: 'string', maxLength: 4096 },
         timeoutMs: { type: 'integer', minimum: 1, maximum: 300000 },
       },
@@ -175,7 +185,9 @@ export function executorContextInstructions(
   ].slice(0, 6);
   const permissions = remoteToolsEnabled
     ? input.sandbox === 'read-only'
-      ? 'O executor configurado está em modo somente leitura: use ferramentas apenas para inspeção; operações mutantes serão recusadas.'
+      ? executor?.executionKind === 'isolated-local'
+        ? 'Quando o executor LOCAL isolado confirmar efetivamente o sandbox, projeto e dependências estarão somente leitura, com scratch privado; então checks compatíveis poderão ser executados em vetor de argumentos. Até essa confirmação, ou se ela falhar, não presuma isolamento. Operações mutantes no projeto continuam recusadas.'
+        : 'O executor remoto SSH/read-only serve apenas para inspeção; exec e operações mutantes são recusados porque não há isolamento local verificado.'
       : 'O executor configurado está em workspace-write: operações mutantes no projeto são permitidas dentro do escopo do executor.'
     : executor
       ? 'O executor está configurado, mas as ferramentas estão desativadas neste run; não solicite seu uso.'
@@ -206,14 +218,23 @@ export function validateRemoteArguments(spec: RemoteToolSpec, raw: unknown): Rec
   };
   const exactKeys = (allowed: string[]) => Object.keys(args).every((key) => allowed.includes(key));
   switch (spec.remoteName) {
-    case 'exec':
+    case 'exec': {
+      const commandValid =
+        typeof args.command === 'string'
+          ? args.command.length > 0 && args.command.length <= 8192
+          : Array.isArray(args.command) &&
+            args.command.length > 0 &&
+            args.command.length <= 256 &&
+            args.command.every((part) => typeof part === 'string' && part.length <= 8192) &&
+            Buffer.byteLength(JSON.stringify(args.command), 'utf8') <= 128 * 1024;
       return exactKeys(['command', 'cwd', 'timeoutMs']) &&
-        string('command', 8192, true) &&
+        commandValid &&
         string('cwd', 4096) &&
         (args.timeoutMs === undefined ||
           (Number.isInteger(args.timeoutMs) && Number(args.timeoutMs) >= 1 && Number(args.timeoutMs) <= 300_000))
         ? args
         : undefined;
+    }
     case 'read_file':
       return exactKeys(['path', 'offset', 'limit', 'revision']) &&
         string('path', 4096, true) &&
@@ -301,7 +322,9 @@ export function remoteToolDescription(
   let operation: string;
   switch (spec.remoteName) {
     case 'exec':
-      operation = `exec: ${compactToolText(args.command) || 'comando'}`;
+      operation = `exec: ${
+        compactToolText(Array.isArray(args.command) ? args.command.join(' ') : args.command) || 'comando'
+      }`;
       break;
     case 'read_file':
       operation = `read_file: ${compactToolText(path)}`;
@@ -441,7 +464,10 @@ export function remoteToolError(error: unknown) {
 
 /** Return the command used by the exec tool, if this is an executable request. */
 export function remoteToolCommand(spec: RemoteToolSpec, args: Record<string, unknown>) {
-  return spec.remoteName === 'exec' && typeof args.command === 'string' ? args.command : undefined;
+  if (spec.remoteName !== 'exec') return undefined;
+  // Keep argv boundaries in the policy representation: in particular, a shell's script
+  // argument must stay quoted so commandCandidates can recognize and inspect that wrapper.
+  return commandText(args.command);
 }
 
 /** Project command blocks apply to fixed remote tools in every approval mode and runtime. */

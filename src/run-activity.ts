@@ -194,6 +194,7 @@ export function checksSummary(checks: RunEvent[]): string {
   const failed = statuses.filter((status) => status === 'failed' || status === 'timeout' || status === 'error').length;
   const running = statuses.filter((status) => status === 'running').length;
   const total = t('activity.checks', { count: checks.length });
+  if (running && failed) return t('activity.checksMixed', { checks: total, count: failed, running });
   if (running) return t('activity.checksRunning', { checks: total });
   return failed
     ? t('activity.checksFailed', { checks: total, count: failed })

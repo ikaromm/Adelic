@@ -61,7 +61,16 @@ function setup() {
   const store = new Store(dir);
   const providers: ProviderRegistry = {
     list: async () => catalog,
-    run: async () => ({ text: 'ok', stopReason: 'completed' }),
+    run: async (input) => {
+      if (input.prompt.includes('run-remote-shell-probe')) {
+        await input.remote?.call(
+          'exec',
+          { command: ['python3', '-c', 'from pathlib import Path; Path("unsafe").touch()'] },
+          new AbortController().signal,
+        );
+      }
+      return { text: 'ok', stopReason: 'completed' };
+    },
     approve: async () => undefined,
     shutdown: async () => undefined,
   };
@@ -188,6 +197,33 @@ describe('SSH remote HTTP contracts', () => {
     const sessionId = String(implicit.body?.id);
     expect((await call(base, 'PATCH', `/api/sessions/${sessionId}`, { providerId: 'claude' })).status).toBe(409);
     expect(store.getSession(sessionId)?.providerId).toBe('codex');
+  });
+
+  it('rejects read-only SSH shell tool calls from a run started through HTTP before transport dispatch', async () => {
+    const { server, store, host, ssh, backend } = setup();
+    const base = await url(server);
+    const project = await call(base, 'POST', '/api/projects', projectBody(host.id, '/work'));
+    const session = await call(base, 'POST', '/api/sessions', { projectId: project.body?.id, providerId: 'codex' });
+    expect(session.status).toBe(201);
+    store.setSettings({ ...store.getSettings()!, sandbox: 'read-only' });
+    const sshCallsBefore = ssh.mock.calls.length;
+    let finish!: () => void;
+    const ended = new Promise<void>((resolve) => (finish = resolve));
+    const unsubscribe = backend.orchestrator.subscribe((event) => {
+      if (event.type === 'run' && event.run.sessionId === session.body?.id && event.run.status !== 'running') finish();
+    });
+    try {
+      const accepted = await call(base, 'POST', `/api/sessions/${session.body?.id}/messages`, {
+        content: 'run-remote-shell-probe',
+      });
+      expect(accepted.status).toBe(202);
+      await ended;
+    } finally {
+      unsubscribe();
+    }
+    const run = store.listRuns(String(session.body?.id))[0];
+    expect(run?.status).toBe('failed');
+    expect(ssh).toHaveBeenCalledTimes(sshCallsBefore);
   });
 
   it('refuses SSH actions from an authenticated nonlocal browser', async () => {

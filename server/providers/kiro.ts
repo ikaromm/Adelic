@@ -9,7 +9,7 @@ import type { RunMcpServer } from '../../shared/mcp';
 import { errorMessage, isRecord, JsonRpcProcess, type JsonRpcMessage } from './process';
 import { findProviderBinary, hasProviderBinaryOverride, providerBinaryMissingDetail } from './discovery';
 import { classifyApproval } from '../approval-policy';
-import { blockedBy } from '../../shared/hooks';
+import { blockedBy, commandText } from '../../shared/hooks';
 import net, { type Socket } from 'node:net';
 import { REMOTE_MCP_BRIDGE_SOURCE } from '../remote/mcp-bridge-source';
 import {
@@ -342,7 +342,7 @@ export class KiroProvider {
       // Kiro reports in the tool call, when it reports one.
       const toolCall = isRecord(params.toolCall) ? params.toolCall : {};
       const rawInput = isRecord(toolCall.rawInput) ? toolCall.rawInput : {};
-      const command = typeof rawInput.command === 'string' ? rawInput.command : undefined;
+      const command = commandText(rawInput.command) ?? commandText(rawInput.argv);
       const title = String(params.title ?? toolCall.title ?? 'Permitir ferramenta Kiro');
       const shellCommand = kiroShellCommand(params);
       const respondDeny = () =>
@@ -353,7 +353,7 @@ export class KiroProvider {
             : { outcome: { outcome: 'cancelled' } },
         );
       // Project rules only add denials, before any automatic decision (docs/specs/project-hooks.md).
-      const blocked = shellCommand !== undefined ? blockedBy(turn.input.blockedCommands, shellCommand) : undefined;
+      const blocked = blockedBy(turn.input.blockedCommands, command);
       if (blocked) {
         respondDeny();
         emitApproval(
@@ -361,10 +361,10 @@ export class KiroProvider {
           turn.emit,
           approvalId,
           'Comando bloqueado pelas regras do projeto',
-          `Padrão: ${blocked}\n${shellCommand}`,
+          `Padrão: ${blocked}\n${command}`,
           'command',
           'denied',
-          { command: shellCommand, blocked },
+          { command, blocked },
         );
         return;
       }

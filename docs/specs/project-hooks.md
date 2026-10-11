@@ -34,7 +34,7 @@ Desligado por padrão. Se alguma verificação falhar (ou exceder o tempo), o Ad
 
 ## Comandos bloqueados
 
-Padrões com `*` (qualquer texto, inclusive vazio); o resto é literal, então não há expressão regular nem injeção. O padrão casa com o comando inteiro, depois de juntar espaços, tabs e quebras de linha em um espaço. O texto também é comparado com o script de um `bash -lc '…'` e com cada parte separada por `;`, `&&`, `||`, `|`, `&` e quebra de linha (`ls | rm -rf build` casa com `rm -rf *`).
+Padrões com `*` (qualquer texto, inclusive vazio); o resto é literal, então não há expressão regular nem injeção. O padrão casa com o comando inteiro, depois de juntar espaços, tabs e quebras de linha em um espaço. O texto também é comparado com o script de um `bash -lc '…'` e com cada parte separada por `;`, `&&`, `||`, `|`, `&` e quebra de linha (`ls | rm -rf build` casa com `rm -rf *`). Para `adelic_remote_exec`, a forma argv (vetor) é comparada usando os argumentos unidos por espaços, igual à forma textual; isso serve apenas à política/aprovação e não executa o vetor por shell.
 
 Quando um pedido de aprovação traz um comando que casa, ele é **negado sem perguntar**, inclusive no modo Automático seguro, e a atividade mostra "Comando bloqueado pelas regras do projeto: <cmd>". No Codex a negação acontece antes da classificação automática (a resposta é `decline`). Nos demais, o orquestrador nega o pedido pendente ao recebê-lo. Aprovar pela tela um pedido que passou a casar com uma regra salva depois responde 409 e nega o pedido. As regras só acrescentam restrições: nunca aprovam nada.
 

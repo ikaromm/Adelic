@@ -49,9 +49,15 @@ import { runMcpServers } from './mcp.js';
 import {
   assessTaskDelivery,
   boundedCoordinatorContext,
+  boundedContinuationContext,
   briefFor,
+  canSkipCoordinationPlanner,
   graphifyPaths,
   isSimpleInspectionRequest,
+  isSimpleConceptualQuestion,
+  hasTechnicalWorkAncestor,
+  minimalContinuationContext,
+  requiresResolvedContinuity,
   parseTaskPlan,
   resolveAgent,
   taskRecord,
@@ -139,6 +145,43 @@ export interface StartOptions {
 type SpecialRun = { ref: RunPlanRef; prompt: string };
 
 const cancelledError = (key: ServerKey) => httpError(409, key, undefined, { cancelled: true });
+
+/** Append deterministic run facts so a synthesis provider cannot turn a refusal or failed
+ * delivery into an unqualified success. Absence of check events is reported as absence, not a
+ * claim that a particular validation was attempted. */
+function synthesisDisclosure(tasks: DelegatedTask[], events: RunEvent[]): string {
+  const lines: string[] = [];
+  for (const task of tasks.filter((item) => item.role !== 'synthesis')) {
+    if (task.status === 'failed' || task.status === 'cancelled') {
+      lines.push(`- ${task.title}: processo ${task.status}${task.error ? ` (${task.error})` : ''}.`);
+    }
+    if (task.integration?.status === 'blocked') {
+      lines.push(
+        `- ${task.title}: integração bloqueada; alterações não foram integradas${task.integration.reason ? ` (${task.integration.reason})` : ''}.`,
+      );
+    }
+    if (task.delivery && task.delivery.status !== 'implemented') {
+      lines.push(
+        `- ${task.title}: entrega ${task.delivery.status}; ${task.delivery.reason || 'não há confirmação de entrega implementada'}.`,
+      );
+    }
+  }
+  const blocked = events.filter(
+    (event) => event.type === 'approval' && (event.status === 'blocked' || event.status === 'denied'),
+  );
+  for (const event of blocked) lines.push(`- Ação recusada/bloqueada: ${event.text}.`);
+  const checks = events.filter((event) => event.type === 'check' && event.check);
+  if (!checks.length) lines.push('- Verificações de entrega registradas: nenhuma; validação não confirmada.');
+  else {
+    const latest = new Map<string, NonNullable<RunEvent['check']>>();
+    for (const event of checks) latest.set(event.id, event.check!);
+    for (const check of latest.values())
+      lines.push(
+        `- Verificação ${check.name}: ${check.status}${check.command ? ` (${check.command})` : ''}${check.output ? ` — ${check.output}` : ''}.`,
+      );
+  }
+  return `\n\nFatos finais registrados pelo orquestrador (não omitir nem contradizer):\n${lines.join('\n')}`;
+}
 
 /** Resolve policy at run start; SSH projects require a local, explicit automatic override. */
 function effectiveApprovalMode(
@@ -390,7 +433,11 @@ export class Orchestrator {
         : options.planTask || planFromCommand !== undefined
           ? { prompt: content }
           : expandMessage(this.store, content, session.projectId === null ? undefined : project);
-      const prompt = expanded.prompt;
+      let prompt = expanded.prompt;
+      if (!options.hookFix && !options.planTask && isSimpleConceptualQuestion(content)) {
+        const ancestralContext = boundedContinuationContext(history, content, 1800);
+        if (ancestralContext) prompt = `${prompt}\n\n${ancestralContext}`;
+      }
       const planRequest =
         options.planTask || options.hookFix
           ? undefined
@@ -406,6 +453,7 @@ export class Orchestrator {
       // A planning run never writes, whatever the settings say: read-only sandbox, no checkpoint,
       // and file-change approvals are denied (see execute).
       if (special?.ref.kind === 'plan') settings.sandbox = 'read-only';
+      const selectedMode = expanded.mode ?? session.mode;
       const plan: Run['route'] = special
         ? {
             level: 'deep',
@@ -419,11 +467,27 @@ export class Orchestrator {
             contextBudget: 9000,
           }
         : routeMessage(
-            prompt,
-            expanded.mode ?? session.mode,
+            expanded.prompt,
+            selectedMode,
             history,
             this.memoryProjectFor(session, project, settings) !== undefined,
           );
+      // A lexical fast route cannot resolve an underspecified follow-up whose complete user
+      // chain is too broad to collapse to one worker. Keep an explicitly selected fast mode.
+      if (
+        !special &&
+        selectedMode !== 'fast' &&
+        plan.level === 'fast' &&
+        !isSimpleConceptualQuestion(content) &&
+        requiresResolvedContinuity(content) &&
+        hasTechnicalWorkAncestor(history, content) &&
+        !minimalContinuationContext(history, content)
+      ) {
+        plan.level = 'deep';
+        plan.reason = 'Continuação sem objetivo mínimo coeso: usar planner com contexto ancestral';
+        plan.effort = 'high';
+        plan.contextBudget = 24000;
+      }
       // A fix needs to edit the project, whatever the wording of the failure output.
       if (options.hookFix) plan.tools = true;
       if (session.thinking && session.thinking !== 'auto') {
@@ -435,7 +499,7 @@ export class Orchestrator {
         throw httpError(409, 'orchestrator.automaticUnsupportedProvider', { provider: session.providerId });
       }
       const orchestration = projectSnapshot.orchestration ?? { enabled: true, maxWorkers: 2, review: true };
-      const automaticWorkerNeedsTools = plan.tools || plan.level === 'fast';
+      const automaticWorkerNeedsTools = plan.tools;
       const automaticReviewWillRun =
         plan.level !== 'fast' &&
         !(plan.memory && !plan.tools) &&
@@ -1364,8 +1428,7 @@ export class Orchestrator {
         executionKind: 'isolated-local',
         call: async (tool, args, callSignal) => {
           if (signal.aborted || callSignal.aborted) throw new Error('Execução local isolada cancelada');
-          if (sandbox === 'read-only' && (tool === 'exec' || tool === 'write_file'))
-            throw httpError(409, 'remotehosts.readOnly');
+          if (sandbox === 'read-only' && tool === 'write_file') throw httpError(409, 'remotehosts.readOnly');
           executor ??= createLocalExecutor(project.path, sandbox);
           this.remoteConnections.set(runId, executor);
           const activeExecutor = await executor;
@@ -1373,11 +1436,21 @@ export class Orchestrator {
             await activeExecutor.close();
             throw new Error('Execução local isolada cancelada');
           }
-          return activeExecutor.call(
-            tool,
-            { ...args, ...(tool === 'exec' || tool === 'write_file' ? { readOnly: sandbox === 'read-only' } : {}) },
-            callSignal,
-          );
+          if (sandbox === 'read-only' && tool === 'exec') {
+            const command = args.command;
+            const argv =
+              Array.isArray(command) &&
+              command.length > 0 &&
+              command.length <= 256 &&
+              command.every((part) => typeof part === 'string' && part.length <= 8192);
+            if (!argv || (args.cwd !== undefined && args.cwd !== '/workspace' && args.cwd !== project.path))
+              throw httpError(409, 'remotehosts.readOnly');
+          }
+          // The local runner does not trust a readOnly marker: argv commands are enabled only
+          // after createLocalExecutor verifies bubblewrap and proves the project is EROFS while
+          // private scratch is writable. Its mount namespace also hides host credentials and
+          // blocks external networking. SSH has no equivalent boundary and refuses read-only exec.
+          return activeExecutor.call(tool, args, callSignal);
         },
       };
       signal.addEventListener(
@@ -2251,6 +2324,10 @@ export class Orchestrator {
     const saveBrief = (objective: string, summary: string, paths: string[]) => {
       if (session.projectId !== null) this.store.putBrief(briefFor(project, objective, summary, paths));
     };
+    // Keep a complete, bounded chain for every consumer; only the stricter minimal form can
+    // justify skipping the planner for a cohesive follow-up.
+    const continuityContext = minimalContinuationContext(history, content);
+    const ancestralContext = boundedContinuationContext(history, content);
     const runWorker = async (
       task: DelegatedTask,
       planned: PlannedTask,
@@ -2294,6 +2371,7 @@ export class Orchestrator {
         const prompt = [
           'Você é um executor delegado. Recebeu apenas a tarefa atual e contexto limitado.',
           `Objetivo completo do usuário:\n${request}`,
+          ...(ancestralContext ? [ancestralContext] : []),
           `Tarefa: ${planned.title}\n${planned.instructions}`,
           `Escopo: ${planned.scope.length ? planned.scope.join(', ') : 'identifique apenas os arquivos necessários ao objetivo'}`,
           ...(isolation?.mode === 'serial'
@@ -2538,7 +2616,14 @@ export class Orchestrator {
         settings.responseStyle === 'concise'
           ? 'Responda de forma concisa, sem omitir pontos necessários.'
           : 'Use uma resposta equilibrada e organizada.';
-      const prompt = `${style}\n\nResponda diretamente ao pedido. Se precisar verificar algo no computador, use as ferramentas disponíveis para executar as consultas necessárias, respeitando a política de permissões. Um pedido explícito de diagnóstico já solicita essa verificação: realize consultas em vez de apenas oferecer fazê-las. Perguntas conceituais não precisam de inspeção. Use apenas as mensagens recentes e o resumo persistido abaixo quando forem pertinentes.\n\n${boundedCoordinatorContext(history, request, brief, [], 4200)}`;
+      const prompt = [
+        style,
+        'Responda diretamente ao pedido. Se precisar verificar algo no computador, use as ferramentas disponíveis para executar as consultas necessárias, respeitando a política de permissões. Um pedido explícito de diagnóstico já solicita essa verificação: realize consultas em vez de apenas oferecer fazê-las. Perguntas conceituais não precisam de inspeção. Use apenas as mensagens recentes e o resumo persistido abaixo quando forem pertinentes.',
+        ancestralContext,
+        boundedCoordinatorContext(history, request, brief, [], 4200),
+      ]
+        .filter(Boolean)
+        .join('\n\n');
       const input = baseInput(
         worker.providerId,
         worker.model,
@@ -2630,78 +2715,84 @@ export class Orchestrator {
       saveBrief(content, task.summary || output, task.scope);
       return;
     }
-    const planner = makeTask('planner', 'Planejar execução', content, [], [], session.providerId, session.model);
-    startTask(planner);
     const priorBrief = getBrief();
     let graphContext = '';
-    try {
-      graphContext = await graph(content);
-    } catch (e) {
-      this.publishKeyed(
-        session.id,
-        run.id,
-        'status',
-        'event.graphifyPlanning',
-        { error: errorText(e) },
-        {
-          taskId: planner.id,
-          agentId: planner.agentId,
-          phase: planner.role,
-        },
-      );
-    }
-    if (controller.signal.aborted) {
-      finishTask(planner, 'cancelled', planner.output || '', 'Execução cancelada durante a coleta do contexto.');
-      throw new Error('Execução cancelada');
-    }
-    const plannerContext = boundedCoordinatorContext(history, request, priorBrief, mapPaths(graphContext), 6000);
-    const plannerPrompt = [
-      'Produza somente JSON válido, sem markdown, no formato: {"tasks":[{"id":"t1","title":"...","instructions":"...","scope":["path ou área"],"dependsOn":[]}]}.',
-      'Crie de 1 a 6 tarefas pequenas somente para executar o pedido, com escopos sem sobreposição quando possível. Dependências devem referir IDs desta lista. Uma tarefa integral é válida quando a solicitação é coesa. Não adicione tarefas separadas de revisão independente ou síntese, pois o aplicativo fará essas fases. Se o próprio pedido for revisar o código, inclua essa revisão como tarefa de execução.',
-      'Não execute ferramentas. Não alegue que trabalho foi feito.',
-      memoryGuidance,
-      `Contexto limitado do projeto:\n${plannerContext}`,
-      skillContext,
-      graphContext ? `Graphify relevante:\n${graphContext.slice(0, 4000)}` : '',
-    ]
-      .filter(Boolean)
-      .join('\n\n');
-    const plannerInput = baseInput(
-      session.providerId,
-      session.model,
-      planner,
-      plannerPrompt,
-      [],
-      false,
-      'read-only',
-      memoryContext,
-      undefined,
-      images,
-    );
     let planned: PlannedTask[];
-    try {
-      const result = await call(plannerInput, planner);
-      const plannerText = result.text || planner.output || '';
-      planned = parseTaskPlan(plannerText);
-      finishTask(planner, 'completed', plannerText);
-    } catch (e) {
-      finishTask(planner, controller.signal.aborted ? 'cancelled' : 'failed', planner.output || '', errorText(e));
-      if (controller.signal.aborted) throw e;
-      this.publishKeyed(
-        session.id,
-        run.id,
-        'status',
-        'event.invalidPlan',
-        { error: errorText(e) },
-        {
-          taskId: planner.id,
-          agentId: planner.agentId,
-          phase: planner.role,
-        },
+    const unresolvedReference = requiresResolvedContinuity(content) && !continuityContext;
+    if (route.tools && canSkipCoordinationPlanner(content) && !unresolvedReference) {
+      planned = [{ id: 'cohesive', title: 'Continuar tarefa coesa', instructions: content, scope: [], dependsOn: [] }];
+    } else {
+      const planner = makeTask('planner', 'Planejar execução', content, [], [], session.providerId, session.model);
+      startTask(planner);
+      try {
+        graphContext = await graph(content);
+      } catch (e) {
+        this.publishKeyed(
+          session.id,
+          run.id,
+          'status',
+          'event.graphifyPlanning',
+          { error: errorText(e) },
+          {
+            taskId: planner.id,
+            agentId: planner.agentId,
+            phase: planner.role,
+          },
+        );
+      }
+      if (controller.signal.aborted) {
+        finishTask(planner, 'cancelled', planner.output || '', 'Execução cancelada durante a coleta do contexto.');
+        throw new Error('Execução cancelada');
+      }
+      const plannerContext = boundedCoordinatorContext(history, request, priorBrief, mapPaths(graphContext), 6000);
+      const plannerPrompt = [
+        'Produza somente JSON válido, sem markdown, no formato: {"tasks":[{"id":"t1","title":"...","instructions":"...","scope":["path ou área"],"dependsOn":[]}]}.',
+        'Crie de 1 a 6 tarefas pequenas somente para executar o pedido, com escopos sem sobreposição quando possível. Dependências devem referir IDs desta lista. Uma tarefa integral é válida quando a solicitação é coesa. Não adicione tarefas separadas de revisão independente ou síntese, pois o aplicativo fará essas fases. Se o próprio pedido for revisar o código, inclua essa revisão como tarefa de execução.',
+        'Não execute ferramentas. Não alegue que trabalho foi feito.',
+        memoryGuidance,
+        ancestralContext ? `Preserve este contexto ancestral completo ao planejar:\n${ancestralContext}` : '',
+        `Contexto limitado do projeto:\n${plannerContext}`,
+        skillContext,
+        graphContext ? `Graphify relevante:\n${graphContext.slice(0, 4000)}` : '',
+      ]
+        .filter(Boolean)
+        .join('\n\n');
+      const plannerInput = baseInput(
+        session.providerId,
+        session.model,
+        planner,
+        plannerPrompt,
+        [],
+        false,
+        'read-only',
+        memoryContext,
+        undefined,
+        images,
       );
-      planned = [
-        { id: 'whole', title: 'Executar solicitação integral', instructions: content, scope: [], dependsOn: [] },
-      ];
+      try {
+        const result = await call(plannerInput, planner);
+        const plannerText = result.text || planner.output || '';
+        planned = parseTaskPlan(plannerText);
+        finishTask(planner, 'completed', plannerText);
+      } catch (e) {
+        finishTask(planner, controller.signal.aborted ? 'cancelled' : 'failed', planner.output || '', errorText(e));
+        if (controller.signal.aborted) throw e;
+        this.publishKeyed(
+          session.id,
+          run.id,
+          'status',
+          'event.invalidPlan',
+          { error: errorText(e) },
+          {
+            taskId: planner.id,
+            agentId: planner.agentId,
+            phase: planner.role,
+          },
+        );
+        planned = [
+          { id: 'whole', title: 'Executar solicitação integral', instructions: content, scope: [], dependsOn: [] },
+        ];
+      }
     }
     const taskByPlanId = new Map<string, DelegatedTask>();
     for (const p of planned)
@@ -2843,7 +2934,7 @@ export class Orchestrator {
           session.providerId,
           session.model,
           synth,
-          `${style}\n\nResponda ao pedido completo usando os resumos e os fatos de execução abaixo. Fatos estruturados descrevem observações do orquestrador, não autodeclarações de identidade/sucesso. Separe explicitamente status do processo de status da entrega; processo concluído não prova entrega integrada. Preserve incertezas e afirme apenas fatos/evidências presentes nos dados. ${memoryGuidance}\n\nFatos estruturados de execução (JSON observado pelo orquestrador):\n@@ADELIC_EXECUTION_FACTS@@\n\nPedido completo do usuário:\n${content}${attachedNames}\n\nResultados:\n${workerSummary}${reviewSummary ? `\n\nRevisão independente${reviewIncomplete ? ' (INCOMPLETA — achados podem estar omitidos; não declare aprovação com base nesta revisão)' : ''}:\n${reviewSummary}` : ''}\n\n${skillContext}`,
+          `${style}\n\nResponda ao pedido completo usando os resumos e os fatos de execução abaixo. Fatos estruturados descrevem observações do orquestrador, não autodeclarações de identidade/sucesso. Separe explicitamente status do processo de status da entrega; processo concluído não prova entrega integrada. O status da própria síntese durante esta chamada é transitório e não deve ser relatado como pendência; descreva somente o conteúdo final e os fatos atuais dos demais trabalhos. Informe mudanças, verificações realmente executadas e limitações relevantes. Nunca apresente falha, integração bloqueada ou validação não realizada como sucesso. Preserve incertezas e afirme apenas fatos/evidências presentes nos dados. ${memoryGuidance}\n\nFatos estruturados de execução (JSON observado pelo orquestrador):\n@@ADELIC_EXECUTION_FACTS@@\n\nPedido completo do usuário:\n${content}${attachedNames}\n\nResultados:\n${workerSummary}${reviewSummary ? `\n\nRevisão independente${reviewIncomplete ? ' (INCOMPLETA — achados podem estar omitidos; não declare aprovação com base nesta revisão)' : ''}:\n${reviewSummary}` : ''}\n\n${skillContext}`,
           [],
           false,
           settings.sandbox,
@@ -2852,13 +2943,46 @@ export class Orchestrator {
         synth,
         true,
       );
-      const output = result.text || synth.output || assistant.content;
-      if (assistant.content === before && output) {
-        assistant.content += output;
+      // The synthesis call streams directly into the persisted assistant message. Use that
+      // streamed content when present; otherwise fall back to the provider's final result.
+      // Append only the deterministic disclosure here so streamed model text is never repeated.
+      const modelOutput =
+        assistant.content === before ? result.text || synth.output || '' : assistant.content.slice(before.length);
+      const disclosure = synthesisDisclosure(
+        this.store.listSessionTasks(session.id).filter((task) => task.runId === run.id),
+        this.store.listEvents(session.id).filter((event) => event.runId === run.id),
+      );
+      if (assistant.content === before && modelOutput) {
+        assistant.content += modelOutput;
+        this.emit({
+          type: 'delta',
+          sessionId: session.id,
+          runId: run.id,
+          messageId: assistant.id,
+          text: modelOutput,
+          taskId: synth.id,
+          agentId: synth.agentId,
+          phase: synth.role,
+        });
+      }
+      const output = `${assistant.content.slice(before.length)}${disclosure}`;
+      if (disclosure) {
+        assistant.content += disclosure;
+        this.emit({
+          type: 'delta',
+          sessionId: session.id,
+          runId: run.id,
+          messageId: assistant.id,
+          text: disclosure,
+          taskId: synth.id,
+          agentId: synth.agentId,
+          phase: synth.role,
+        });
+      }
+      if (assistant.content !== before) {
         this.store.updateMessage(assistant);
         run.firstTokenMs ??= Date.now() - Date.parse(run.startedAt);
         assistant.firstTokenMs = run.firstTokenMs;
-        this.emit({ type: 'delta', sessionId: session.id, runId: run.id, messageId: assistant.id, text: output });
       }
       finishTask(synth, result.stopReason === 'cancelled' ? 'cancelled' : 'completed', output);
       if (result.stopReason === 'cancelled') throw new Error('Execução cancelada');

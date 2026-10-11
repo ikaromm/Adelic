@@ -22,8 +22,23 @@ export function checkEnvironment(source: NodeJS.ProcessEnv = process.env): NodeJ
   for (const [key, value] of Object.entries(source))
     if (value !== undefined && (/^(PATH|HOME|USER|LOGNAME|LANG|TZ)$/.test(key) || key.startsWith('LC_')))
       env[key] = value;
-  // /tmp is a private tmpfs inside the sandbox.
-  return { ...env, TMPDIR: '/tmp', CI: '1', TERM: 'dumb', NO_COLOR: '1' };
+  // /tmp is a private tmpfs inside the sandbox. Keep Git inspection from refreshing the
+  // index, and keep npm's cache/configuration private, offline and independent of user secrets.
+  return {
+    ...env,
+    TMPDIR: '/tmp',
+    CI: '1',
+    TERM: 'dumb',
+    NO_COLOR: '1',
+    GIT_OPTIONAL_LOCKS: '0',
+    npm_config_cache: '/tmp/adelic-npm-cache',
+    npm_config_userconfig: '/dev/null',
+    npm_config_globalconfig: '/tmp/adelic-global.npmrc',
+    npm_config_script_shell: '/bin/sh',
+    npm_config_offline: 'true',
+    npm_config_audit: 'false',
+    npm_config_fund: 'false',
+  };
 }
 
 /** Keeps the last `max` bytes written, decoded as UTF-8 on demand. */

@@ -662,7 +662,9 @@ describe('automatic retry in the orchestrator', () => {
       .listSessionTasks(session.id)
       .find((task) => task.runId === originRun.runId && task.role === 'worker');
     expect(child).toMatchObject({ status: 'failed', delivery: { status: 'blocked' } });
-    expect(attempts.get('planner')).toBe(1);
+    // Retrying one failed child is intentionally task-local; it executes its retained
+    // instructions directly rather than creating a new parent plan.
+    expect(attempts.has('planner')).toBe(false);
 
     // Retrying a child is task-local. Force this follow-up through the direct fast
     // route; the child itself was created by the real coordinated Orchestrator flow.

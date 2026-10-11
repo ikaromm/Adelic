@@ -997,6 +997,19 @@ async function checkPaths(spec: Spec, ctx: Ctx): Promise<string | undefined> {
 async function classifySimple(command: SimpleCommand, ctx: Ctx): Promise<string | undefined> {
   const [first, ...args] = command.argv;
   if (!first) return 'Comando vazio.';
+  if (path.basename(first) === 'npm') {
+    const resolved = await resolveAny(first, ctx.cwd);
+    const knownNpm = new Set([
+      '/usr/bin/npm',
+      '/bin/npm',
+      '/usr/share/nodejs/npm/bin/npm-cli.js',
+      '/usr/lib/node_modules/npm/bin/npm-cli.js',
+      '/usr/local/lib/node_modules/npm/bin/npm-cli.js',
+      path.resolve(path.dirname(process.execPath), '../lib/node_modules/npm/bin/npm-cli.js'),
+    ]);
+    if (!resolved || !knownNpm.has(resolved)) return 'Executável npm não está em um caminho canônico conhecido.';
+    return 'Scripts npm podem executar código do projeto; aprovação nativa exige confirmação.';
+  }
   if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(first)) return 'Atribuição de variável de ambiente exige confirmação.';
   const graph = await graphifyQuery(command.argv, ctx);
   if (graph === true) return undefined;

@@ -12,9 +12,13 @@
 
 ## Integração
 
-Codex mantém processos distintos por diretório e perfil: sem ferramentas, rápido com ferramentas locais e completo. O perfil rápido disponibiliza shell/unified exec e mantém o host necessário para executá-los (`code_mode_host` no CLI 0.160.0); desativa busca web, browser, recursos extras, MCPs configurados, hooks e descoberta automática de skills/documentos. As restrições são aplicadas no processo e na configuração da thread, evitando herdar políticas de outro perfil.
+Codex mantém processos distintos por diretório e perfil: sem ferramentas, rápido com ferramentas locais e completo. O perfil rápido disponibiliza shell/unified exec e mantém o host necessário para executá-los (`code_mode_host` no CLI 0.160.0); desativa busca web, browser, recursos extras, MCPs configurados, hooks e descoberta automática de skills/documentos. As restrições são aplicadas no processo e na configuração da thread, evitando herdar políticas de outro perfil. O ambiente não carrega configurações npm pessoais: `userconfig` e `globalconfig` usam caminhos diferentes e isolados. No perfil somente leitura, cache privado e modo offline são aplicados; no perfil gravável, flags de cache/offline forçadas pelo Adelic são removidas sem expor arquivos pessoais.
 
 Kiro mantém perfil temporário com ferramentas explícitas e bubblewrap; Claude utiliza a lista de ferramentas que sua integração consegue oferecer segundo a política configurada. Isso não comprova acesso irrestrito a dispositivos, rede ou interface gráfica, nem autenticação de um runtime indisponível.
+
+## Evidência e limites
+
+A fronteira de checks automatic-local somente leitura exige prova efetiva do bubblewrap antes do dispatch; dentro dele o projeto e dependências ficam somente leitura, scratch é privado, credenciais/arquivos do host não são expostos e a rede externa é fechada. Comando `exec` precisa ser vetor de argumentos nesse caminho; a compatibilidade depende do compartment e não de allowlist de scripts npm. Sintaxe alternativa de check não prova escrita. Escrita incompatível falha no sandbox. SSH não herda essa fronteira: seu runner remoto recusa `exec` em modo somente leitura e `write_file` continua indisponível; não se amplia acesso SSH nem nativo para contornar isso. A política nativa Codex/Kiro mantém bloqueios e limites próprios; aprovação não altera o sandbox. O perfil workspace-write não recebe cache/offline vazio imposto pelo Adelic, preservando a configuração de instalação autorizada. Esses limites descrevem a implementação; somente testes observados de cada caminho atestam despacho ou execução.
 
 ## Aceite
 

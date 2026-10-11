@@ -180,40 +180,45 @@ export function boundedCoordinatorContext(
  * separate: a provider process can complete while delivery remains partial or blocked.
  */
 export function synthesisExecutionFacts(tasks: DelegatedTask[]): string {
-  const facts = tasks.map((task) => ({
-    role: task.role,
-    title: task.title,
-    providerId: task.providerId,
-    model: task.model ?? null,
-    effort: task.effort ?? null,
-    process: {
-      status: task.status,
-      startedAt: task.startedAt ?? null,
-      completedAt: task.completedAt ?? null,
-      error: task.error ?? null,
-    },
-    integration: task.integration
-      ? {
-          status: task.integration.status,
-          cleanup: task.integration.cleanup,
-          reason: task.integration.reason ?? null,
-          recordedAt: task.integration.recordedAt,
-        }
-      : null,
-    delivery: task.delivery
-      ? {
-          status: task.delivery.status,
-          reason: task.delivery.reason,
-          evidence: task.delivery.evidence,
-          recovery: {
-            action: task.delivery.recovery.action,
-            reason: task.delivery.recovery.reason,
-            available: task.delivery.recovery.action !== 'none',
-            retainedWorkspace: Boolean(task.recoveryWorktree),
-          },
-        }
-      : null,
-  }));
+  // The synthesis call is still running while it receives these facts. Feeding its own
+  // transient `running` status back into the final-answer prompt creates a false open item.
+  // Its lifecycle remains persisted/observable on the task; omit only self-referential facts.
+  const facts = tasks
+    .filter((task) => task.role !== 'synthesis')
+    .map((task) => ({
+      role: task.role,
+      title: task.title,
+      providerId: task.providerId,
+      model: task.model ?? null,
+      effort: task.effort ?? null,
+      process: {
+        status: task.status,
+        startedAt: task.startedAt ?? null,
+        completedAt: task.completedAt ?? null,
+        error: task.error ?? null,
+      },
+      integration: task.integration
+        ? {
+            status: task.integration.status,
+            cleanup: task.integration.cleanup,
+            reason: task.integration.reason ?? null,
+            recordedAt: task.integration.recordedAt,
+          }
+        : null,
+      delivery: task.delivery
+        ? {
+            status: task.delivery.status,
+            reason: task.delivery.reason,
+            evidence: task.delivery.evidence,
+            recovery: {
+              action: task.delivery.recovery.action,
+              reason: task.delivery.recovery.reason,
+              available: task.delivery.recovery.action !== 'none',
+              retainedWorkspace: Boolean(task.recoveryWorktree),
+            },
+          }
+        : null,
+    }));
   return JSON.stringify(facts);
 }
 
@@ -314,6 +319,168 @@ export function isSimpleInspectionRequest(text: string) {
   return (
     inspection.test(text) && (file.test(text) || hasFileReference(text)) && !mutating.test(text) && !complex.test(text)
   );
+}
+
+/**
+ * Conservative lexical fast path for one small change or an explicit short follow-up.
+ * It is not a model classification: broad/multi-area requests keep the planner and Graphify
+ * planning pass; the worker still receives only this conversation's bounded context.
+ */
+export function canSkipCoordinationPlanner(text: string): boolean {
+  const request = text.trim();
+  if (!request || request.length > 600) return false;
+  // Preservation constraints describe boundaries, not work to decompose. Detect them by
+  // meaning-bearing verbs and references to established behavior/rules, not a benchmark phrase.
+  const preservationConstraint =
+    /^\s*(?:(?:and|while|but)\s+)?(?:(?:please)\s+)?(?:preserv(?:e|ing)|keep(?:ing)?|maintain(?:ing)?|retain(?:ing)?|ensure|without\s+chang(?:e|ing)|do\s+not\s+(?:change|alter|break))\b.*\b(?:existing|current|previous|established|prior|backward[- ]compatible)\b.*\b(?:behavior|behaviour|rules?|semantics?|contract|compatib(?:ility|le)|dependenc(?:y|ies)|funcionalidade|comportamento|regras?|contrato)\b/i;
+  const actionableClauses = request
+    .split(/[;,.!?\n]+|\b(?:and|while|but)\b|(?=\bwithout\s+chang(?:e|ing)\b)/i)
+    .filter((clause) => !preservationConstraint.test(clause));
+  const workRequest = actionableClauses.join(' ');
+  const complex =
+    /\b(multiple|several|independent|across|architecture|architectural|dependency|dependencies|depend[eê]ncia|depend[eê]ncias|workflow|end-to-end|full[- ]stack|multi[- ]step|v[aá]rios|m[uú]ltiplos|etapas|arquitetura|integra[cç][aã]o)\b|\b(?:[2-9]|two|three|four|five|duas|dois|tr[eê]s|quatro)\s+(?:files?|arquivos?|modules?|m[oó]dulos?|tasks?|tarefas?|steps?|etapas?)\b|(?:^|\n)\s*(?:[-*]|\d+[.)])\s/im;
+  if (complex.test(workRequest)) return false;
+  // Distinct technical domains imply coordination even when the request does not say
+  // "multiple modules". This is category-based rather than phrase-specific.
+  const workAreas = [
+    /\b(ui|user interface|interface|frontend|front[- ]end|client[- ]side|tela|interface do usu[aá]rio)\b/i,
+    /\b(database|db|sqlite|schema|migration|migrate|storage|persistence|banco de dados|esquema|migra[cç][aã]o|persist[eê]ncia)\b/i,
+    /\b(api|endpoint|backend|back[- ]end|service|servi[cç]o|rota|route)\b/i,
+    /\b(authentication|authorization|cache|queue|messaging|autentica[cç][aã]o|autoriza[cç][aã]o|fila)\b/i,
+  ];
+  if (workAreas.filter((area) => area.test(workRequest)).length > 1) return false;
+  const continuation =
+    /\b(now|then|also|instead|continue|continuing|same|that|this|it|keep|make it|additionally|agora|depois|tamb[eé]m|ent[aã]o|mantenha|isso|esse|essa|nele|nela)\b/i.test(
+      request,
+    );
+  const followUp = continuation;
+  const smallStandalone =
+    request.length <= 260 &&
+    /\b(add|implement|create|change|edit|fix|make|persist|filter|toggle|button|setting|field|implemente|crie|altere|edite|corrija|adicione|filtro|persist|bot[aã]o|configura[cç][aã]o)\b/i.test(
+      request,
+    ) &&
+    (/\b(file|arquivo|component|componente|page|p[aá]gina|button|bot[aã]o|filter|filtro|toggle|setting|configura[cç][aã]o|field|campo|modal|dialog|di[aá]logo)\b/i.test(
+      request,
+    ) ||
+      hasFileReference(request));
+  return followUp || smallStandalone;
+}
+
+/** True when the current request uses a reference whose subject must come from this conversation. */
+export function requiresResolvedContinuity(text: string): boolean {
+  return /\b(it|this|that|these|those|same|isso|isto|aquilo|esse|essa|esses|essas|nele|nela|now|then|also|instead|continue|continuing|additionally|agora|depois|tamb[eé]m|ent[aã]o|mantenha)\b/i.test(
+    text,
+  );
+}
+
+const technicalWorkIntent =
+  /\b(implement|create|change|alter|refactor|migrate|add|build|design|redesign|fix|write|implemente|crie|altere|refatore|migre|adicione|construa|projete|corrija|escreva)\b/i;
+const conceptualQuestion =
+  /^\s*(?:what|why|how|when|where|who|which|is|are|does|do|can|could|would|will|o que|por que|como|quando|onde|quem|qual|quais|[ée]\s+que|isso\s+|ser[aá]\s+que)\b/i;
+
+/** A plain informational question should not enter delegated software-work phases. */
+export function isSimpleConceptualQuestion(text: string): boolean {
+  const request = text.trim();
+  return request.length <= 240 && conceptualQuestion.test(request) && !technicalWorkIntent.test(request);
+}
+
+/** A continuity fallback is justified only by a technical-work ancestor, not a conceptual topic. */
+export function hasTechnicalWorkAncestor(history: { role: string; content: string }[], current: string): boolean {
+  if (!requiresResolvedContinuity(current)) return false;
+  const users = history.slice(-24).filter((message) => message.role === 'user' && message.content.trim());
+  for (const message of users.reverse().slice(0, 12)) {
+    const turn = message.content.trim();
+    if (!requiresResolvedContinuity(turn)) return technicalWorkIntent.test(turn) && !isSimpleConceptualQuestion(turn);
+  }
+  return false;
+}
+
+/**
+ * Resolve only a recent user-authored goal from this conversation. The user request is the
+ * source of intent; assistant prose is never treated as authority, and the excerpt is bounded.
+ */
+export function minimalContinuationContext(
+  history: { role: string; content: string }[],
+  current: string,
+): string | undefined {
+  if (!requiresResolvedContinuity(current)) return undefined;
+
+  // Follow references across successive user turns, but never use assistant prose as intent.
+  // A few bounded user turns preserve the original goal plus refinements without replaying
+  // long answers or the full transcript.
+  const userTurns = history.slice(-24).filter((message) => message.role === 'user' && message.content.trim());
+  const chain: string[] = [current.trim()];
+  let root: string | undefined;
+  for (const message of userTurns.reverse().slice(0, 12)) {
+    const turn = message.content.trim();
+    if (requiresResolvedContinuity(turn)) {
+      if (chain.length >= 4) return undefined;
+      chain.push(turn);
+      continue;
+    }
+    root = turn;
+    break;
+  }
+  if (!root) return undefined;
+  const currentFiles = [...chain.join(' ').matchAll(/\b[\w./-]+\.(?:tsx?|jsx?|mjs|cjs|py|go|rs|java|sql)\b/gi)].map(
+    (match) => match[0].toLowerCase(),
+  );
+  const intent = root;
+  if (currentFiles.length && !currentFiles.some((file) => root!.toLowerCase().includes(file))) return undefined;
+  if (
+    !/\b(implement|create|change|add|edit|fix|migrate|write|build|implemente|crie|altere|adicione|edite|corrija|migre|escreva)\b/i.test(
+      intent,
+    )
+  )
+    return undefined;
+  // Broad roots or an intermediate expansion cannot be collapsed to one worker.
+  // Check the full chain before composing it; never silently cut a requirement.
+  const refinements = chain.slice(1).reverse();
+  const completeChain = [intent, ...refinements].join(' → ');
+  if (
+    completeChain.length > 1200 ||
+    !canSkipCoordinationPlanner(current) ||
+    !canSkipCoordinationPlanner(intent) ||
+    refinements.some((turn) => !canSkipCoordinationPlanner(turn)) ||
+    !canSkipCoordinationPlanner(completeChain)
+  )
+    return undefined;
+  return `Intenção mínima resolvida da mesma conversa (mensagens do usuário): ${completeChain}`;
+}
+
+/**
+ * Preserve the complete bounded chain of user-authored follow-ups, including broad refinements
+ * that deliberately require planning. Assistant replies are excluded so verbose answers cannot
+ * evict the original goal from planner/executor context.
+ */
+export function boundedContinuationContext(
+  history: { role: string; content: string }[],
+  current: string,
+  maxChars = 3000,
+): string | undefined {
+  if (!requiresResolvedContinuity(current)) return undefined;
+
+  const userTurns = history
+    .slice(-24)
+    .filter((message) => message.role === 'user' && message.content.trim())
+    .slice(-12);
+  const reversedChain = [current.trim()];
+  let foundRoot = false;
+  for (const message of userTurns.reverse()) {
+    const turn = message.content.trim();
+    reversedChain.push(turn);
+    if (!requiresResolvedContinuity(turn)) {
+      foundRoot = true;
+      break;
+    }
+  }
+  if (!foundRoot) return undefined;
+
+  const chain = reversedChain.reverse();
+  const completeChain = chain.join(' → ');
+  // Never silently truncate an instruction-bearing user turn.
+  if (completeChain.length > maxChars) return undefined;
+  return `Contexto ancestral limitado (mensagens do usuário, da raiz ao pedido atual): ${completeChain}`;
 }
 
 /**

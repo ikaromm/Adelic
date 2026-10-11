@@ -473,6 +473,21 @@ describe('isolated local automatic executor', () => {
       await expect(executor.call('exec', { command: 'true' }, new AbortController().signal)).rejects.toThrow(
         /somente leitura/,
       );
+      const validation = (await executor.call(
+        'exec',
+        {
+          command: [
+            'node',
+            '-e',
+            'const fs=require("node:fs");try{fs.writeFileSync("/workspace/forbidden.txt","x");process.exit(9)}catch(e){if(e.code!=="EROFS")process.exit(8);fs.writeFileSync("/var/tmp/adelic-validation-scratch","ok");fs.unlinkSync("/var/tmp/adelic-validation-scratch");console.log("workspace-write-denied; scratch-cleaned");}',
+          ],
+          readOnly: false,
+        },
+        new AbortController().signal,
+      )) as { exitCode: number; stdout: string; stderr: string };
+      expect(validation).toMatchObject({ exitCode: 0, stdout: 'workspace-write-denied; scratch-cleaned\n' });
+      await expect(access(path.join(workspace, 'forbidden.txt'))).rejects.toMatchObject({ code: 'ENOENT' });
+      await expect(access('/var/tmp/adelic-validation-scratch')).rejects.toMatchObject({ code: 'ENOENT' });
       await expect(
         executor.call('write_file', { path: 'no.txt', content: 'no' }, new AbortController().signal),
       ).rejects.toThrow(/somente leitura/);

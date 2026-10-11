@@ -78,6 +78,42 @@ describe('adaptive router', () => {
     ]);
     expect(memoryQueryTerms('O que decidimos sobre Adelic e memória?')).toEqual(['Adelic']);
   });
+  it('routes architecture-spanning changes deeply in auto, including explicit continuations', () => {
+    const request = 'Now change the Architecture Across Multiple Modules in the project.';
+    expect(routeMessage(request, 'auto')).toMatchObject({
+      level: 'deep',
+      tools: true,
+      effort: 'high',
+      contextBudget: 24000,
+    });
+    expect(routeMessage(request, 'deep')).toMatchObject({ level: 'deep', tools: true });
+    expect(routeMessage('Add a button to the UI. Also migrate the database and change the API.', 'auto')).toMatchObject(
+      {
+        level: 'deep',
+        tools: true,
+      },
+    );
+    expect(
+      routeMessage('Now change it across multiple modules.', 'auto', [
+        { id: '1', sessionId: 's', role: 'user', content: 'Add a small UI button.', createdAt: '' },
+      ]),
+    ).toMatchObject({ level: 'deep', tools: true });
+    expect(routeMessage('What does software architecture mean?', 'auto').level).toBe('fast');
+    expect(routeMessage('Explain the difference between UI and API.', 'auto')).toMatchObject({
+      level: 'fast',
+      tools: true,
+    });
+    expect(
+      routeMessage('Now explain the difference between UI and API.', 'auto', [
+        { id: '1', sessionId: 's', role: 'user', content: 'Implement a UI and API change.', createdAt: '' },
+      ]).level,
+    ).toBe('fast');
+    expect(routeMessage('Add a UI button and migrate storage.', 'auto')).toMatchObject({
+      level: 'deep',
+      tools: true,
+    });
+    expect(routeMessage('Add a small button to the UI.', 'auto').level).toBe('fast');
+  });
   it('delegates concrete software changes while keeping API definitions simple', () => {
     for (const prompt of [
       'Implemente uma rota de API',

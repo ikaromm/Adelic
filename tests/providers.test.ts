@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import { spawnSync } from 'node:child_process';
 import { chmod, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile, access } from 'node:fs/promises';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { CodexProvider } from '../server/providers/codex';
+import { CodexProvider, codexRuntimeEnvironment } from '../server/providers/codex';
 import { ClaudeProvider } from '../server/providers/claude';
 import { kiroToolEvent, KiroProvider, parseKiroDoctorAuth, parseKiroModelCatalog } from '../server/providers/kiro';
 import { errorMessage, JsonRpcProcess } from '../server/providers/process';
@@ -68,6 +69,56 @@ describe('provider runtime helpers', () => {
       expect(message).not.toContain(secret);
     expect(message).toContain('[redacted]');
   });
+  it('applies offline npm policy only to read-only validation while retaining sanitization', () => {
+    const source = {
+      PATH: '/usr/bin',
+      npm_config_registry: 'https://registry.example.invalid',
+      npm_config_offline: 'false',
+      BASH_ENV: '/host/bashrc',
+      BASH_FUNC_bad: '() { :; }',
+      CODEX_EXEC_SERVER_URL: 'host-value',
+      SHELLOPTS: 'xtrace',
+    } as NodeJS.ProcessEnv;
+    const readonly = codexRuntimeEnvironment('read-only', source);
+    expect(readonly).toMatchObject({
+      npm_config_offline: 'true',
+      npm_config_userconfig: '/dev/null',
+      npm_config_globalconfig: '/dev/adelic-npm-globalconfig',
+      npm_config_cache: '/tmp/adelic-npm-cache',
+      BASH_ENV: '/dev/null',
+    });
+    expect(readonly).not.toHaveProperty('BASH_FUNC_bad');
+    expect(readonly).not.toHaveProperty('CODEX_EXEC_SERVER_URL');
+    expect(readonly).not.toHaveProperty('SHELLOPTS');
+    const writable = codexRuntimeEnvironment('workspace-write', source);
+    expect(writable).not.toHaveProperty('npm_config_offline');
+    expect(writable).not.toHaveProperty('npm_config_cache');
+    expect(writable).toMatchObject({
+      npm_config_registry: 'https://registry.example.invalid',
+      npm_config_userconfig: '/dev/null',
+      npm_config_globalconfig: '/dev/adelic-npm-globalconfig',
+      BASH_ENV: '/dev/null',
+    });
+    expect(writable).not.toHaveProperty('BASH_FUNC_bad');
+  });
+
+  it('runs npm in both isolated profiles without loading personal config files', async () => {
+    const fixture = await mkdtemp(path.join(os.tmpdir(), 'adelic-npm-env-'));
+    temporaryDirectories.push(fixture);
+    const home = path.join(fixture, 'missing-home');
+    expect(existsSync(home)).toBe(false);
+    for (const profile of ['read-only', 'workspace-write'] as const) {
+      const env = codexRuntimeEnvironment(profile, { PATH: process.env.PATH });
+      env.HOME = home;
+      if (profile === 'read-only') env.npm_config_cache = path.join(fixture, 'readonly-cache');
+      const result = spawnSync('npm', ['--version'], { env, encoding: 'utf8', timeout: 10_000 });
+      expect(result.status).toBe(0);
+      expect(result.stderr).not.toMatch(/double-loading config/i);
+      expect(result.stdout.trim().split('.')).toHaveLength(3);
+    }
+    expect(existsSync(home)).toBe(false);
+  });
+
   it('refuses Claude automatic mode because the integration cannot restrict native tools', async () => {
     const provider = new ClaudeProvider();
     const input: RunInput = {
@@ -612,7 +663,8 @@ rl.on('line', (line) => {
       return;
     }
     if (process.env.FAKE_SCENARIO === 'command-approval') {
-      send({ jsonrpc: '2.0', id: 700, method: 'item/commandExecution/requestApproval', params: { threadId: 'thread-1', turnId, command: 'pwd', cwd: process.cwd(), reason: 'fixture', environmentId: 'local' } });
+      const command = process.env.FAKE_COMMAND ? JSON.parse(process.env.FAKE_COMMAND) : 'pwd';
+      send({ jsonrpc: '2.0', id: 700, method: 'item/commandExecution/requestApproval', params: { threadId: 'thread-1', turnId, command, cwd: process.cwd(), reason: 'fixture', environmentId: 'local' } });
       return;
     }
     if (process.env.FAKE_SCENARIO === 'automatic-command-approval') {
@@ -1821,7 +1873,9 @@ rl.on('line', (line) => {
 
   it('declines a command blocked by the project rules even when the safe classifier would approve it', async () => {
     const prior = process.env.FAKE_SCENARIO;
+    const priorCommand = process.env.FAKE_COMMAND;
     process.env.FAKE_SCENARIO = 'command-approval';
+    process.env.FAKE_COMMAND = JSON.stringify(['/usr/bin/bash', '-lc', 'npm test']);
     const testTmp = path.join(process.cwd(), '.adelic/test-tmp');
     await mkdir(testTmp, { recursive: true });
     const directory = await mkdtemp(path.join(testTmp, 'codex-blocked-'));
@@ -1837,7 +1891,7 @@ rl.on('line', (line) => {
             cwd: directory,
             sandbox: 'workspace-write' as const,
             approvalMode: 'automatic',
-            blockedCommands: ['p*d'],
+            blockedCommands: ['npm test'],
             plan: { ...runInput('x').plan, tools: true },
           },
           (event) => {
@@ -1847,13 +1901,20 @@ rl.on('line', (line) => {
         ),
       ).resolves.toMatchObject({ stopReason: 'completed' });
       expect(events).toMatchObject([
-        { status: 'denied', title: 'Comando bloqueado pelas regras do projeto', blocked: 'p*d', command: 'pwd' },
+        {
+          status: 'denied',
+          title: 'Comando bloqueado pelas regras do projeto',
+          blocked: 'npm test',
+          command: "/usr/bin/bash -lc 'npm test'",
+        },
       ]);
       expect(JSON.parse(await readFile(approvalLog, 'utf8'))).toMatchObject({ result: { decision: 'decline' } });
     } finally {
       await provider.shutdown();
       if (prior === undefined) delete process.env.FAKE_SCENARIO;
       else process.env.FAKE_SCENARIO = prior;
+      if (priorCommand === undefined) delete process.env.FAKE_COMMAND;
+      else process.env.FAKE_COMMAND = priorCommand;
     }
   });
 

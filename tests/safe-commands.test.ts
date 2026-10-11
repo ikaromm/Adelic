@@ -10,6 +10,7 @@ import path from 'node:path';
 import { classifyApproval, type ApprovalInput } from '../server/approval-policy';
 import { parseShell } from '../server/shell-grammar';
 import { gitConfigSafety, inspectGitConfig } from '../server/git-safety';
+import { blockedBy, commandText } from '../shared/hooks';
 
 let base: string, root: string, home: string, graphs: string, graph: string, graphifyBin: string, fakeGraphify: string;
 let outsideGraph: string;
@@ -64,7 +65,7 @@ beforeAll(async () => {
     await chmod(bin, 0o755);
   }
   await symlink(graphifyBin, path.join(base, 'tools', 'graphify-link'));
-  process.env.PATH = `/usr/bin:/bin`;
+  process.env.PATH = `${path.dirname(process.execPath)}:/usr/bin:/bin`;
 });
 afterAll(async () => {
   process.env.PATH = oldPath;
@@ -396,6 +397,35 @@ const binariesOf = (raw: string) =>
     .filter((name): name is string => Boolean(name) && !name.includes('{{') && !name.includes('/'));
 const missingBinary = (raw: string) => binariesOf(raw).find((name) => !hasSystemBinary(name));
 
+describe('blocked-command provider normalization', () => {
+  it('treats string and argv commands, including shell wrappers, as the same blocked command', () => {
+    const forms: unknown[] = [
+      'npm test',
+      ['npm', 'test'],
+      "/usr/bin/bash -lc 'npm test'",
+      ['/usr/bin/bash', '-lc', 'npm test'],
+      ['bash', '-c', 'npm test'],
+      ['bash', '-c', '--', 'npm test'],
+      ['bash', '-co', 'posix', 'npm test'],
+      ['bash', '+O', 'extglob', '-c', 'npm test'],
+      'npm test && git status',
+      ['bash', '-lc', 'npm test && git status'],
+    ];
+    for (const command of forms) {
+      const normalized = commandText(command);
+      expect(normalized, String(command)).toBeTruthy();
+      expect(blockedBy(['npm test'], normalized)).toBe('npm test');
+    }
+    expect(blockedBy(['npm test'], commandText(['npm', 'run', 'typecheck']))).toBeUndefined();
+    expect(commandText(['bash', '-lc', 'npm test'])).toBe("bash -lc 'npm test'");
+    const boundedArgv = commandText(['npm', 'test', 'x'.repeat(8192)]);
+    expect(boundedArgv).toBeTruthy();
+    expect(blockedBy(['npm test*'], boundedArgv)).toBe('npm test*');
+    expect(commandText(['npm', 'test', 'x'.repeat(8193)])).toBeUndefined();
+    expect(blockedBy(["echo 'x'"], commandText(['bash', '-lc', "echo 'x'"]))).toBe("echo 'x'");
+  });
+});
+
 describe('system binary aliases', () => {
   it('accepts which → which.debianutils (Debian/Ubuntu alternatives) but no other renamed binary', async () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), 'adelic-alias-'));
@@ -426,6 +456,58 @@ describe('safe-command classifier table', () => {
     });
   it('has a broad table', () => {
     expect(AUTO.length + PENDING.length).toBeGreaterThanOrEqual(120);
+  });
+});
+
+describe('isolated reviewer validation', () => {
+  it('keeps npm scripts outside the native auto-safe read allowlist', async () => {
+    await symlink(path.join(process.cwd(), 'node_modules'), path.join(root, 'node_modules'));
+    const packagePath = path.join(root, 'package.json');
+    const checkInput = (command: string, extra: Partial<ApprovalInput> = {}) =>
+      input(command, {
+        sandbox: 'read-only',
+        trustedNonLoginShell: true,
+        sandboxVerified: true,
+        ...extra,
+      });
+    const typecheckInput = (extra: Partial<ApprovalInput> = {}) => checkInput('npm run typecheck', extra);
+    const testInput = (extra: Partial<ApprovalInput> = {}) => checkInput('npm test', extra);
+
+    await writeFile(
+      packagePath,
+      JSON.stringify({
+        name: 'demo',
+        scripts: { typecheck: 'tsc --noEmit', test: 'vitest run --configLoader runner' },
+      }),
+    );
+    const typecheckApproval = await classifyApproval(typecheckInput());
+    expect(typecheckApproval, typecheckApproval.reason).toMatchObject({ decision: 'pending' });
+    const testApproval = await classifyApproval(testInput());
+    expect(testApproval, testApproval.reason).toMatchObject({ decision: 'pending' });
+    expect((await classifyApproval(testInput({ sandboxVerified: false }))).decision).toBe('pending');
+    expect((await classifyApproval(testInput({ sandbox: 'workspace-write' }))).decision).toBe('pending');
+    expect((await classifyApproval(typecheckInput({ sandbox: 'workspace-write' }))).decision).toBe('pending');
+    expect((await classifyApproval(typecheckInput({ mode: 'manual' }))).decision).toBe('pending');
+    const wrapped = await classifyApproval(
+      input("/usr/bin/bash -c 'npm run typecheck'", {
+        sandbox: 'read-only',
+        trustedNonLoginShell: true,
+        sandboxVerified: true,
+      }),
+    );
+    expect(wrapped, wrapped.reason).toMatchObject({ decision: 'pending' });
+    expect(
+      (await classifyApproval(input('git status --short', { sandbox: 'read-only', trustedNonLoginShell: true })))
+        .decision,
+    ).toBe('auto');
+
+    await writeFile(
+      packagePath,
+      JSON.stringify({ name: 'demo', scripts: { typecheck: 'tsc --noEmit', pretypecheck: 'node script.js' } }),
+    );
+    expect((await classifyApproval(typecheckInput())).decision).toBe('pending');
+    await writeFile(packagePath, JSON.stringify({ name: 'demo', scripts: { typecheck: 'node script.js' } }));
+    expect((await classifyApproval(typecheckInput())).decision).toBe('pending');
   });
 });
 
@@ -534,6 +616,13 @@ describe('git configuration rule', () => {
     execFileSync('git', ['worktree', 'add', '-q', wt, '-b', 'feature'], { cwd: main });
     const run = () => classifyApproval(input('git log -1 --oneline', { cwd: wt, workspace: wt }));
     expect((await run()).decision).toBe('auto');
+    expect(
+      (
+        await classifyApproval(
+          input('git status --short', { cwd: wt, workspace: wt, sandbox: 'read-only', trustedNonLoginShell: true }),
+        )
+      ).decision,
+    ).toBe('auto');
     execFileSync('git', ['config', 'diff.external', '/tmp/x'], { cwd: main });
     expect((await run()).decision).toBe('pending');
   });

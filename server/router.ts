@@ -3,7 +3,7 @@ import type { Message, Mode, RoutePlan } from '../shared/contracts.js';
 const actionPattern =
   /\b(leia|read|abra|open|inspecione|inspect|analise|analyze|revise|review|corrija|fix|implemente|implement|crie|create|edite|edit|rode|run|execute|teste|test|compile|build|deploy|fa[cç]a|make|write|escreva|investigue|investigate|diagnostique|diagnose|explique|explain|resuma|resumir|summari[sz]e)\b/i;
 const filePattern =
-  /\b(readme|arquivo|file|projeto|project|c[oó]digo|code|repo|reposit[oó]rio|app|aplicativo|pasta|directory|p[aá]gina|page|branch|logs?|bug|erro|error|falha|build|deploy|pr)\b/i;
+  /\b(readme|arquivo|file|projeto|project|c[oó]digo|code|repo|reposit[oó]rio|app|aplicativo|pasta|directory|p[aá]gina|page|branch|logs?|bug|erro|error|falha|m[oó]dulos?|modules?|build|deploy|pr)\b/i;
 const fileExtensionPattern =
   /\.(?:tsx?|jsx?|mjs|cjs|py|json|md|ya?ml|toml|css|html|sql|sh|rs|go|java|kt|swift|vue|svelte)\b/i;
 const pathPattern = /(?:^|[\s"'`(])(?:\.{1,2}\/)?[\w.-]+(?:\/[\w.-]+)+(?:\.[\w]+)?(?=$|[\s"'`),:])/i;
@@ -11,7 +11,19 @@ const pluralFilePattern = /\b(arquivos?|files?|projetos?|projects?)\b/i;
 const researchPattern =
   /\b(pesquise|search|procure|look up|busque|browse|navegue)\b|\b(cot[aç][aã]o|pre[cç]o|price|clima|weather|not[ií]cia|news)\b.{0,60}\b(atual|hoje|today|latest|current|recent)\b|\b(atual|hoje|today|latest|current|recent)\b.{0,60}\b(cot[aç][aã]o|pre[cç]o|price|clima|weather|not[ií]cia|news)\b/i;
 const implementationPattern =
-  /\b(implemente|implement|crie|create|corrija|fix|edite|edit|altere|change|refatore|refactor|adicione|add)\b.{0,120}\b(api|endpoint|fun[cç][aã]o|function|componente|component|schema|migration|migra[cç][aã]o|banco de dados|database|script|servidor|server|frontend|backend)\b/i;
+  /\b(implemente|implement|crie|create|corrija|fix|edite|edit|altere|change|refatore|refactor|adicione|add|keep|mantenha)\b.{0,120}\b(api|endpoint|fun[cç][aã]o|function|componente|component|schema|migration|migra[cç][aã]o|banco de dados|database|script|servidor|server|frontend|backend|filter|filtro|persistent|persistente|persist)\b/i;
+const technicalChangePattern =
+  /\b(implement|create|change|alter|refactor|migrate|add|build|design|redesign|implemente|crie|altere|refatore|migre|adicione|construa|projete|corrija|fix)\b/i;
+const explanationPattern =
+  /\b(explain|describe|what|why|how|difference|meaning|explique|descreva|o que|por que|como|diferen[cç]a|significado)\b/i;
+const broadTechnicalWorkPattern =
+  /\b(implement|create|change|alter|refactor|migrate|add|build|design|redesign|implemente|crie|altere|refatore|migre|adicione|construa|projete)\b.{0,180}\b(architecture|architectural|across.{0,30}modules?|multiple modules?|several modules?|multi[- ]module|whole[- ]project|arquitetura|entre m[oó]dulos|m[uú]ltiplos m[oó]dulos|v[aá]rios m[oó]dulos)\b/i;
+const technicalWorkAreaPatterns = [
+  /\b(ui|user interface|interface|frontend|front[- ]end|client[- ]side|tela|interface do usu[aá]rio)\b/i,
+  /\b(database|db|sqlite|schema|migration|migrate|storage|persistence|banco de dados|esquema|migra[cç][aã]o|persist[eê]ncia)\b/i,
+  /\b(api|endpoint|backend|back[- ]end|service|servi[cç]o|rota|route)\b/i,
+  /\b(authentication|authorization|cache|queue|messaging|autentica[cç][aã]o|autoriza[cç][aã]o|fila)\b/i,
+];
 /** Explicit requests to consult memory, in pt-BR and English ("busca na memória", "remember", "from memory"). */
 const memoryRequestPattern =
   /\b(lembra|lembre|lembrar|lembrou|lembro|recorda|recorde|recordar|mem[oó]rias?|memory|memories|remember|recall)\b/i;
@@ -20,7 +32,7 @@ const priorContextPattern = /\b(contexto anterior|previous context|antes|anterio
 const toolPatterns: [RegExp, string][] = [
   [implementationPattern, 'O pedido requer implementação ou alteração de software'],
   [
-    /\b(leia|read|abra|open|inspecione|inspect|analise|analyze|revise|review|corrija|fix|implemente|implement|crie|create|edite|edit|rode|run|execute|teste|test|compile|build|deploy)\b.{0,90}\b(readme|arquivo|file|projeto|project|c[oó]digo|code|repo|reposit[oó]rio|app|aplicativo|pasta|directory|bug|erro|error|falha)\b/i,
+    /\b(leia|read|abra|open|inspecione|inspect|analise|analyze|revise|review|corrija|fix|implemente|implement|crie|create|edite|edit|rode|run|execute|teste|test|compile|build|deploy)\b.{0,90}\b(readme|arquivo|file|projeto|project|c[oó]digo|code|repo|reposit[oó]rio|app|aplicativo|pasta|directory|m[oó]dulos?|modules?|bug|erro|error|falha)\b/i,
     'O pedido envolve inspecionar ou alterar arquivos do projeto',
   ],
   [
@@ -72,6 +84,21 @@ export function routeMessage(content: string, mode: Mode, history: Message[] = [
       contextBudget: 24000,
     };
   }
+  // Promote explicit broad software changes before the automatic fast return. Keep this
+  // lexical and cheap: architecture/module-spanning work needs planning/review; questions do not.
+  if (
+    broadTechnicalWorkPattern.test(text) ||
+    (technicalChangePattern.test(text) && technicalWorkAreaPatterns.filter((area) => area.test(text)).length > 1)
+  ) {
+    return {
+      level: 'deep',
+      reason: 'O pedido requer alteração técnica ampla entre módulos',
+      tools: true,
+      memory: memoryEnabled && (memoryRequestPattern.test(text) || priorContextPattern.test(text)),
+      effort: 'high',
+      contextBudget: 24000,
+    };
+  }
   for (const [pattern, reason] of toolPatterns)
     if (pattern.test(text)) {
       const memory = memoryEnabled && (memoryRequestPattern.test(text) || priorContextPattern.test(text));
@@ -83,7 +110,12 @@ export function routeMessage(content: string, mode: Mode, history: Message[] = [
       text,
     );
   const lastUser = [...history].reverse().find((m) => m.role === 'user');
-  if (isFollowUp && lastUser && toolPatterns.slice(0, 5).some(([p]) => p.test(lastUser.content))) {
+  if (
+    isFollowUp &&
+    !explanationPattern.test(text) &&
+    lastUser &&
+    toolPatterns.slice(0, 5).some(([p]) => p.test(lastUser.content))
+  ) {
     return {
       level: 'deep',
       reason: 'Continuação de um pedido anterior que exige contexto ampliado',
@@ -107,8 +139,10 @@ export function routeMessage(content: string, mode: Mode, history: Message[] = [
 function needsTools(text: string) {
   return (
     implementationPattern.test(text) ||
+    broadTechnicalWorkPattern.test(text) ||
     researchPattern.test(text) ||
-    (actionPattern.test(text) && (filePattern.test(text) || hasFileReference(text)))
+    (actionPattern.test(text) && (filePattern.test(text) || hasFileReference(text))) ||
+    (technicalChangePattern.test(text) && technicalWorkAreaPatterns.filter((area) => area.test(text)).length > 1)
   );
 }
 

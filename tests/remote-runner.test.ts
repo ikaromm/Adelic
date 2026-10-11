@@ -164,6 +164,32 @@ if __name__ == "__main__":
     }
   }, 10000);
 
+  it('refuses read-only exec at the remote protocol boundary before spawning argv commands', async () => {
+    const harness = await createHarness();
+    const marker = join(harness.root, 'should-not-exist');
+    try {
+      const response = await harness.send({
+        id: 'readonly-exec',
+        method: 'call',
+        tool: 'exec',
+        args: {
+          command: ['python3', '-c', 'from pathlib import Path; Path("should-not-exist").write_text("unsafe")'],
+          cwd: '.',
+          readOnly: true,
+        },
+      });
+      expect(response).toMatchObject({
+        id: 'readonly-exec',
+        ok: false,
+        error: 'exec cannot guarantee a read-only filesystem',
+        errorCategory: 'invalid_request',
+      });
+      await expect(access(marker)).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      await harness.close();
+    }
+  });
+
   it('exposes protocol info and performs bounded file operations under its root', async () => {
     const harness = await createHarness();
     try {

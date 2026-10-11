@@ -1890,7 +1890,10 @@ describe('backend persistence and API', () => {
         if (e.type === 'run' && e.run.status === 'completed') resolve();
       }),
     );
-    await orchestrator.start(session, 'Implemente a alteração no arquivo do projeto em duas partes');
+    await orchestrator.start(
+      session,
+      'Coordene duas etapas dependentes: primeiro investigue a arquitetura de persistência; depois implemente a API que depende dessa decisão em módulos distintos.',
+    );
     await done;
     const workers = calls.filter(
       (c) => c.input.prompt.includes('Tarefa: Inspect') || c.input.prompt.includes('Tarefa: Change'),
@@ -1987,7 +1990,10 @@ describe('backend persistence and API', () => {
       async shutdown() {},
     };
     const orchestrator = new Orchestrator(store, providers);
-    await orchestrator.start(session, 'Implemente mudanças no código do projeto em módulos independentes');
+    await orchestrator.start(
+      session,
+      'Coordene duas frentes independentes de implementação: atualize o parser e, em paralelo, implemente a camada de persistência que usa o novo contrato.',
+    );
     await readyWorkers;
     await orchestrator.cancel('s');
     await orchestrator.shutdown();
@@ -2328,7 +2334,10 @@ describe('backend persistence and API', () => {
         if (e.type === 'run' && e.run.status === 'completed') resolve();
       }),
     );
-    await orchestrator.start(session, 'Pesquise na memória anterior e implemente uma alteração no arquivo do projeto');
+    await orchestrator.start(
+      session,
+      'Pesquise na memória anterior e coordene uma migração de persistência com uma API dependente; planeje a ordem, implemente e revise as frentes relacionadas.',
+    );
     await done;
     expect(memoryLookups).toBe(1);
     expect(inputs).toHaveLength(4);

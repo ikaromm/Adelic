@@ -20,7 +20,7 @@ import {
 import { errorMessage, isRecord, JsonRpcProcess, type JsonRpcMessage } from './process';
 import { findProviderBinary, hasProviderBinaryOverride, providerBinaryMissingDetail } from './discovery';
 import { canonWritePathWithin, classifyApproval, scanCodexRules } from '../approval-policy';
-import { blockedBy } from '../../shared/hooks';
+import { blockedBy, commandText } from '../../shared/hooks';
 import {
   bubblewrap,
   mcpCommandBindings,
@@ -258,6 +258,41 @@ async function approvedPermissions(
 }
 
 const MCP_DECLINE = { action: 'decline', content: null, _meta: null };
+
+export function codexRuntimeEnvironment(sandbox: Sandbox, source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const runtimeEnv = Object.fromEntries(
+    Object.entries(source).filter(
+      ([key]) =>
+        !key.startsWith('BASH_FUNC_') &&
+        !key.startsWith('CODEX_EXEC_SERVER') &&
+        !['SHELLOPTS', 'BASHOPTS', 'PS4'].includes(key),
+    ),
+  ) as NodeJS.ProcessEnv;
+  Object.assign(runtimeEnv, {
+    BASH_ENV: '/dev/null',
+    ENV: '/dev/null',
+    // Never load user npm configuration or credentials through npmrc.
+    npm_config_userconfig: '/dev/null',
+    // npm rejects loading the same config path twice. Keep global config pointed at a
+    // separate, intentionally nonexistent system path so no user or host config is read.
+    npm_config_globalconfig: '/dev/adelic-npm-globalconfig',
+    npm_config_script_shell: '/bin/sh',
+    GIT_OPTIONAL_LOCKS: '0',
+  });
+  if (sandbox === 'read-only') {
+    Object.assign(runtimeEnv, {
+      npm_config_cache: '/tmp/adelic-npm-cache',
+      npm_config_offline: 'true',
+      npm_config_audit: 'false',
+      npm_config_fund: 'false',
+    });
+  } else {
+    // These variables can alter an explicitly authorized dependency installation.
+    for (const key of ['npm_config_cache', 'npm_config_offline', 'npm_config_audit', 'npm_config_fund'])
+      delete runtimeEnv[key];
+  }
+  return runtimeEnv;
+}
 
 export class CodexProvider {
   private binary?: string;
@@ -591,20 +626,8 @@ export class CodexProvider {
     });
     if (signal.aborted) throw abortError(signal);
     if (this.shuttingDown) throw new Error('Codex provider is shutting down');
-    const runtimeEnv = Object.fromEntries(
-      Object.entries(process.env).filter(
-        ([key]) =>
-          !key.startsWith('BASH_FUNC_') &&
-          !key.startsWith('CODEX_EXEC_SERVER') &&
-          !['SHELLOPTS', 'BASHOPTS', 'PS4'].includes(key),
-      ),
-    ) as NodeJS.ProcessEnv;
-    Object.assign(runtimeEnv, {
-      CODEX_HOME: isolatedHome,
-      TMPDIR: server.scratch,
-      BASH_ENV: '/dev/null',
-      ENV: '/dev/null',
-    });
+    const runtimeEnv = codexRuntimeEnvironment(sandbox);
+    Object.assign(runtimeEnv, { CODEX_HOME: isolatedHome, TMPDIR: server.scratch });
     const rpc = new JsonRpcProcess(
       wrapped.command,
       wrapped.args,
@@ -933,7 +956,7 @@ export class CodexProvider {
           : message.method.includes('fileChange')
             ? 'file'
             : 'permissions';
-      const command = typeof params.command === 'string' ? params.command : undefined;
+      const command = commandText(params.command) ?? commandText(params.argv);
       // Project rules (docs/specs/project-hooks.md) only add denials: a blocked command is
       // declined before the safe-command classifier can approve it, in every approval mode.
       const blocked = blockedBy(turn.input.blockedCommands, command);
@@ -971,7 +994,7 @@ export class CodexProvider {
           tools: turn.input.plan.tools,
           mode: environmentTrusted && turn.input.approvalMode !== 'manual' ? 'auto-safe' : 'manual',
           kind,
-          command: params.command,
+          command,
           cwd: params.cwd,
           workspace: turn.input.cwd,
           sandbox: turn.input.sandbox,

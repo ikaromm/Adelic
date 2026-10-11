@@ -147,6 +147,12 @@ describe('project checks in the run activity', () => {
     expect(checksSummary([at('x', { type: 'check', check: { name: 'x', status: 'running' } })])).toBe(
       '1 verificação · rodando',
     );
+    expect(
+      checksSummary([
+        at('failed-running', { type: 'check', check: { name: 'lint', status: 'failed' } }),
+        at('still-running', { type: 'check', check: { name: 'typecheck', status: 'running' } }),
+      ]),
+    ).toBe('2 verificações · 1 falhou · 1 rodando');
     expect(checksSummary([])).toBe('');
   });
 });

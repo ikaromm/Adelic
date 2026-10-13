@@ -2,6 +2,10 @@
 
 ## Não publicado
 
+_Nada ainda._
+
+## 0.5.4 — 2026-10-13
+
 - Orçamento global opcional por execução (Run), com prazo persistido e reserva para finalização; continuações e retries conservam o prazo original. Veja [orçamento de execução](docs/specs/execution-budget.md).
 - Recuperação de tarefas com preservação da causa original; fila de mensagens com pausa/retomada explícita e envios idempotentes por `clientId`. Veja [fila de mensagens](docs/specs/message-queue.md).
 - Lifecycle de worktrees com verificação de propriedade e remoção limitada aos recursos comprovadamente pertencentes ao Adelic, preservando recursos desconhecidos. Ao descartar uma worktree com branch integrada, o diálogo agora explicita o apagamento da branch; pela API, branch integrada também é preservada por padrão, salvo pedido explícito. Veja [cópias isoladas](docs/specs/worktrees.md).

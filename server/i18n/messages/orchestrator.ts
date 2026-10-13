@@ -11,6 +11,8 @@ export default defineMessages(
     'orchestrator.concurrentStart': 'A inicialização concorrente não produziu uma execução',
     'orchestrator.alreadyActive': 'Já existe uma execução ativa nesta conversa',
     'orchestrator.cancelledBeforeStart': 'Execução cancelada antes de iniciar',
+    'orchestrator.admissionBudgetExpired':
+      'O prazo da execução expirou durante a preparação; nenhuma execução foi iniciada. Envie a mensagem novamente.',
     'orchestrator.configChanged': 'A configuração da conversa mudou durante a descoberta; tente novamente.',
     'orchestrator.worktreeChanging': 'A cópia isolada desta conversa está sendo alterada; tente de novo',
     'orchestrator.projectWriting': 'Já há uma execução alterando este projeto',
@@ -49,6 +51,7 @@ export default defineMessages(
     'orchestrator.commandBlocked': 'Comando bloqueado pelas regras do projeto',
     'orchestrator.approvalRunEnded': 'Execução encerrada antes da resposta à aprovação',
     'orchestrator.queueItemGone': 'Mensagem não está mais na fila',
+    'orchestrator.queueBudgetConflict': 'O orçamento enviado difere do orçamento já associado à mensagem',
     'orchestrator.steerAttachments': 'Mensagens com anexos não podem orientar; use Enviar agora',
     'orchestrator.steerCompact': '/compactar não orienta um turno; ele roda quando a conversa fica livre',
     'orchestrator.steerUnsupported': 'Nenhum agente aceita orientação durante a execução',
@@ -82,6 +85,8 @@ export default defineMessages(
     'orchestrator.concurrentStart': 'The concurrent start did not produce a run',
     'orchestrator.alreadyActive': 'There is already an active run in this conversation',
     'orchestrator.cancelledBeforeStart': 'Run cancelled before it started',
+    'orchestrator.admissionBudgetExpired':
+      'The run deadline expired during preparation; no run was started. Send the message again.',
     'orchestrator.configChanged': 'The conversation settings changed during discovery; try again.',
     'orchestrator.worktreeChanging': 'This conversation’s isolated copy is being changed; try again',
     'orchestrator.projectWriting': 'A run is already changing this project',
@@ -120,6 +125,7 @@ export default defineMessages(
     'orchestrator.commandBlocked': 'Command blocked by the project rules',
     'orchestrator.approvalRunEnded': 'The run ended before the approval was answered',
     'orchestrator.queueItemGone': 'The message is no longer in the queue',
+    'orchestrator.queueBudgetConflict': 'The requested budget differs from the budget already attached to this message',
     'orchestrator.steerAttachments': 'Messages with attachments cannot steer; use Send now',
     'orchestrator.steerCompact': '/compactar does not steer a turn; it runs when the conversation is free',
     'orchestrator.steerUnsupported': 'No agent accepts steering during the run',

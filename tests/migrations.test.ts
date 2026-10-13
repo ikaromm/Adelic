@@ -133,7 +133,7 @@ describe('SQLite schema migrations', () => {
     expect(result).toMatchObject({
       from: 2,
       to: schemaVersion,
-      applied: [3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+      applied: [3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17],
     });
     db.exec(`PRAGMA foreign_keys=ON; INSERT INTO message_queue VALUES('q','s',0,'{}'); DELETE FROM sessions;`);
     expect(tableRows(db, 'message_queue')).toEqual([]);
@@ -153,11 +153,11 @@ describe('SQLite schema migrations', () => {
     expect(result).toMatchObject({
       from: 4,
       to: schemaVersion,
-      applied: [5, 6, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+      applied: [5, 6, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17],
     });
     expect(result.backupPath).toBeTruthy();
     expect(tableRows(db, 'message_queue')).toHaveLength(1);
-    expect(migrations.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
+    expect(migrations.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]);
     db.exec(`PRAGMA foreign_keys=ON; INSERT INTO plans VALUES('p','s','{}');`);
     expect(() => db.exec(`INSERT INTO plans VALUES('x','missing','{}')`)).toThrow();
     db.exec(`DELETE FROM sessions;`);
@@ -174,7 +174,11 @@ describe('SQLite schema migrations', () => {
       migrations.filter((m) => m.version <= 8),
     );
     db.exec(`INSERT INTO projects VALUES('p','{}');`);
-    expect(migrate(db, dir)).toMatchObject({ from: 8, to: schemaVersion, applied: [9, 10, 11, 12, 13, 14, 15, 16] });
+    expect(migrate(db, dir)).toMatchObject({
+      from: 8,
+      to: schemaVersion,
+      applied: [9, 10, 11, 12, 13, 14, 15, 16, 17],
+    });
     db.exec(`PRAGMA foreign_keys=ON; INSERT INTO project_hooks VALUES('p','{}');`);
     expect(() => db.exec(`INSERT INTO project_hooks VALUES('nao','{}')`)).toThrow();
     db.exec(`DELETE FROM projects;`);
@@ -192,7 +196,7 @@ describe('SQLite schema migrations', () => {
     );
     db.exec(`INSERT INTO projects VALUES('p','{"name":"kept"}');`);
     const result = migrate(db, dir);
-    expect(result).toMatchObject({ from: 11, to: schemaVersion, applied: [12, 13, 14, 15, 16] });
+    expect(result).toMatchObject({ from: 11, to: schemaVersion, applied: [12, 13, 14, 15, 16, 17] });
     expect(result.backupPath && existsSync(result.backupPath)).toBe(true);
     expect(tableRows(db, 'projects')).toEqual([{ id: 'p', data: '{"name":"kept"}' }]);
     for (const table of ['remote_users', 'remote_sessions', 'remote_logins']) expect(tableRows(db, table)).toEqual([]);

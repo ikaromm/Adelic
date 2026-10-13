@@ -11,7 +11,8 @@ export function canRetryTask(task: DelegatedTask): boolean {
   const retryableProcess =
     ['failed', 'interrupted', 'cancelled'].includes(task.status) &&
     (!task.delivery ||
-      (['blocked', 'not_implemented'].includes(task.delivery.status) && task.delivery.recovery.action === 'retry'));
+      (['blocked', 'not_implemented', 'unverified'].includes(task.delivery.status) &&
+        task.delivery.recovery.action === 'retry'));
   const retryableDelivery =
     task.status === 'completed' &&
     task.delivery?.status === 'not_implemented' &&

@@ -15,6 +15,12 @@ export default defineMessages(
     'worktrees.repoGone': 'O repositório do projeto não existe mais',
     'worktrees.folderGone': 'A pasta da cópia isolada não existe mais',
     'worktrees.folderGoneDiscard': 'A pasta da cópia isolada não existe mais; descarte-a',
+    'worktrees.unverifiedRecovery':
+      'A propriedade desta worktree candidata ainda não foi verificada; aplicar ou descartar está bloqueado.',
+    'worktrees.preparationIncomplete':
+      'A worktree foi criada, mas sua preparação falhou antes da tarefa; aplicação e inspeção como entrega estão bloqueadas.',
+    'worktrees.executionUnconfirmed':
+      'O início da execução da tarefa não foi confirmado; aplicação está bloqueada e os recursos foram preservados.',
     'worktrees.fileNotChanged': 'Arquivo não foi alterado nesta cópia',
     'worktrees.detached': 'O projeto não está em um branch (HEAD destacado); faça checkout de um branch antes',
     'worktrees.gitOperation': 'Há uma operação do git em andamento no projeto (merge, rebase ou cherry-pick)',
@@ -41,6 +47,12 @@ export default defineMessages(
     'worktrees.repoGone': 'The project repository no longer exists',
     'worktrees.folderGone': 'The isolated copy folder no longer exists',
     'worktrees.folderGoneDiscard': 'The isolated copy folder no longer exists; discard it',
+    'worktrees.unverifiedRecovery':
+      'Ownership of this candidate worktree has not been verified; apply or discard is blocked.',
+    'worktrees.preparationIncomplete':
+      'The worktree was created, but preparation failed before the task; applying or inspecting it as a delivery is blocked.',
+    'worktrees.executionUnconfirmed':
+      'Task execution was not confirmed; applying is blocked and the resources are preserved.',
     'worktrees.fileNotChanged': 'The file was not changed in this copy',
     'worktrees.detached': 'The project is not on a branch (detached HEAD); check out a branch first',
     'worktrees.gitOperation': 'A git operation is in progress in the project (merge, rebase or cherry-pick)',

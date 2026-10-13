@@ -32,6 +32,7 @@ afterEach(async () => {
 function scriptedProvider(opts: { steer?: boolean } = {}) {
   const open: { input: RunInput; resolve: (r: RunResult) => void; reject: (e: Error) => void }[] = [];
   const prompts: string[] = [];
+  const inputs: RunInput[] = [];
   const steered: { runId: string; content: string }[] = [];
   const waiters: (() => void)[] = [];
   const providers: ProviderRegistry = {
@@ -52,6 +53,7 @@ function scriptedProvider(opts: { steer?: boolean } = {}) {
     },
     run(input, emit, signal) {
       prompts.push(input.prompt);
+      inputs.push(input);
       return new Promise<RunResult>((resolve, reject) => {
         const turn = {
           input,
@@ -89,6 +91,7 @@ function scriptedProvider(opts: { steer?: boolean } = {}) {
   return {
     providers,
     prompts,
+    inputs,
     steered,
     turnStarted,
     finish(text = 'ok') {
@@ -261,11 +264,30 @@ describe('message queue in the orchestrator', () => {
     await t.orchestrator.start(t.session, 'longa');
     await t.provider.turnStarted(1);
     await t.orchestrator.enqueue('s', 'fila 1');
-    const urgent = (await t.orchestrator.enqueue('s', 'urgente')).item!;
+    const urgent = (await t.orchestrator.enqueue('s', 'urgente', 'urgent-client')).item!;
     const ended = t.runEnded();
-    await t.orchestrator.sendNow('s', { itemId: urgent.id });
+    const budget = { totalMs: 30_000, finalizationReserveMs: 3_000 };
+    const firstSend = t.orchestrator.sendNow('s', { itemId: urgent.id }, false, false, budget);
+    const concurrentSend = t.orchestrator.sendNow('s', { itemId: urgent.id }, false, false, budget);
+    await Promise.all([firstSend, concurrentSend]);
     expect(await ended).toBe('cancelled');
     await t.provider.turnStarted(2);
+    const originalRunId = t.store.findClientMessage('s', urgent.id);
+    expect(originalRunId).toBeTruthy();
+    const originalDeadline = t.store.getRun(originalRunId!)!.budget!.deadlineAt;
+    const duplicate = await t.orchestrator.sendNow('s', { itemId: urgent.id }, false, false, budget);
+    expect(duplicate.started?.runId).toBe(originalRunId);
+    expect(t.store.getRun(originalRunId!)!.budget!.deadlineAt).toBe(originalDeadline);
+    expect(t.provider.inputs).toHaveLength(2);
+    await expect(
+      t.orchestrator.sendNow('s', { itemId: urgent.id }, false, false, {
+        totalMs: 31_000,
+        finalizationReserveMs: 3_000,
+      }),
+    ).rejects.toMatchObject({ status: 409 });
+    const otherSession = { ...t.session, id: 'other' };
+    t.store.putSession(otherSession);
+    expect(t.store.findClientMessage('other', urgent.id)).toBeUndefined();
     expect(t.userMessages()).toEqual(['longa', 'urgente']);
     const queue = t.orchestrator.queue('s');
     expect(contents(queue)).toEqual(['fila 1']);
@@ -418,6 +440,84 @@ describe('message queue routes', () => {
       await t.cleanup();
     }
   });
+  it('applies send-now budgets to queued items and makes repeated requests idempotent', async () => {
+    const t = await serve();
+    try {
+      const budget = { totalMs: 10_000, finalizationReserveMs: 1_500 };
+      await t.call('POST', '/api/sessions/s/queue', { content: 'bloqueio' });
+      await t.provider.turnStarted(1);
+      const queued = await t.call('POST', '/api/sessions/s/queue', { content: 'urgente' });
+      const { item } = await queued.json();
+      expect(item.budget).toBeUndefined();
+
+      const send = () => t.call('POST', '/api/sessions/s/send-now', { itemId: item.id, budget });
+      expect((await send()).status).toBe(202);
+      // A duplicate request with the same budget may find the item still queued while
+      // cancellation cleanup runs; it must reuse, not restart or replace, the deadline.
+      expect((await send()).status).toBe(202);
+      await t.provider.turnStarted(2);
+      expect(t.provider.inputs[1].budget).toMatchObject({
+        finalizationReserveMs: 1_500,
+        remainingMs: expect.any(Number),
+      });
+      expect(Date.parse(t.provider.inputs[1].budget!.deadlineAt)).toBeGreaterThan(Date.now());
+      expect(t.provider.prompts).toHaveLength(2);
+      expect(
+        t.store
+          .listMessages('s')
+          .filter((message) => message.role === 'user')
+          .map((m) => m.content),
+      ).toEqual(['bloqueio', 'urgente']);
+      expect(t.provider.inputs[1].budget!.deadlineAt).toBeTruthy();
+      await t.provider.finish();
+    } finally {
+      await t.cleanup();
+    }
+  });
+  it('keeps an existing queued budget and rejects incompatible send-now budgets', async () => {
+    const t = await serve();
+    try {
+      const budget = { totalMs: 12_000, finalizationReserveMs: 1_500 };
+      await t.call('POST', '/api/sessions/s/queue', { content: 'bloqueio' });
+      await t.provider.turnStarted(1);
+      const queued = await t.call('POST', '/api/sessions/s/queue', { content: 'com limite', budget });
+      const { item } = await queued.json();
+      const deadline = item.budget.deadlineAt;
+      expect(
+        (
+          await t.call('POST', '/api/sessions/s/send-now', {
+            itemId: item.id,
+            budget: { totalMs: 20_000, finalizationReserveMs: 1_500 },
+          })
+        ).status,
+      ).toBe(409);
+      expect(t.store.listQueue('s').find((q) => q.id === item.id)?.budget?.deadlineAt).toBe(deadline);
+      expect((await t.call('POST', '/api/sessions/s/send-now', { itemId: item.id, budget })).status).toBe(202);
+      expect((await t.call('POST', '/api/sessions/s/send-now', { itemId: item.id, budget })).status).toBe(202);
+      await t.provider.turnStarted(2);
+      expect(t.provider.inputs[1].budget?.deadlineAt).toBe(deadline);
+      await t.provider.finish();
+    } finally {
+      await t.cleanup();
+    }
+  });
+  it('validates explicit send-now budget admission', async () => {
+    const t = await serve();
+    try {
+      expect(
+        (
+          await t.call('POST', '/api/sessions/s/send-now', {
+            content: 'sem limite inválido',
+            budget: { totalMs: 9_999, finalizationReserveMs: 1_500 },
+          })
+        ).status,
+      ).toBe(400);
+      expect(t.store.listQueue('s')).toHaveLength(0);
+    } finally {
+      await t.cleanup();
+    }
+  });
+
   it('keeps attachments with queued messages and checks them again when they start', async () => {
     const t = await serve();
     try {

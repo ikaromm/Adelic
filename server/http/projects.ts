@@ -191,7 +191,10 @@ export function projectsRoutes({ store, orchestrator }: BackendContext) {
     try {
       if (project.remote) return res.json(await orchestrator.remoteFiles(project, query.data.query, query.data.limit));
       const session = query.data.sessionId ? store.getSession(query.data.sessionId) : undefined;
-      const root = session?.projectId === project.id && session.worktree ? session.worktree.path : project.path;
+      const root =
+        session?.projectId === project.id && session.worktree && !session.worktree.cleanupPending
+          ? session.worktree.path
+          : project.path;
       res.json(await searchProjectFiles(root, query.data.query, query.data.limit));
     } catch (e) {
       error(res, 409, 'projects.listFilesFailed', { detail: errorText(res, e) });

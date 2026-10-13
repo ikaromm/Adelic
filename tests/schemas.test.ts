@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   CreateSessionSchema,
+  ExecutionBudgetRequestSchema,
   OrchestrationPatchSchema,
   PatchSessionSchema,
   SendMessageSchema,
@@ -55,6 +56,24 @@ describe('request schemas', () => {
     for (const bad of [{ maxWorkers: 4 }, { foo: 1 }, { workerProviderId: 'x' }, { workerModel: ' ' }, []])
       expect(OrchestrationPatchSchema.safeParse(bad).success).toBe(false);
   });
+  it('validates optional journey budgets and reserves finalization time', () => {
+    const valid = { totalMs: 20_000, finalizationReserveMs: 2_000 };
+    expect(ExecutionBudgetRequestSchema.safeParse(valid).success).toBe(true);
+    expect(SendMessageSchema.safeParse({ content: 'hello' }).success).toBe(true);
+    expect(SendMessageSchema.safeParse({ content: 'hello', budget: valid }).success).toBe(true);
+    for (const budget of [
+      { totalMs: 9_999, finalizationReserveMs: 1_000 },
+      { totalMs: 20_000, finalizationReserveMs: 0 },
+      { totalMs: 20_000, finalizationReserveMs: 20_000 },
+      { totalMs: 20_000, finalizationReserveMs: 700_000 },
+      { totalMs: 20_000.5, finalizationReserveMs: 2_000 },
+      { totalMs: 20_000, finalizationReserveMs: 2_000, surprise: true },
+    ]) {
+      expect(ExecutionBudgetRequestSchema.safeParse(budget).success).toBe(false);
+      expect(SendMessageSchema.safeParse({ content: 'hello', budget }).success).toBe(false);
+    }
+  });
+
   it('accepts only relative markdown note paths', () => {
     for (const ok of ['a.md', 'notas/b.md']) expect(memoryPath.safeParse(ok).success).toBe(true);
     for (const bad of ['/a.md', '../a.md', 'a/../b.md', 'a.txt', 'a\\b.md', ''])

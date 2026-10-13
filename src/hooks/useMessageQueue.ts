@@ -27,6 +27,7 @@ export function queuePauseLabel(queue: MessageQueue | null) {
   if (!reason) return '';
   if (reason === 'limit') return queue?.paused?.error || t('queue.pause.limit');
   if (reason === 'cancelled') return t('queue.pause.cancelled');
+  if (reason === 'timeout') return t('queue.pause.timeout');
   if (reason === 'interrupted') return t('queue.pause.interrupted');
   const error = queue?.paused?.error;
   return error ? t('queue.pause.failedReason', { error }) : t('queue.pause.failed');

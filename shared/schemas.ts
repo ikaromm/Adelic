@@ -210,12 +210,21 @@ export const AttachmentIdsSchema = z
   .array(z.string().regex(/^[0-9a-f-]{36}$/i))
   .max(MAX_ATTACHMENTS_PER_MESSAGE)
   .refine((ids) => new Set(ids).size === ids.length);
+export const ExecutionBudgetRequestSchema = z
+  .object({
+    totalMs: z.number().int().min(10_000).max(86_400_000),
+    finalizationReserveMs: z.number().int().min(1_000).max(600_000),
+  })
+  .strict()
+  .refine((value) => value.finalizationReserveMs < value.totalMs);
 export const SendMessageSchema = z.object({
   content: required(text(32000), vmsg('validation.content', { max: 32000 })),
   clientMessageId: optional(text(128), invalid('clientMessageId')),
   // Ownership (each id belongs to this conversation) is checked by the route against the store.
   attachmentIds: optional(AttachmentIdsSchema, vmsg('validation.attachmentIds', { max: MAX_ATTACHMENTS_PER_MESSAGE })),
   overrideLimit: overrideLimit(),
+  /** Optional journey-wide wall clock budget; omitted preserves legacy unlimited behavior. */
+  budget: optional(ExecutionBudgetRequestSchema, invalid('budget')),
 });
 /** Edit and resend a user message (docs/specs/edit-branch.md); omitted attachmentIds keep the message's own. */
 export const EditMessageSchema = SendMessageSchema;
@@ -246,6 +255,7 @@ export const QueueMessageSchema = z.object({
   attachmentIds: attachmentIdsField,
   /** Applies only when the message starts right away (the conversation was idle). */
   overrideLimit: overrideLimit(),
+  budget: optional(ExecutionBudgetRequestSchema, invalid('budget')),
 });
 /** "Retomar fila"; with `overrideLimit`, only the next message passes the usage limits. */
 export const QueueResumeSchema = z.object({ overrideLimit: overrideLimit() });
@@ -259,6 +269,7 @@ export const SendNowSchema = z.object({
   itemId: optional(text(128), invalid('itemId')),
   attachmentIds: attachmentIdsField,
   overrideLimit: overrideLimit(),
+  budget: optional(ExecutionBudgetRequestSchema, invalid('budget')),
 });
 export const ApprovalDecisionSchema = z.object({
   decision: required(

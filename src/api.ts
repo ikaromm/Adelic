@@ -353,13 +353,21 @@ export const api = {
       body: JSON.stringify({ ...body, ...override(overrideLimit) }),
     }),
   deleteSession: (id: string) => request<void>(`/api/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' }),
-  send: (id: string, content: string, clientMessageId: string, attachmentIds: string[] = [], overrideLimit?: boolean) =>
+  send: (
+    id: string,
+    content: string,
+    clientMessageId: string,
+    attachmentIds: string[] = [],
+    overrideLimit?: boolean,
+    budget?: { totalMs: number; finalizationReserveMs: number },
+  ) =>
     request<{ runId: string; messageId: string }>(`/api/sessions/${encodeURIComponent(id)}/messages`, {
       method: 'POST',
       body: JSON.stringify({
         content,
         clientMessageId,
         ...(attachmentIds.length ? { attachmentIds } : {}),
+        ...(budget ? { budget } : {}),
         ...override(overrideLimit),
       }),
     }),

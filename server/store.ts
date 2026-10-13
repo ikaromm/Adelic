@@ -250,7 +250,16 @@ export class Store {
       'delegated_tasks',
       "WHERE json_extract(data,'$.integration.status')='applied' AND json_extract(data,'$.integration.cleanup')='pending'",
     )) {
-      if (!task.recoveryWorktree || existsSync(task.recoveryWorktree.path)) continue;
+      if (
+        !task.recoveryWorktree ||
+        task.recoveryWorktree.ownershipVerified !== true ||
+        task.recoveryWorktree.preparationFailed === true ||
+        task.recoveryWorktree.executionStarted !== true ||
+        !task.integration?.cleanupResources ||
+        Object.values(task.integration.cleanupResources).some((status) => status !== 'removed') ||
+        existsSync(task.recoveryWorktree.path)
+      )
+        continue;
       task.recoveryWorktree = undefined;
       task.integration = {
         ...task.integration!,
@@ -717,6 +726,7 @@ export class Store {
     const at = new Date().toISOString();
     const plans: Plan[] = [];
     for (const runId of runIds) {
+      this.db.prepare('DELETE FROM message_client_aliases WHERE session_id=? AND run_id=?').run(sessionId, runId);
       this.db.prepare("DELETE FROM events WHERE session_id=? AND json_extract(data,'$.runId')=?").run(sessionId, runId);
       this.db
         .prepare("UPDATE runs SET data=json_set(data,'$.discardedAt',?) WHERE id=? AND session_id=?")
@@ -812,10 +822,17 @@ export class Store {
     }
     return session;
   }
+  addClientMessageAlias(sessionId: string, clientId: string, runId: string) {
+    this.db
+      .prepare('INSERT OR IGNORE INTO message_client_aliases(session_id,client_id,run_id) VALUES(?,?,?)')
+      .run(sessionId, clientId, runId);
+  }
   findClientMessage(sessionId: string, clientId: string) {
     const row = this.db
-      .prepare('SELECT run_id FROM messages WHERE session_id=? AND client_id=?')
-      .get(sessionId, clientId) as { run_id: string | null } | undefined;
+      .prepare(
+        'SELECT run_id FROM messages WHERE session_id=? AND client_id=? UNION ALL SELECT run_id FROM message_client_aliases WHERE session_id=? AND client_id=? LIMIT 1',
+      )
+      .get(sessionId, clientId, sessionId, clientId) as { run_id: string | null } | undefined;
     return row?.run_id ?? undefined;
   }
   getMessage(id: string) {
@@ -1240,6 +1257,33 @@ export class Store {
       .prepare('UPDATE message_queue SET data=? WHERE id=? AND session_id=?')
       .run(JSON.stringify(next), itemId, sessionId);
     return next;
+  }
+  /** Adds the first send-now budget without renewing a budget already attached to this item. */
+  setQueuedBudget(sessionId: string, itemId: string, request: { totalMs: number; finalizationReserveMs: number }) {
+    return this.transaction(() => {
+      const item = this.listQueue(sessionId).find((queued) => queued.id === itemId);
+      if (!item) return undefined;
+      if (item.budget) {
+        if (
+          item.budget.totalMs !== request.totalMs ||
+          item.budget.finalizationReserveMs !== request.finalizationReserveMs
+        )
+          throw httpError(409, 'orchestrator.queueBudgetConflict');
+        // Retried send-now requests are idempotent: the original absolute deadline wins.
+        return item;
+      }
+      const next: QueuedMessage = {
+        ...item,
+        budget: {
+          ...request,
+          deadlineAt: new Date(Date.now() + request.totalMs).toISOString(),
+        },
+      };
+      this.db
+        .prepare('UPDATE message_queue SET data=? WHERE id=? AND session_id=?')
+        .run(JSON.stringify(next), itemId, sessionId);
+      return next;
+    });
   }
   removeQueued(sessionId: string, itemId: string) {
     const result = this.db.prepare('DELETE FROM message_queue WHERE id=? AND session_id=?').run(itemId, sessionId);

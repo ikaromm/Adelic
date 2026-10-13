@@ -63,6 +63,8 @@ export function inlineTextAttachment(name: string, content: string) {
 }
 
 export interface RunAttachments {
+  /** Names of all user-provided attachments, safe to disclose to bounded reviewer/synthesis context. */
+  names: string[];
   /** Images, passed to the runtime as files (RunInput.attachments). */
   images: NonNullable<RunInput['attachments']>;
   /** Text files already formatted for the prompt; empty when there are none. */
@@ -87,7 +89,11 @@ export async function loadRunAttachments(store: Store, attachments: StoredAttach
     }
     blocks.push(inlineTextAttachment(attachment.name, content));
   }
-  return { images, text: blocks.length ? `\n\n${blocks.join('\n\n')}` : '' };
+  return {
+    names: attachments.map(({ name }) => name),
+    images,
+    text: blocks.length ? `\n\n${blocks.join('\n\n')}` : '',
+  };
 }
 
 export { IMAGES_UNSUPPORTED } from './providers/common.js';

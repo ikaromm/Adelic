@@ -6,11 +6,12 @@
 // bytes (`hash-object --no-filters`), so clean/smudge filters and eol conversion from the
 // repository's config never execute: an agent with workspace-write could have planted them,
 // and Adelic runs git outside the sandbox. Hooks, fsmonitor and replace refs are disabled.
-import { execFile } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import {
   lstat,
   mkdir,
+  readdir,
   mkdtemp,
   readFile,
   readlink,
@@ -141,6 +142,7 @@ export interface GitOptions {
   env?: Record<string, string>;
   maxBytes?: number;
   timeoutMs?: number;
+  signal?: AbortSignal;
   /** `-c` arguments placed before the command; defaults to SAFE_CONFIG (with the Adelic identity). */
   config?: string[];
   /** Exit codes other than 0 that still count as success (e.g. 1 for `diff --no-index`). */
@@ -149,32 +151,189 @@ export interface GitOptions {
   truncate?: boolean;
 }
 
-/** Runs git with execFile (no shell), a timeout and the hardened environment. */
+/** Signal and await the isolated process group for one Git invocation. */
+async function stopGitProcessGroup(pid: number) {
+  const signalGroup = (signal: NodeJS.Signals) => {
+    try {
+      // detached:true gives this invocation its own process group, so this cannot signal
+      // unrelated processes even when Git has already exited and left descendants behind.
+      process.kill(-pid, signal);
+    } catch {
+      // ESRCH means the private group is already gone; never fall back to a bare PID,
+      // which could refer to an unrelated process after the Git leader exits.
+    }
+  };
+  const groupHasLiveProcess = async () => {
+    // Linux reports zombies through kill(0) too; they are no longer executing user code.
+    try {
+      for (const entry of await readdir('/proc')) {
+        if (!/^\d+$/.test(entry)) continue;
+        let stat: string;
+        try {
+          stat = await readFile(`/proc/${entry}/stat`, 'utf8');
+        } catch {
+          continue;
+        }
+        const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+        if (Number(fields[2]) === pid && fields[0] !== 'Z' && fields[0] !== 'X') return true;
+      }
+      return false;
+    } catch {
+      try {
+        process.kill(-pid, 0);
+        return true;
+      } catch (error) {
+        return (error as NodeJS.ErrnoException).code !== 'ESRCH';
+      }
+    }
+  };
+
+  signalGroup('SIGTERM');
+  const graceUntil = Date.now() + 100;
+  while ((await groupHasLiveProcess()) && Date.now() < graceUntil)
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  signalGroup('SIGKILL');
+  while (await groupHasLiveProcess()) await new Promise((resolve) => setTimeout(resolve, 10));
+}
+
+/** Runs Git in a private process group and awaits all of its surviving activity. */
 export function git(cwd: string, args: string[], opts: GitOptions = {}): Promise<Buffer> {
   return new Promise((done, fail) => {
-    const child = execFile(
-      'git',
-      [...(opts.config ?? SAFE_CONFIG), ...args],
+    const timeoutMs = opts.timeoutMs ?? TIMEOUT_MS;
+    const maxBytes = opts.maxBytes ?? 64 * 1024 * 1024;
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    let timeoutError: Error | undefined;
+    let abortError: Error | undefined;
+    let outputLimit = false;
+    let spawnError: Error | undefined;
+    let killTimer: NodeJS.Timeout | undefined;
+    // A process group does not contain descendants which call setsid()/spawn({ detached: true }).
+    // On Linux, put the complete invocation in a private PID namespace. When its namespace
+    // init (the wrapped Git process) exits or is killed, the kernel kills/reaps every remaining
+    // process in that namespace, including descendants outside the process group. Never silently
+    // fall back to process-group-only handling: that would release checkpoint writes unsafely.
+    if (process.platform !== 'linux') {
+      fail(new Error('Git process containment requires Linux PID namespaces'));
+      return;
+    }
+    const child = spawn(
+      '/usr/bin/bwrap',
+      [
+        '--die-with-parent',
+        '--unshare-pid',
+        '--bind',
+        '/',
+        '/',
+        '--proc',
+        '/proc',
+        '--dev',
+        '/dev',
+        '--',
+        'git',
+        ...(opts.config ?? SAFE_CONFIG),
+        ...args,
+      ],
       {
         cwd,
         env: baseEnv(opts.repo, opts.env),
-        encoding: 'buffer',
-        timeout: opts.timeoutMs ?? TIMEOUT_MS,
-        maxBuffer: opts.maxBytes ?? 64 * 1024 * 1024,
+        detached: true,
+        stdio: ['pipe', 'pipe', 'pipe'],
         windowsHide: true,
       },
-      (error, stdout, stderr) => {
-        const code = (error as { code?: unknown } | null)?.code;
-        if (error && opts.truncate && code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') done(stdout);
-        else if (error && typeof code === 'number' && opts.okCodes?.includes(code) && !error.killed) done(stdout);
-        else if (error) {
-          const detail = stderr.toString('utf8').trim().split('\n').at(-1) || error.message;
-          fail(Object.assign(new Error(`git ${args[0]}: ${detail}`), { code, stderr: stderr.toString('utf8') }));
-        } else done(stdout);
-      },
     );
-    child.stdin?.on('error', () => undefined);
-    child.stdin?.end(opts.input ?? '');
+    const signalGroup = (signal: NodeJS.Signals) => {
+      if (child.pid === undefined) return;
+      try {
+        process.kill(-child.pid, signal);
+      } catch {
+        // Never fall back to a bare PID after the leader may have exited and its PID been reused.
+      }
+    };
+    const terminateGroup = () => {
+      signalGroup('SIGTERM');
+      killTimer = setTimeout(() => signalGroup('SIGKILL'), 100);
+    };
+    const onAbort = () => {
+      abortError ??= new Error(opts.signal?.reason instanceof Error ? opts.signal.reason.message : 'Git cancelled');
+      abortError.name = 'AbortError';
+      terminateGroup();
+    };
+    if (opts.signal?.aborted) onAbort();
+    else opts.signal?.addEventListener('abort', onAbort, { once: true });
+    const capture = (target: Buffer[], current: number, chunk: Buffer) => {
+      if (outputLimit) return current;
+      const available = Math.max(0, maxBytes - current);
+      target.push(chunk.subarray(0, available));
+      const next = current + Math.min(chunk.length, available);
+      if (chunk.length > available) {
+        outputLimit = true;
+        terminateGroup();
+      }
+      return next;
+    };
+    child.stdout.on('data', (chunk: Buffer) => {
+      stdoutBytes = capture(stdout, stdoutBytes, chunk);
+    });
+    child.stderr.on('data', (chunk: Buffer) => {
+      stderrBytes = capture(stderr, stderrBytes, chunk);
+    });
+    child.on('error', (error) => {
+      spawnError = error;
+    });
+    child.stdin.on('error', () => undefined);
+    child.stdin.end(opts.input ?? '');
+    const timeout = setTimeout(() => {
+      timeoutError = Object.assign(new Error(`git ${args[0]} timed out after ${timeoutMs}ms`), { code: 'ETIMEDOUT' });
+      terminateGroup();
+    }, timeoutMs);
+
+    child.on('close', (exitCode, signal) => {
+      clearTimeout(timeout);
+      opts.signal?.removeEventListener('abort', onAbort);
+      if (killTimer) clearTimeout(killTimer);
+      const out = Buffer.concat(stdout);
+      const err = Buffer.concat(stderr);
+      void (async () => {
+        if (child.pid !== undefined) await stopGitProcessGroup(child.pid);
+        if (abortError) {
+          fail(Object.assign(abortError, { stderr: err.toString('utf8') }));
+          return;
+        }
+        if (timeoutError) {
+          fail(Object.assign(timeoutError, { stderr: err.toString('utf8') }));
+          return;
+        }
+        if (outputLimit) {
+          if (opts.truncate) done(out);
+          else
+            fail(
+              Object.assign(new Error('stdout maxBuffer exceeded'), {
+                code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER',
+                stderr: err.toString('utf8'),
+              }),
+            );
+          return;
+        }
+        if (spawnError) {
+          fail(spawnError);
+          return;
+        }
+        if (exitCode !== 0 || signal) {
+          const code: unknown = signal ?? exitCode;
+          if (typeof code === 'number' && opts.okCodes?.includes(code) && !signal) {
+            done(out);
+            return;
+          }
+          const detail = err.toString('utf8').trim().split('\n').at(-1) || `exited with ${String(code)}`;
+          fail(Object.assign(new Error(`git ${args[0]}: ${detail}`), { code, stderr: err.toString('utf8') }));
+          return;
+        }
+        done(out);
+      })().catch(fail);
+    });
   });
 }
 
@@ -184,7 +343,11 @@ export const lines = (b: Buffer) => b.toString('utf8').split('\n').filter(Boolea
 export const nulSplit = (b: Buffer) => b.toString('utf8').split('\0').filter(Boolean);
 
 /** Finds the repository for `path`, or undefined when it is not inside a work tree. */
-export async function openRepo(path: string, requireToplevel: boolean): Promise<Repo | undefined> {
+export async function openRepo(
+  path: string,
+  requireToplevel: boolean,
+  opts: { timeoutMs?: number; signal?: AbortSignal } = {},
+): Promise<Repo | undefined> {
   let root: string;
   try {
     root = await realpath(path);
@@ -193,7 +356,12 @@ export async function openRepo(path: string, requireToplevel: boolean): Promise<
   }
   let out: string[];
   try {
-    out = lines(await git(root, ['rev-parse', '--show-toplevel', '--absolute-git-dir', '--show-object-format']));
+    out = lines(
+      await git(root, ['rev-parse', '--show-toplevel', '--absolute-git-dir', '--show-object-format'], {
+        timeoutMs: opts.timeoutMs,
+        signal: opts.signal,
+      }),
+    );
   } catch {
     return undefined;
   }
@@ -238,9 +406,28 @@ export function blobId(data: Buffer, format: Repo['format']) {
 }
 
 /** Writes a tree of the folder's tracked and non-ignored files; returns its id. */
-export async function writeSnapshotTree(repo: Repo, opts: { includePaths?: string[] } = {}): Promise<string> {
+function remainingTimeout(deadlineAt?: string, signal?: AbortSignal): number | undefined {
+  // Cancellation is the first cause when it was already observed before the deadline check.
+  if (signal?.aborted) {
+    const error = new Error(signal.reason instanceof Error ? signal.reason.message : 'Checkpoint cancelled');
+    error.name = 'AbortError';
+    throw error;
+  }
+  if (!deadlineAt) return undefined;
+  const parsedDeadline = Date.parse(deadlineAt);
+  if (!Number.isFinite(parsedDeadline)) throw new Error('Invalid finalization deadline');
+  const remaining = parsedDeadline - Date.now();
+  if (remaining <= 0) throw new Error('Finalization deadline exceeded');
+  return Math.max(1, remaining);
+}
+
+export async function writeSnapshotTree(
+  repo: Repo,
+  opts: { includePaths?: string[]; deadlineAt?: string; signal?: AbortSignal } = {},
+): Promise<string> {
+  const gitOpts = () => ({ repo, timeoutMs: remainingTimeout(opts.deadlineAt, opts.signal), signal: opts.signal });
   const listed = nulSplit(
-    await git(repo.root, ['ls-files', '-z', '--full-name', '--cached', '--others', '--exclude-standard'], { repo }),
+    await git(repo.root, ['ls-files', '-z', '--full-name', '--cached', '--others', '--exclude-standard'], gitOpts()),
   );
   // A caller may add paths from a trusted captured tree. This keeps eligible baseline files
   // visible if a later .gitignore change would otherwise hide them, without including any
@@ -252,6 +439,7 @@ export async function writeSnapshotTree(repo: Repo, opts: { includePaths?: strin
   const links: { path: string; target: Buffer }[] = [];
   let total = 0;
   for (const path of paths) {
+    remainingTimeout(opts.deadlineAt, opts.signal);
     if (path.includes('\uFFFD')) throw new CheckpointError('há nomes de arquivo que não são UTF-8', 422);
     let info;
     try {
@@ -272,7 +460,7 @@ export async function writeSnapshotTree(repo: Repo, opts: { includePaths?: strin
   const ids = regular.length
     ? lines(
         await git(repo.top, ['hash-object', '-w', '--no-filters', '--stdin-paths'], {
-          repo,
+          ...gitOpts(),
           input: regular.map((f) => quote(f.path)).join('\n') + '\n',
         }),
       )
@@ -280,15 +468,17 @@ export async function writeSnapshotTree(repo: Repo, opts: { includePaths?: strin
   if (ids.length !== regular.length) throw new Error('git hash-object retornou uma quantidade inesperada');
   const entries = regular.map((f, i) => `${f.mode} ${ids[i]}\t${f.path}\0`);
   for (const link of links) {
-    const id = (await git(repo.top, ['hash-object', '-w', '--stdin'], { repo, input: link.target })).toString().trim();
+    const id = (await git(repo.top, ['hash-object', '-w', '--stdin'], { ...gitOpts(), input: link.target }))
+      .toString()
+      .trim();
     entries.push(`120000 ${id}\t${link.path}\0`);
   }
   // A private temporary index: the user's index is never read for writing nor modified.
   const dir = await mkdtemp(join(tmpdir(), 'adelic-checkpoint-'));
   try {
     const env = { GIT_INDEX_FILE: join(dir, 'index') };
-    await git(repo.top, ['update-index', '-z', '--index-info'], { repo, env, input: entries.join('') });
-    return (await git(repo.top, ['write-tree'], { repo, env })).toString().trim();
+    await git(repo.top, ['update-index', '-z', '--index-info'], { ...gitOpts(), env, input: entries.join('') });
+    return (await git(repo.top, ['write-tree'], { ...gitOpts(), env })).toString().trim();
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -305,10 +495,13 @@ export type GitRepoClassification = { status: 'available'; repo: Repo } | { stat
  * Read-only Git probe shared by checkpoint, panel and run-context decisions.
  * A failed probe with Git metadata is unknown, never evidence of absence.
  */
-export async function classifyGitRepo(path: string): Promise<GitRepoClassification> {
+export async function classifyGitRepo(
+  path: string,
+  opts: { timeoutMs?: number; signal?: AbortSignal } = {},
+): Promise<GitRepoClassification> {
   let repo: Repo | undefined;
   try {
-    repo = await openRepo(path, false);
+    repo = await openRepo(path, false, opts);
   } catch {
     return { status: 'unknown' };
   }
@@ -338,10 +531,17 @@ export async function classifyGitRepo(path: string): Promise<GitRepoClassificati
 export async function checkpointBefore(
   path: string,
   runId: string,
-  opts: { requireToplevel?: boolean } = {},
+  opts: { requireToplevel?: boolean; deadlineAt?: string; reserveMs?: number; signal?: AbortSignal } = {},
 ): Promise<RunCheckpoint> {
   try {
-    const classification = await classifyGitRepo(path);
+    const deadlineAt =
+      opts.deadlineAt && opts.reserveMs
+        ? new Date(Date.parse(opts.deadlineAt) - Math.max(0, opts.reserveMs)).toISOString()
+        : opts.deadlineAt;
+    const remaining = () => remainingTimeout(deadlineAt, opts.signal);
+    remaining();
+    const classification = await classifyGitRepo(path, { timeoutMs: remaining(), signal: opts.signal });
+    remaining();
     if (classification.status !== 'available') {
       return {
         available: false,
@@ -350,15 +550,26 @@ export async function checkpointBefore(
       };
     }
     const repo = classification.repo;
-    if (opts.requireToplevel && repo.root !== repo.top)
+    if (opts.requireToplevel && repo.root !== repo.top) {
+      remaining();
       return { available: false, captureState: 'not_applicable', reason: NOT_GIT };
-    const tree = await writeSnapshotTree(repo);
+    }
+    const tree = await writeSnapshotTree(repo, { deadlineAt, signal: opts.signal });
     const commit = (
-      await git(repo.top, ['commit-tree', '--no-gpg-sign', tree, '-m', `Adelic checkpoint ${runId} before`], { repo })
+      await git(repo.top, ['commit-tree', '--no-gpg-sign', tree, '-m', `Adelic checkpoint ${runId} before`], {
+        repo,
+        timeoutMs: remaining(),
+        signal: opts.signal,
+      })
     )
       .toString()
       .trim();
-    await git(repo.top, ['update-ref', '-m', 'adelic checkpoint', refFor(runId, 'before'), commit, ''], { repo });
+    await git(repo.top, ['update-ref', '-m', 'adelic checkpoint', refFor(runId, 'before'), commit, ''], {
+      repo,
+      timeoutMs: remaining(),
+      signal: opts.signal,
+    });
+    remaining();
     return { available: true, root: repo.root, before: commit };
   } catch (e) {
     return { available: false, captureState: 'failed', reason: reasonOf(e) };
@@ -366,16 +577,23 @@ export async function checkpointBefore(
 }
 
 /** Snapshot after the run, plus the list of changed files. Drops both refs when nothing changed. */
-export async function checkpointAfter(runId: string, checkpoint: RunCheckpoint): Promise<RunCheckpoint> {
+export async function checkpointAfter(
+  runId: string,
+  checkpoint: RunCheckpoint,
+  opts: { deadlineAt?: string } = {},
+): Promise<RunCheckpoint> {
   if (!checkpoint.available || !checkpoint.before || !checkpoint.root) return checkpoint;
   try {
-    const repo = await openRepo(checkpoint.root, false);
+    const repo = await openRepo(checkpoint.root, false, { timeoutMs: remainingTimeout(opts.deadlineAt) });
     if (!repo || repo.root !== checkpoint.root)
       return { ...checkpoint, available: false, captureState: 'failed', reason: NOT_GIT };
-    const tree = await writeSnapshotTree(repo);
-    const beforeTree = (await git(repo.top, ['rev-parse', `${checkpoint.before}^{tree}`], { repo })).toString().trim();
+    const commandOpts = () => ({ repo, timeoutMs: remainingTimeout(opts.deadlineAt) });
+    const tree = await writeSnapshotTree(repo, { deadlineAt: opts.deadlineAt });
+    const beforeTree = (await git(repo.top, ['rev-parse', `${checkpoint.before}^{tree}`], commandOpts()))
+      .toString()
+      .trim();
     if (beforeTree === tree) {
-      await git(repo.top, ['update-ref', '-d', refFor(runId, 'before'), checkpoint.before], { repo }).catch(
+      await git(repo.top, ['update-ref', '-d', refFor(runId, 'before'), checkpoint.before], commandOpts()).catch(
         () => undefined,
       );
       return { available: true, root: checkpoint.root, files: [] };
@@ -384,13 +602,13 @@ export async function checkpointAfter(runId: string, checkpoint: RunCheckpoint):
       await git(
         repo.top,
         ['commit-tree', '--no-gpg-sign', tree, '-p', checkpoint.before, '-m', `Adelic checkpoint ${runId} after`],
-        { repo },
+        commandOpts(),
       )
     )
       .toString()
       .trim();
-    await git(repo.top, ['update-ref', '-m', 'adelic checkpoint', refFor(runId, 'after'), commit, ''], { repo });
-    const changes = await changedFiles(repo, checkpoint.before, commit);
+    await git(repo.top, ['update-ref', '-m', 'adelic checkpoint', refFor(runId, 'after'), commit, ''], commandOpts());
+    const changes = await changedFiles(repo, checkpoint.before, commit, opts);
     const files = changes.slice(0, LIMITS.listed).map(({ path, status, additions, deletions, binary }) => ({
       path,
       status,
@@ -416,9 +634,15 @@ export interface RawChange extends FileChange {
   newId: string;
 }
 
-export async function changedFiles(repo: Repo, before: string, after: string): Promise<RawChange[]> {
+export async function changedFiles(
+  repo: Repo,
+  before: string,
+  after: string,
+  opts: { deadlineAt?: string; signal?: AbortSignal } = {},
+): Promise<RawChange[]> {
+  const commandOpts = () => ({ repo, timeoutMs: remainingTimeout(opts.deadlineAt, opts.signal), signal: opts.signal });
   const raw = nulSplit(
-    await git(repo.top, ['diff-tree', '-r', '-z', '--no-renames', '--raw', before, after], { repo }),
+    await git(repo.top, ['diff-tree', '-r', '-z', '--no-renames', '--raw', before, after], commandOpts()),
   );
   const changes: RawChange[] = [];
   for (let i = 0; i < raw.length; i += 2) {
@@ -428,7 +652,7 @@ export async function changedFiles(repo: Repo, before: string, after: string): P
   }
   const byPath = new Map(changes.map((c) => [c.path, c]));
   const numstat = nulSplit(
-    await git(repo.top, ['diff-tree', '-r', '-z', '--no-renames', '--numstat', before, after], { repo }),
+    await git(repo.top, ['diff-tree', '-r', '-z', '--no-renames', '--numstat', before, after], commandOpts()),
   );
   for (const record of numstat) {
     const [added, deleted, ...rest] = record.split('\t');

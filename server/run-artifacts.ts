@@ -67,8 +67,14 @@ const EXCLUDED = new Set([
 const relativePath = (path: string) => path.split(sep).join('/');
 
 /** Capture regular files only. Symlinks, ignored trees, and files outside configured bounds are never read. */
-export async function captureRunArtifactSnapshot(projectPath: string): Promise<RunArtifactSnapshot> {
+export async function captureRunArtifactSnapshot(
+  projectPath: string,
+  opts: { deadlineAt?: string; signal?: AbortSignal } = {},
+): Promise<RunArtifactSnapshot> {
   const entries: Record<string, RunArtifactEntry> = Object.create(null) as Record<string, RunArtifactEntry>;
+  if (opts.signal?.aborted) return unknown(entries, 'capture cancelled');
+  if (opts.deadlineAt && Date.now() >= Date.parse(opts.deadlineAt))
+    return unknown(entries, 'finalization deadline exceeded');
   let rootHandle: FileHandle;
   try {
     rootHandle = (await openProjectRoot(projectPath)).handle;
@@ -81,7 +87,10 @@ export async function captureRunArtifactSnapshot(projectPath: string): Promise<R
   let truncated = false;
   let firstError: string | undefined;
   let directories = 0;
-  const deadline = Date.now() + RUN_ARTIFACT_LIMITS.durationMs;
+  const deadline = Math.min(
+    Date.now() + RUN_ARTIFACT_LIMITS.durationMs,
+    opts.deadlineAt ? Date.parse(opts.deadlineAt) : Number.POSITIVE_INFINITY,
+  );
   const visit = async (
     directoryHandle: Awaited<ReturnType<typeof open>>,
     relativeDirectory: string,
@@ -105,7 +114,12 @@ export async function captureRunArtifactSnapshot(projectPath: string): Promise<R
     }
     for (let index = 0; index < names.length; index++) {
       const name = names[index]!;
-      if (Date.now() >= deadline) {
+      if (opts.signal?.aborted || Date.now() >= deadline) {
+        firstError ??= opts.signal?.aborted
+          ? 'capture cancelled'
+          : opts.deadlineAt && Date.now() >= Date.parse(opts.deadlineAt)
+            ? 'finalization deadline exceeded'
+            : undefined;
         truncated = true;
         omitted += names.length - index;
         return;
@@ -192,6 +206,7 @@ export async function captureRunArtifactSnapshot(projectPath: string): Promise<R
   } finally {
     await rootHandle.close().catch((error: unknown) => (firstError ??= safeReason(error)));
   }
+  if (opts.deadlineAt && Date.now() >= Date.parse(opts.deadlineAt)) firstError ??= 'finalization deadline exceeded';
   return {
     status: firstError ? 'unknown' : 'available',
     ...(firstError ? { reason: firstError } : {}),

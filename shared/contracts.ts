@@ -9,6 +9,17 @@ export type Sandbox = 'read-only' | 'workspace-write';
 /** How provider approval requests are handled for a run. */
 export type ApprovalMode = 'auto-safe' | 'manual' | 'automatic';
 export type RunStatus = 'running' | 'completed' | 'cancelled' | 'failed' | 'interrupted';
+/** Validated wall-clock budget for one user journey. All continuation phases share deadlineAt. */
+export interface ExecutionBudget {
+  /** Total budget from journey start, milliseconds. */
+  totalMs: number;
+  /** Time protected for recording factual terminal state and returning a response. */
+  finalizationReserveMs: number;
+  /** Absolute server-clock deadline; continuations must carry it rather than restart totalMs. */
+  deadlineAt: string;
+}
+export type RunTermination = 'timeout' | 'user_cancelled' | 'provider_failure';
+export type RunDegradation = 'budget_gate';
 
 export interface Project {
   id: string;
@@ -122,6 +133,12 @@ export interface TaskIntegration {
   status: 'not_required' | 'applied' | 'blocked';
   /** Worktree cleanup is deliberately tracked separately from patch application. */
   cleanup: 'not_required' | 'complete' | 'pending';
+  /** Factual per-resource cleanup result; removing the folder does not imply ref deletion. */
+  cleanupResources?: {
+    worktree: 'removed' | 'preserved' | 'unknown';
+    branch: 'removed' | 'preserved' | 'unknown';
+    ownershipProof: 'removed' | 'preserved' | 'unknown';
+  };
   reason?: string;
   recordedAt: string;
 }
@@ -268,6 +285,28 @@ export interface SessionWorktree {
   /** Tree of tracked and non-ignored untracked files captured at creation, for safe dirty-project integration. */
   snapshotTree?: string;
   createdAt: string;
+  /** True only when this Adelic creation wrote its unique continuity marker; false/absent is unknown. */
+  ownershipVerified?: boolean;
+  /** Factual creation/discovery/cleanup outcome retained with an unverified recovery intent. */
+  recoveryReason?: string;
+  /** Unique CAS-created Git ref proving this exact failed creation attempt when discovery recovers. */
+  ownershipProofRef?: string;
+  /** OID authorized before checkout removal; retries may delete only this unchanged ref version. */
+  cleanupBranchTip?: string;
+  /** Folder was removed, but owned Git resources remain pending cleanup; not an active workspace. */
+  cleanupPending?: true;
+  /** Creation succeeded, but preparing the baseline failed before task execution could begin. */
+  preparationFailed?: boolean;
+  /** Whether the task provider was started in this checkout. */
+  executionStarted?: boolean;
+  /** Structured facts; unknown stays unknown and is never inferred from intent metadata/text. */
+  recoveryEvidence?: {
+    intentRecorded: true;
+    creation: 'confirmed' | 'unknown';
+    ownership: 'confirmed' | 'unknown';
+    preparation: 'complete' | 'incomplete' | 'unknown';
+    taskExecution: 'started' | 'not_started' | 'unknown';
+  };
 }
 /** GET /api/sessions/:id/worktree. */
 export interface WorktreeStatus {
@@ -412,6 +451,12 @@ export interface Run {
   approvalMode?: ApprovalMode;
   /** "Corrigir automaticamente": the run started because checks of `sourceRunId` failed. */
   hookFix?: { sourceRunId: string };
+  /** Budget contract for this whole journey; absent for legacy/unbudgeted runs. */
+  budget?: ExecutionBudget;
+  /** Terminal classification is independent of textual response and RunStatus. */
+  termination?: RunTermination;
+  /** Explicit partial completion caused by a budget gate; never signifies success. */
+  degradation?: RunDegradation;
 }
 /** A provider and one of its models; no model means the provider's default. */
 export interface ModelRef {
@@ -467,6 +512,8 @@ export interface Plan {
   executionMode?: 'all' | 'next';
   /** "Parar após a tarefa atual": no new task starts after the running one. */
   stopRequested?: boolean;
+  /** Absolute journey budget captured by the planning run; manual approval does not renew it. */
+  budget?: ExecutionBudget;
   /** Approved from an internet session: its task runs use manual approval. */
   manualApproval?: boolean;
   /** Last execution problem, shown on the card. */
@@ -525,6 +572,8 @@ export interface QueuedMessage {
   clientId?: string;
   /** Attachments sent with the message; resolved again from the store when it starts. */
   attachments?: AttachmentMeta[];
+  /** Explicit journey budget; deadline persists while this item waits in the queue. */
+  budget?: ExecutionBudget;
   /** Queued from an internet session: its run uses manual approval (docs/specs/remote-access.md). */
   manualApproval?: boolean;
   createdAt: string;
@@ -533,7 +582,7 @@ export interface QueuedMessage {
 /** Why the queue stopped starting messages on its own; cleared by "Retomar fila". */
 export interface QueuePause {
   /** 'limit': the next message hit a usage limit (docs/specs/spend-limits.md). */
-  reason: 'cancelled' | 'failed' | 'interrupted' | 'limit';
+  reason: 'cancelled' | 'failed' | 'interrupted' | 'limit' | 'timeout';
   at: string;
   error?: string;
 }
@@ -774,6 +823,8 @@ export interface RunInput {
   plan: RoutePlan;
   sandbox: Sandbox;
   approvalMode?: ApprovalMode;
+  /** Remaining wall-clock time from the original journey deadline; never reset per phase. */
+  budget?: { deadlineAt: string; remainingMs: number; finalizationReserveMs: number };
   memoryContext?: string;
   /**
    * Latest conversation summary (docs/specs/compaction.md). It replaces the messages it

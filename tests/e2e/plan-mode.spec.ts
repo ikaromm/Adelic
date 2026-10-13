@@ -140,3 +140,29 @@ test('the plan card fits a 360 px screen', async ({ page }) => {
   expect(overflow).toBeLessThanOrEqual(0);
   await expect(card(page).getByRole('button', { name: 'Aprovar e executar' })).toBeInViewport();
 });
+
+test('plan updates keep a reader at older conversation content', async ({ page }) => {
+  const input = await newConversation(page);
+  await page.setViewportSize({ width: 360, height: 740 });
+  await input.fill('/plano exportar o relatório');
+  await input.press('Enter');
+  await expect(card(page)).toBeVisible();
+  await expect(card(page).getByRole('button', { name: 'Aprovar e executar' })).toBeInViewport();
+
+  // Prepare a real plan edit, then return to the earlier prompt before applying the update.
+  await card(page).getByRole('button', { name: 'Editar plano' }).click();
+  const editor = card(page).getByRole('textbox', { name: 'Markdown do plano' });
+  await editor.fill(`${await editor.inputValue()}\n- [ ] Documentar a exportação\n`);
+  const viewport = conversation(page);
+  await viewport.evaluate((element) => element.scrollTo({ top: 0, behavior: 'instant' }));
+  await expect(conversation(page).locator('.user-bubble', { hasText: '/plano exportar o relatório' })).toBeVisible();
+  const previousScrollTop = await viewport.evaluate((element) => element.scrollTop);
+  expect(previousScrollTop).toBe(0);
+
+  await card(page)
+    .getByRole('button', { name: 'Salvar plano' })
+    .evaluate((button: HTMLButtonElement) => button.click());
+  await expect(tasks(page)).toHaveCount(3);
+  await expect.poll(() => viewport.evaluate((element) => element.scrollTop)).toBe(previousScrollTop);
+  await expect(conversation(page).locator('.user-bubble', { hasText: '/plano exportar o relatório' })).toBeVisible();
+});

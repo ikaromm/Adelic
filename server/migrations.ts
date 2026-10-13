@@ -286,6 +286,17 @@ export const migrations: Migration[] = [
             reasoning_output_tokens=(SELECT json_extract(r.data,'$.reasoningOutputTokens') FROM runs r WHERE r.id=observability_runs.run_id);`);
     },
   },
+  {
+    version: 17,
+    description: 'Identidades alternativas para mensagens idempotentes',
+    up(db) {
+      db.exec(`CREATE TABLE IF NOT EXISTS message_client_aliases(
+        session_id TEXT NOT NULL, client_id TEXT NOT NULL, run_id TEXT NOT NULL,
+        PRIMARY KEY(session_id,client_id),
+        FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+      );`);
+    },
+  },
 ];
 
 export const schemaVersion = migrations.at(-1)!.version;

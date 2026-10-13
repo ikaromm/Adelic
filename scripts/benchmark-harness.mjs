@@ -26,6 +26,11 @@ const MODEL = 'gpt-6-luna';
 const EFFORT = 'high';
 const ATTEMPT_LIMIT_MS = 180_000;
 const REGRESSION_TURN_LIMIT_MS = 60_000;
+// Each harness gets 120s of its own active work across dependent turns; grading and other harnesses are excluded.
+const REGRESSION_JOURNEY_BUDGET_MS = REGRESSION_TURN_LIMIT_MS * 2;
+const REGRESSION_FINALIZATION_RESERVE_MS = 10_000;
+if (REGRESSION_JOURNEY_BUDGET_MS < REGRESSION_TURN_LIMIT_MS * 2)
+  throw new Error('Regression journey budget must preserve two full per-turn work windows');
 const TEST_LIMIT_MS = 30_000;
 const SOURCE_COMMIT = '7e0611e77b54e2dea774cdc0aa00cf9f7ed6144f';
 const activeChildren = new Set();
@@ -110,9 +115,6 @@ function interruptActiveChildren(signal) {
     for (const child of activeChildren) signalChildTree(child, 'SIGKILL');
   }, 3000).unref();
 }
-
-process.once('SIGINT', () => interruptActiveChildren('SIGINT'));
-process.once('SIGTERM', () => interruptActiveChildren('SIGTERM'));
 
 function execFile(file, args, { cwd, env = process.env, timeoutMs = 15_000, input } = {}) {
   return new Promise((resolvePromise) => {
@@ -247,11 +249,14 @@ function regressionCase() {
       turnAttemptsMaximum: 4,
       turnsPerHarness: 2,
       maxActiveTurnSeconds: REGRESSION_TURN_LIMIT_MS / 1000,
-      maxAggregateActiveTurnSeconds: 240,
+      journeyBudgetMsPerHarness: REGRESSION_JOURNEY_BUDGET_MS,
+      journeyFinalizationReserveMs: REGRESSION_FINALIZATION_RESERVE_MS,
+      maxAggregateActiveTurnSeconds: (4 * REGRESSION_TURN_LIMIT_MS) / 1000,
       timeoutCleanupSecondsPerAdelicTimeout: 25,
       retryPolicy: 'one attempt per turn; no retries',
       sequence: ['repair remove() case matching', 'follow-up read tracking in the same session'],
-      limitation: 'A single short scripted maintenance scenario; not a general benchmark score.',
+      limitation:
+        'A single short scripted maintenance scenario; not a general benchmark score. Fixture checks are not an independent review; review is disabled, and integration is not separately measured because each turn edits the same workspace.',
     },
   };
 }
@@ -682,12 +687,19 @@ async function runNative(task, info, workspace, attemptId) {
 }
 
 async function createRegressionContext(harness, regression, attemptId) {
+  const setupStartedAt = Date.now();
   const workspace = join(EVAL_ROOT, 'workspaces', `${harness}-regression-${attemptId}`);
+  const context = {
+    harness,
+    workspace,
+    sessionId: null,
+    projectId: null,
+    threadId: null,
+    journeyClock: createJourneyClock(),
+  };
   mkdirSync(workspace, { recursive: false, mode: 0o700 });
   copyFileSync(regression.files.starter, join(workspace, 'reading_list.py'));
-  const context = { harness, workspace, sessionId: null, projectId: null, threadId: null };
   if (harness === 'adelic') {
-    const setupStartedAt = Date.now();
     await configureAdelic();
     const project = await api('/api/projects', {
       method: 'POST',
@@ -714,20 +726,145 @@ async function createRegressionContext(harness, regression, attemptId) {
     });
     context.sessionId = session.id;
     context.projectId = project.id;
-    context.setupWallTimeMs = Date.now() - setupStartedAt;
   }
+  context.setupWallTimeMs = Date.now() - setupStartedAt;
+  context.setupOverheadMs = context.setupWallTimeMs;
   return context;
+}
+
+export function createJourneyClock(now = Date.now) {
+  return { now, activeMs: 0, externalWaitMs: 0, activeSince: null, stoppedAt: null };
+}
+
+export function startJourneyActivity(context) {
+  const clock = context.journeyClock;
+  if (clock.activeSince !== null) throw new Error('Journey activity is already active');
+  const now = clock.now();
+  if (clock.stoppedAt !== null) clock.externalWaitMs += Math.max(0, now - clock.stoppedAt);
+  clock.activeSince = now;
+}
+
+export function stopJourneyActivity(context) {
+  const clock = context.journeyClock;
+  if (clock.activeSince === null) return;
+  const now = clock.now();
+  clock.activeMs += Math.max(0, now - clock.activeSince);
+  clock.activeSince = null;
+  clock.stoppedAt = now;
+}
+
+export function remainingJourneyBudget(context) {
+  const clock = context.journeyClock;
+  const elapsedMs = clock.activeMs + (clock.activeSince === null ? 0 : Math.max(0, clock.now() - clock.activeSince));
+  return {
+    elapsedMs,
+    externalWaitMs: clock.externalWaitMs,
+    remainingMs: Math.max(0, REGRESSION_JOURNEY_BUDGET_MS - elapsedMs),
+  };
+}
+
+export function requestBudget(context) {
+  const { remainingMs } = remainingJourneyBudget(context);
+  if (remainingMs < 10_000) return null;
+  const finalizationReserveMs = Math.min(REGRESSION_FINALIZATION_RESERVE_MS, remainingMs - 1_000);
+  return {
+    totalMs: remainingMs,
+    finalizationReserveMs,
+    turnWorkTimeoutMs: Math.min(REGRESSION_TURN_LIMIT_MS, remainingMs - finalizationReserveMs),
+  };
+}
+
+export async function runRegressionSchedule(harnesses, contexts, { runTurn, evaluateTurn }) {
+  const results = [];
+  const turnRuns = new Map();
+  for (let turnIndex = 0; turnIndex < 2; turnIndex += 1) {
+    const order = harnesses.length === 2 && turnIndex === 1 ? [...harnesses].reverse() : harnesses;
+    for (const harness of order) {
+      const context = contexts.get(harness);
+      const turnName = turnIndex === 0 ? 'repair' : 'followup';
+      const priorRun = turnRuns.get(`${harness}-repair`);
+      startJourneyActivity(context);
+      const budgetAtSubmission = requestBudget(context);
+      const budgetGate = budgetAtSubmission === null;
+      const priorDidNotComplete =
+        turnIndex === 1 && (priorRun?.outcome !== 'completed' || priorRun?.degradation === 'budget_gate');
+      if (
+        budgetGate ||
+        (turnIndex === 1 &&
+          (priorRun?.terminalStateConfirmed === false ||
+            priorDidNotComplete ||
+            (harness === 'native' && !context.threadId)))
+      ) {
+        stopJourneyActivity(context);
+        const gateClock = remainingJourneyBudget(context);
+        results.push({
+          harness,
+          turn: turnName,
+          outcome: budgetGate ? 'budget_gate' : 'not_run',
+          degradation: budgetGate ? 'budget_gate' : null,
+          terminalStateConfirmed: null,
+          priorTurnOutcome: priorRun?.outcome ?? null,
+          priorTurnTerminalStateConfirmed: priorRun?.terminalStateConfirmed ?? null,
+          wallTimeMs: 0,
+          inputTokens: null,
+          outputTokens: null,
+          cachedInputTokens: null,
+          reasoningOutputTokens: null,
+          toolCalls: null,
+          testResult: { outcome: 'not_run' },
+          extra: {
+            journeyBudgetTotalMs: REGRESSION_JOURNEY_BUDGET_MS,
+            journeyBudgetRemainingAtSubmissionMs: gateClock.remainingMs,
+            journeyBudgetElapsedMs: gateClock.elapsedMs,
+            journeyExternalWaitMs: gateClock.externalWaitMs,
+          },
+          failures: [
+            budgetGate
+              ? 'budget_gate: harness active-time budget exhausted; continuation was not started'
+              : 'Previous turn was not eligible for continuation',
+          ],
+        });
+        continue;
+      }
+      let run;
+      try {
+        run = await runTurn(harness, context, turnIndex, budgetAtSubmission);
+      } finally {
+        stopJourneyActivity(context);
+      }
+      run.turn = turnName;
+      const clockAtTurnEnd = remainingJourneyBudget(context);
+      run.extra = {
+        ...run.extra,
+        journeyBudgetTotalMs: REGRESSION_JOURNEY_BUDGET_MS,
+        journeyBudgetRemainingAtSubmissionMs: budgetAtSubmission?.totalMs ?? null,
+        journeyBudgetElapsedMs: clockAtTurnEnd.elapsedMs,
+        journeyExternalWaitMs: clockAtTurnEnd.externalWaitMs,
+        setupOverheadMs: turnIndex === 0 ? (context.setupOverheadMs ?? 0) : 0,
+        setupWallTimeMs: turnIndex === 0 ? (context.setupOverheadMs ?? 0) : 0,
+      };
+      turnRuns.set(`${harness}-${turnName}`, run);
+      results.push(await evaluateTurn(run, harness, turnIndex));
+    }
+  }
+  return results;
 }
 
 async function runRegressionAdelicTurn(context, regression, turnIndex, attemptId) {
   const turnName = turnIndex === 0 ? 'repair' : 'followup';
   const startedAt = Date.now();
   const startedIso = nowIso();
+  const budget = requestBudget(context);
+  if (!budget) throw new Error(`Regression ${turnName} skipped: global journey budget exhausted`);
   let accepted;
   try {
     accepted = await api(`/api/sessions/${encodeURIComponent(context.sessionId)}/messages`, {
       method: 'POST',
-      body: { content: regression.texts[turnName], clientMessageId: `regression-${attemptId}` },
+      body: {
+        content: regression.texts[turnName],
+        clientMessageId: `regression-${attemptId}`,
+        budget: { totalMs: budget.totalMs, finalizationReserveMs: budget.finalizationReserveMs },
+      },
       timeoutMs: 15_000,
     });
   } catch (error) {
@@ -781,7 +918,7 @@ async function runRegressionAdelicTurn(context, regression, turnIndex, attemptId
     reason: 'opt-in multi-turn maintenance regression case',
   };
   return normalizeRun(item, 'adelic', attemptId, startedIso, Date.now() - startedAt, {
-    outcome: timedOut ? 'timeout' : (run?.status ?? 'unknown'),
+    outcome: timedOut || run?.termination === 'timeout' ? 'timeout' : (run?.status ?? 'unknown'),
     inputTokens: run?.inputTokens ?? null,
     outputTokens: run?.outputTokens ?? null,
     cachedInputTokens: run?.cachedInputTokens ?? null,
@@ -805,6 +942,13 @@ async function runRegressionAdelicTurn(context, regression, turnIndex, attemptId
     extra: {
       turn: turnName,
       projectId: context.projectId,
+      termination: timedOut ? 'turn_timeout' : (run?.termination ?? null),
+      serverTermination: run?.termination ?? null,
+      degradation: run?.degradation ?? null,
+      journeyBudgetTotalMs: REGRESSION_JOURNEY_BUDGET_MS,
+      journeyBudgetRemainingAtSubmissionMs: budget.totalMs,
+      journeyBudgetElapsedMs: remainingJourneyBudget(context).elapsedMs,
+      finalizationReserveMs: budget.finalizationReserveMs,
       setupWallTimeMs: turnIndex === 0 ? context.setupWallTimeMs : 0,
     },
   });
@@ -814,6 +958,8 @@ async function runRegressionNativeTurn(context, regression, turnIndex, attemptId
   const turnName = turnIndex === 0 ? 'repair' : 'followup';
   const startedAt = Date.now();
   const startedIso = nowIso();
+  const budget = requestBudget(context);
+  if (!budget) throw new Error(`Regression ${turnName} skipped: global journey budget exhausted`);
   const args =
     turnIndex === 0
       ? [
@@ -858,7 +1004,7 @@ async function runRegressionNativeTurn(context, regression, turnIndex, attemptId
         ];
   const child = await execFile(CODEX, args, {
     cwd: context.workspace,
-    timeoutMs: REGRESSION_TURN_LIMIT_MS,
+    timeoutMs: Math.min(REGRESSION_TURN_LIMIT_MS, Math.max(1, budget.totalMs - budget.finalizationReserveMs)),
     input: regression.texts[turnName],
     env: { ...process.env, CODEX_DISABLE_TELEMETRY: '1' },
   });
@@ -924,8 +1070,16 @@ async function runRegressionNativeTurn(context, regression, turnIndex, attemptId
     extra: {
       turn: turnName,
       threadId: context.threadId,
+      setupWallTimeMs: turnIndex === 0 ? context.setupWallTimeMs : 0,
+      setupOverheadMs: turnIndex === 0 ? context.setupOverheadMs : 0,
       timedOut: child.timedOut,
+      termination: child.timedOut ? 'turn_timeout' : turnFailed || child.code !== 0 ? 'provider_failure' : null,
       signal: child.signal,
+      journeyBudgetTotalMs: REGRESSION_JOURNEY_BUDGET_MS,
+      journeyBudgetRemainingAtSubmissionMs: budget.totalMs,
+      journeyBudgetElapsedMs: remainingJourneyBudget(context).elapsedMs,
+      finalizationReserveMs: budget.finalizationReserveMs,
+      nativeWorkTimeoutMs: Math.min(REGRESSION_TURN_LIMIT_MS, budget.totalMs - budget.finalizationReserveMs),
       nativeUsageReported,
       nativeUsageBaseline,
       usageAccounting: 'thread-total delta',
@@ -937,17 +1091,20 @@ async function runRegressionNativeTurn(context, regression, turnIndex, attemptId
 }
 
 async function evaluateRegression(run, regression, testName, attemptId) {
+  const testStartedAt = Date.now();
   if (run.terminalStateConfirmed === false) {
     run.testResult = { outcome: 'not_run', reason: 'Model run did not reach a confirmed terminal state' };
     return run;
   }
+  // Fixture grading is deliberately outside the model-work journey clock.
+  const testTimeoutMs = TEST_LIMIT_MS;
   const testDir = join(EVAL_ROOT, 'tests', 'regression', attemptId);
   mkdirSync(testDir, { recursive: true, mode: 0o700 });
   const sourceTest = testName === 'test_repair.py' ? regression.files.repairTest : regression.files.followupTest;
   copyFileSync(sourceTest, join(testDir, testName));
   const result = await execFile('python3', ['-m', 'unittest', 'discover', '-s', testDir, '-p', testName], {
     cwd: run.workspace,
-    timeoutMs: TEST_LIMIT_MS,
+    timeoutMs: testTimeoutMs,
     env: { ...process.env, PYTHONPATH: [run.workspace, process.env.PYTHONPATH].filter(Boolean).join(':') },
   });
   const testLog = join(EVAL_ROOT, 'logs', `${attemptId}.tests.log`);
@@ -960,6 +1117,7 @@ async function evaluateRegression(run, regression, testName, attemptId) {
     testCount: Number((result.stderr.match(/Ran (\d+) tests?/) ?? [])[1] ?? 0),
   };
   if (!passed) run.failures.push(`Regression unittest suite ${run.testResult.outcome}`);
+  run.testDurationMs = Date.now() - testStartedAt;
   return run;
 }
 
@@ -981,69 +1139,62 @@ async function runRegressionSuite(harnesses, checked) {
     harnesses,
     turnAttemptsMaximum: harnesses.length * 2,
     maxActiveTurnSeconds: REGRESSION_TURN_LIMIT_MS / 1000,
+    journeyBudgetMsPerHarness: REGRESSION_JOURNEY_BUDGET_MS,
+    journeyFinalizationReserveMs: REGRESSION_FINALIZATION_RESERVE_MS,
     maxAggregateActiveTurnSeconds: (harnesses.length * 2 * REGRESSION_TURN_LIMIT_MS) / 1000,
+    journeyBudgetAccounting:
+      'independent active-work clock per harness; includes own model-turn execution/cleanup, excludes setup, grading, idle, and the other harness; external wait is recorded separately',
+    setupAccounting:
+      'setup is excluded from active-work budgets and reported separately as setupOverheadMs per harness',
+    timingDocumentation: 'docs/benchmark-timing.md',
     timeoutCleanupBudgetSeconds: harnesses.includes('adelic') ? 50 : 0,
     oneAttemptPerTurn: true,
     retryPolicy: 'no retries',
-    harnessOrder: ['repair: adelic then native', 'follow-up: native then adelic'],
+    harnessOrder: [`repair: ${harnesses.join(' then ')}`, `follow-up: ${[...harnesses].reverse().join(' then ')}`],
     preflight: checked.checks,
   };
   const contexts = new Map();
   for (const harness of harnesses)
     contexts.set(harness, await createRegressionContext(harness, regression, `${attemptId}-${harness}`));
-  const results = [];
-  const turnRuns = new Map();
-  for (let turnIndex = 0; turnIndex < 2; turnIndex += 1) {
-    const order = harnesses.length === 2 && turnIndex === 1 ? [...harnesses].reverse() : harnesses;
-    for (const harness of order) {
-      const context = contexts.get(harness);
+  runMeta.setupOverheadByHarnessMs = Object.fromEntries(
+    [...contexts].map(([harness, context]) => [harness, context.setupOverheadMs]),
+  );
+  const results = await runRegressionSchedule(harnesses, contexts, {
+    runTurn: async (harness, context, turnIndex) => {
       const turnName = turnIndex === 0 ? 'repair' : 'followup';
       const key = `${attemptId}-${turnName}-${harness}`;
-      const priorRun = turnRuns.get(`${harness}-repair`);
-      if (
-        turnIndex === 1 &&
-        (priorRun?.terminalStateConfirmed === false || (harness === 'native' && !context.threadId))
-      ) {
-        results.push({
-          task: regression.id,
-          harness,
-          turn: turnName,
-          attempt: 1,
-          attemptId: key,
-          model: MODEL,
-          reasoningEffort: EFFORT,
-          outcome: 'not_run',
-          wallTimeMs: 0,
-          inputTokens: null,
-          outputTokens: null,
-          cachedInputTokens: null,
-          reasoningOutputTokens: null,
-          toolCalls: null,
-          failures: ['Previous turn did not reach a confirmed terminal state'],
-          testResult: { outcome: 'not_run' },
-          workspace: context.workspace,
-        });
-        continue;
-      }
       const run =
         harness === 'adelic'
           ? await runRegressionAdelicTurn(context, regression, turnIndex, key)
           : await runRegressionNativeTurn(context, regression, turnIndex, key);
       if (interrupted) throw new Error('Interrupted; model process stopped and test evaluation skipped');
-      run.turn = turnName;
-      turnRuns.set(`${harness}-${turnName}`, run);
+      return run;
+    },
+    evaluateTurn: async (run, harness, turnIndex) => {
+      const turnName = turnIndex === 0 ? 'repair' : 'followup';
+      const key = `${attemptId}-${turnName}-${harness}`;
+      if (run.outcome === 'budget_gate' || run.outcome === 'not_run') return run;
       const evaluated = await evaluateRegression(
         run,
         regression,
         turnIndex === 0 ? 'test_repair.py' : 'test_followup.py',
         key,
       );
-      results.push(evaluated);
       writeJson(join(EVAL_ROOT, 'runs', `${attemptId}-${harness}-${turnName}.json`), evaluated);
       process.stdout.write(
-        `${JSON.stringify({ completed: `${regression.id}/${harness}/${turnName}`, outcome: run.outcome, tests: run.testResult?.outcome, wallTimeMs: run.wallTimeMs })}\n`,
+        `${JSON.stringify({ completed: `${regression.id}/${harness}/${turnName}`, outcome: evaluated.outcome, tests: evaluated.testResult?.outcome, wallTimeMs: evaluated.wallTimeMs })}\n`,
       );
-    }
+      return evaluated;
+    },
+  });
+  for (const item of results) {
+    if (item.attemptId) continue;
+    item.task = regression.id;
+    item.attempt = 1;
+    item.attemptId = `${attemptId}-${item.turn}-${item.harness}`;
+    item.model = MODEL;
+    item.reasoningEffort = EFFORT;
+    item.workspace = contexts.get(item.harness).workspace;
   }
   const reportPath = join(EVAL_ROOT, 'regression-report.md');
   const lines = [
@@ -1052,16 +1203,16 @@ async function runRegressionSuite(harnesses, checked) {
     `Generated: ${nowIso()}`,
     'Separate from the three fixed Polyglot exercises; this scenario is not an official benchmark score.',
     'Sequence: repair a case-insensitive removal defect, then add read tracking in the same session/workspace.',
-    `Budget: ${runMeta.turnAttemptsMaximum} turn attempts maximum; ${runMeta.maxActiveTurnSeconds}s active-time ceiling per turn and ${runMeta.maxAggregateActiveTurnSeconds}s aggregate active-turn ceiling. These are time ceilings, not strict limits on internal model calls, tokens, or cost; Adelic timeout cancellation may add up to ${runMeta.timeoutCleanupBudgetSeconds}s. One attempt per turn, no retries.`,
-    'Native regression mode starts a fresh persisted Codex thread and resumes it for the second turn; its conversation history persists in configured CODEX_HOME. This persistence applies only to regression. Adelic sends both turns in one fresh session.',
+    `Budget: ${runMeta.turnAttemptsMaximum} turn attempts maximum; ${runMeta.maxActiveTurnSeconds}s per-turn active-work ceiling and ${runMeta.journeyBudgetMsPerHarness}ms independent active-work budget per harness (model turns/cleanup; setup, grading, idle, and the other harness are excluded). Setup overhead is recorded separately. ${runMeta.journeyFinalizationReserveMs}ms is reserved for structured finalization; exhausted budgets gate follow-up as budget_gate. These are time ceilings, not strict limits on internal model calls, tokens, or cost; Adelic timeout cleanup may add up to ${runMeta.timeoutCleanupBudgetSeconds}s. One attempt per turn, no retries. See ${runMeta.timingDocumentation}.`,
+    'Native regression mode starts a fresh persisted Codex thread and resumes it for the second turn; its conversation history persists in configured CODEX_HOME. This persistence applies only to regression. Adelic sends both turns in one fresh session. Test results are observed fixture checks only: passing tests do not mean an independent review occurred or that the full task is complete (review is disabled for this harness scenario).',
     'Token counts reflect only runtime-reported fields; Adelic Run and native Codex turn usage may have different accounting. No cost is inferred.',
     '',
-    '| Turn | Harness | Outcome | Tests | Wall time | Input | Output | Cached input | Reasoning output | Tools | Failures |',
-    '|---|---|---|---:|---:|---:|---:|---:|---:|---:|---|',
+    '| Turn | Harness | Outcome | Tests | Turn wall time | Setup time | Test time | Input | Output | Cached input | Reasoning output | Tools | Failures |',
+    '|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|',
   ];
   for (const item of results)
     lines.push(
-      `| ${item.turn ?? 'follow-up'} | ${item.harness} | ${item.outcome} | ${item.testResult?.outcome ?? 'not run'} | ${(item.wallTimeMs / 1000).toFixed(1)}s | ${item.inputTokens ?? 'unknown'} | ${item.outputTokens ?? 'unknown'} | ${item.cachedInputTokens ?? 'unknown'} | ${item.reasoningOutputTokens ?? 'unknown'} | ${item.toolCalls ?? 'unknown'} | ${item.failures?.length ? item.failures.join('; ').replaceAll('|', '\\|') : 'none'} |`,
+      `| ${item.turn ?? 'follow-up'} | ${item.harness} | ${item.outcome} | ${item.testResult?.outcome ?? 'not run'} | ${(item.wallTimeMs / 1000).toFixed(1)}s | ${((item.extra?.setupWallTimeMs ?? 0) / 1000).toFixed(1)}s | ${item.testDurationMs === undefined ? 'n/a' : `${(item.testDurationMs / 1000).toFixed(1)}s`} | ${item.inputTokens ?? 'unknown'} | ${item.outputTokens ?? 'unknown'} | ${item.cachedInputTokens ?? 'unknown'} | ${item.reasoningOutputTokens ?? 'unknown'} | ${item.toolCalls ?? 'unknown'} | ${item.failures?.length ? item.failures.join('; ').replaceAll('|', '\\|') : 'none'} |`,
     );
   lines.push('');
   writeFileSync(reportPath, `${lines.join('\n')}\n`, { mode: 0o600 });
@@ -1123,7 +1274,7 @@ function report(results, runMeta) {
     '',
     'Tasks were chosen for small standard-library implementations covering state, validation, and whitespace edge cases. The original tests remained outside the model workspace and were run only after generation.',
     'grade-school was clarified to specify list return formats after an exploratory run exposed ambiguity in the source instructions; that earlier run is excluded from formal results.',
-    'Wall time begins with the Adelic message request or native Codex process start; Adelic project/session setup is recorded separately as setupWallTimeMs in results.json.',
+    'Wall time begins with the Adelic message request or native Codex process start; setup is excluded from the active-work budget and recorded separately as setupOverheadMs (also retained as setupWallTimeMs) in results.json.',
     'Adelic uses mode=deep; native Codex exec has no equivalent mode parameter, so this compares the real harness flows rather than identical orchestration settings.',
     'Token counts are recorded only when the runtime reports them: Adelic run-level usage and native Codex turn-level usage are not guaranteed to use identical accounting; cached input is unknown when omitted. No cost is inferred from tokens.',
     '',
@@ -1220,11 +1371,15 @@ async function main() {
   process.stdout.write(`Report: ${reportPath}\n`);
 }
 
-main().catch((error) => {
-  if (interrupted) {
-    process.exitCode = 130;
-    return;
-  }
-  process.stderr.write(`benchmark-harness: ${error.stack ?? error.message}\n`);
-  process.exitCode = 1;
-});
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  process.once('SIGINT', () => interruptActiveChildren('SIGINT'));
+  process.once('SIGTERM', () => interruptActiveChildren('SIGTERM'));
+  main().catch((error) => {
+    if (interrupted) {
+      process.exitCode = 130;
+      return;
+    }
+    process.stderr.write(`benchmark-harness: ${error.stack ?? error.message}\n`);
+    process.exitCode = 1;
+  });
+}

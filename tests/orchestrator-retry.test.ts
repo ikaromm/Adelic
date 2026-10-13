@@ -15,7 +15,14 @@ afterEach(() => {
 
 type Script = (input: RunInput, emit: (e: ProviderEvent) => void, attempt: number) => Promise<RunResult>;
 
-function setup(script: Script, opts: { coordinated?: boolean; autoRetry?: boolean } = {}) {
+function setup(
+  script: Script,
+  opts: {
+    coordinated?: boolean;
+    autoRetry?: boolean;
+    defaultExecutionBudget?: { totalMs: number; finalizationReserveMs: number };
+  } = {},
+) {
   const dir = mkdtempSync(join(tmpdir(), 'adelic-retry-'));
   dirs.push(dir);
   const store = new Store(dir);
@@ -69,10 +76,20 @@ function setup(script: Script, opts: { coordinated?: boolean; autoRetry?: boolea
     async approve() {},
     async shutdown() {},
   };
-  const orchestrator = new Orchestrator(store, providers, undefined, undefined, undefined, {
-    baseDelayMs: 5,
-    maxDelayMs: 20,
-  });
+  const orchestrator = new Orchestrator(
+    store,
+    providers,
+    undefined,
+    undefined,
+    undefined,
+    {
+      baseDelayMs: 5,
+      maxDelayMs: 20,
+    },
+    undefined,
+    undefined,
+    opts.defaultExecutionBudget,
+  );
   const finished = new Promise<void>((resolve) =>
     orchestrator.subscribe((event) => {
       if (event.type === 'run' && event.run.status !== 'running') resolve();
@@ -82,6 +99,189 @@ function setup(script: Script, opts: { coordinated?: boolean; autoRetry?: boolea
 }
 
 describe('automatic retry in the orchestrator', () => {
+  it('continues a public task retry with the original absolute budget', async () => {
+    const inputs: RunInput[] = [];
+    const { store, session, orchestrator } = setup(
+      async (input) => {
+        inputs.push(input);
+        return { text: 'ok', stopReason: 'completed' };
+      },
+      { defaultExecutionBudget: { totalMs: 30_000, finalizationReserveMs: 2_000 } },
+    );
+    const startedAt = new Date().toISOString();
+    const first = await orchestrator.start(session, 'Original journey');
+    await new Promise<void>((resolve) => {
+      const unsubscribe = orchestrator.subscribe((event) => {
+        if (event.type === 'run' && event.run.id === first.runId && event.run.status !== 'running') {
+          unsubscribe();
+          resolve();
+        }
+      });
+    });
+    const source = store.getRun(first.runId)!;
+    const taskId = 'budget-retry-task';
+    store.putTask({
+      id: taskId,
+      agentId: 'budget-agent',
+      projectId: 'p',
+      sessionId: session.id,
+      runId: source.id,
+      role: 'worker',
+      title: 'Recover',
+      instructions: 'Continue this task.',
+      scope: [],
+      dependsOn: [],
+      providerId: 'codex',
+      status: 'failed',
+      createdAt: startedAt,
+      completedAt: startedAt,
+      delivery: {
+        status: 'blocked',
+        reason: 'retry',
+        evidence: ['process:failed'],
+        recovery: { action: 'retry', reason: 'Retry.' },
+        recordedAt: startedAt,
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    let retryTerminal!: () => void;
+    const terminal = new Promise<void>((resolve) => {
+      retryTerminal = resolve;
+    });
+    const unsubscribe = orchestrator.subscribe((event) => {
+      if (
+        event.type === 'run' &&
+        event.run.sessionId === session.id &&
+        event.run.id !== first.runId &&
+        event.run.status !== 'running'
+      ) {
+        unsubscribe();
+        retryTerminal();
+      }
+    });
+    const retry = await orchestrator.retryTask(taskId);
+    await terminal;
+    const retried = store.getRun(retry.runId)!;
+    const sourceInput = inputs.find((input) => input.runId === first.runId)!;
+    const retryInput = inputs.find((input) => input.runId === retry.runId)!;
+    expect(retried.budget?.deadlineAt).toBe(source.budget?.deadlineAt);
+    expect(retryInput.budget?.deadlineAt).toBe(sourceInput.budget?.deadlineAt);
+    expect(retryInput.budget?.remainingMs).toBeLessThan(sourceInput.budget?.remainingMs ?? Infinity);
+    await orchestrator.shutdown();
+    store.close();
+  });
+  it('refuses an expired task continuation instead of minting a default budget', async () => {
+    const { store, session, orchestrator } = setup(async () => ({ text: 'ok', stopReason: 'completed' }), {
+      defaultExecutionBudget: { totalMs: 30_000, finalizationReserveMs: 2_000 },
+    });
+    const first = await orchestrator.start(session, 'Original journey');
+    await new Promise<void>((resolve) => {
+      const unsubscribe = orchestrator.subscribe((event) => {
+        if (event.type === 'run' && event.run.id === first.runId && event.run.status !== 'running') {
+          unsubscribe();
+          resolve();
+        }
+      });
+    });
+    const source = store.getRun(first.runId)!;
+    store.putRun({ ...source, budget: { ...source.budget!, deadlineAt: new Date(Date.now() - 1).toISOString() } });
+    const now = new Date().toISOString();
+    const taskId = 'expired-budget-task';
+    store.putTask({
+      id: taskId,
+      agentId: 'expired-agent',
+      projectId: 'p',
+      sessionId: session.id,
+      runId: source.id,
+      role: 'worker',
+      title: 'Recover',
+      instructions: 'Continue this task.',
+      scope: [],
+      dependsOn: [],
+      providerId: 'codex',
+      status: 'failed',
+      createdAt: now,
+      completedAt: now,
+      delivery: {
+        status: 'blocked',
+        reason: 'retry',
+        evidence: ['process:failed'],
+        recovery: { action: 'retry', reason: 'Retry.' },
+        recordedAt: now,
+      },
+    });
+    const count = store.listRuns(session.id).length;
+    await expect(orchestrator.retryTask(taskId)).rejects.toMatchObject({ status: 409 });
+    expect(store.listRuns(session.id)).toHaveLength(count);
+    expect(store.getTask(taskId)?.retryRunId).toBeUndefined();
+    await orchestrator.shutdown();
+    store.close();
+  });
+
+  it('does not mint a default budget when retrying a legacy run, and refuses an expired inherited deadline', async () => {
+    const noBudget = setup(async () => ({ text: 'ok', stopReason: 'completed' }), {
+      defaultExecutionBudget: { totalMs: 30_000, finalizationReserveMs: 3_000 },
+    });
+    const origin = await noBudget.orchestrator.start(noBudget.session, 'Legacy request', undefined, [], {
+      continuation: true,
+    });
+    await noBudget.finished;
+    expect(noBudget.store.getRun(origin.runId)?.budget).toBeUndefined();
+    const retry = await noBudget.orchestrator.retryRun(origin.runId);
+    expect(noBudget.store.getRun(retry.runId)?.budget).toBeUndefined();
+    await noBudget.orchestrator.shutdown();
+    noBudget.store.close();
+
+    const expired = setup(async () => ({ text: 'ok', stopReason: 'completed' }), {
+      defaultExecutionBudget: { totalMs: 30_000, finalizationReserveMs: 3_000 },
+    });
+    const budgeted = await expired.orchestrator.start(expired.session, 'Budgeted request');
+    await expired.finished;
+    const source = expired.store.getRun(budgeted.runId)!;
+    expired.store.putRun({
+      ...source,
+      budget: { ...source.budget!, deadlineAt: new Date(Date.now() - 1).toISOString() },
+    });
+    const count = expired.store.listRuns(expired.session.id).length;
+    await expect(expired.orchestrator.retryRun(budgeted.runId)).rejects.toMatchObject({ status: 409 });
+    expect(expired.store.listRuns(expired.session.id)).toHaveLength(count);
+    await expired.orchestrator.shutdown();
+    expired.store.close();
+  });
+
+  it('keeps unbudgeted plan tasks as continuations, including automatic next tasks', async () => {
+    const { store, session, orchestrator } = setup(async () => ({ text: 'ok', stopReason: 'completed' }), {
+      defaultExecutionBudget: { totalMs: 30_000, finalizationReserveMs: 3_000 },
+    });
+    const now = new Date().toISOString();
+    store.putPlan({
+      id: 'legacy-plan',
+      sessionId: session.id,
+      runId: 'legacy-planning-run',
+      title: 'Legacy plan',
+      status: 'approved',
+      requirements: '',
+      design: '',
+      tasks: [
+        { id: 'task-1', text: 'First', status: 'pending' },
+        { id: 'task-2', text: 'Second', status: 'pending' },
+      ],
+      markdown: '## Tarefas\\n- [ ] First\\n- [ ] Second',
+      createdAt: now,
+      updatedAt: now,
+    });
+    await orchestrator.plans.approve('legacy-plan', 'all');
+    const deadline = Date.now() + 2_000;
+    while (store.listRuns(session.id).filter((run) => run.status !== 'running').length < 2 && Date.now() < deadline)
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    const taskRuns = store.listRuns(session.id);
+    expect(taskRuns).toHaveLength(2);
+    expect(taskRuns.every((run) => run.budget === undefined)).toBe(true);
+    expect(taskRuns.every((run) => run.plan?.kind === 'task')).toBe(true);
+    await orchestrator.shutdown();
+    store.close();
+  });
+
   it('retries a direct run that timed out before answering, and records it', async () => {
     const { store, session, orchestrator, finished } = setup(async (_input, emit, attempt) => {
       if (attempt < 3) throw new Error('Kiro stream failed: The operation timed out.');

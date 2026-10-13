@@ -70,7 +70,7 @@ export default defineConfig({
   test: {
     // Keep the full suite predictable on the supported CI/development footprint.
     maxWorkers: 2,
-    include: ['tests/**/*.test.{ts,tsx}'],
+    include: ['tests/**/*.test.{ts,tsx}', 'tests/**/*.test.mjs'],
     coverage: {
       provider: 'v8',
       include: ['server/**/*.ts', 'shared/**/*.ts', 'src/**/*.{ts,tsx}'],

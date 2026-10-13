@@ -77,6 +77,7 @@ test('real SQLite recovery survives reload, preserves delivered siblings, and re
       pendingId: string;
       noChangesId: string;
       interruptedId: string;
+      legacyId: string;
     };
 
     await page.reload();
@@ -126,6 +127,18 @@ test('real SQLite recovery survives reload, preserves delivered siblings, and re
     expect(noChangesAfterApply.delivery.status).toBe('not_implemented');
     expect(noChangesAfterApply.integration?.status).not.toBe('applied');
     expect(noChangesAfterApply.recoveryWorktree).toBeTruthy();
+
+    const legacy = activity.locator(
+      `[aria-label="Recuperação da tarefa: Recuperação legada desconhecida (${seeded.legacyId})"]`,
+    );
+    await expect(legacy.getByTestId('task-recovery-unverified')).toBeVisible();
+    await expect(legacy.getByTestId('task-recovery-inspect')).toBeEnabled();
+    await expect(legacy.getByTestId('task-recovery-apply')).toHaveCount(0);
+    await expect(legacy.getByTestId('task-recovery-discard')).toHaveCount(0);
+    const legacyState = (await (await request.get(`/api/tasks/${seeded.legacyId}`)).json()) as {
+      recoveryWorktree?: { ownershipVerified?: boolean };
+    };
+    expect(legacyState.recoveryWorktree?.ownershipVerified).toBeUndefined();
 
     // The preceding full-page reload fetched these states from isolated SQLite, then reopened the session.
     const reloadedActivity = page.locator(`#run-activity-${seeded.runId}`);

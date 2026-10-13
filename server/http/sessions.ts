@@ -73,7 +73,7 @@ function knownModel(catalog: ProviderInfo[], providerId: string, model: string) 
 
 const MISSING_ATTACHMENT = 'sessions.attachmentMissing';
 
-export function sessionsRoutes({ store, orchestrator, providerList }: BackendContext) {
+export function sessionsRoutes({ store, orchestrator, providerList, defaultExecutionBudget }: BackendContext) {
   /** Attachments by id, only when every one belongs to the conversation; otherwise undefined. */
   const ownedAttachments = (sessionId: string, ids: string[]): StoredAttachment[] | undefined => {
     const found: StoredAttachment[] = [];
@@ -315,12 +315,13 @@ export function sessionsRoutes({ store, orchestrator, providerList }: BackendCon
     if (!s) return error(res, 404, 'common.sessionNotFound');
     const parsed = parseBody(SendMessageSchema, req.body, vmsg('validation.content', { max: 32000 }), req.locale);
     if (!parsed.ok) return error(res, 400, parsed.message);
-    const { content, clientMessageId, attachmentIds = [], overrideLimit } = parsed.data;
+    const { content, clientMessageId, attachmentIds = [], overrideLimit, budget } = parsed.data;
     const attachments = ownedAttachments(s.id, attachmentIds);
     if (!attachments) return error(res, 400, MISSING_ATTACHMENT);
     try {
       const result = await orchestrator.start(s, content, clientMessageId, attachments, {
         overrideLimit,
+        ...((budget ?? defaultExecutionBudget) ? { budget: budget ?? defaultExecutionBudget } : {}),
         ...(forceManualApproval(req, store) ? { manualApproval: true } : {}),
       });
       res.status(202).json(result);
@@ -336,7 +337,7 @@ export function sessionsRoutes({ store, orchestrator, providerList }: BackendCon
     // a repeated request finds its run even though the edited message no longer exists.
     const parsed = parseBody(EditMessageSchema, req.body, vmsg('validation.content', { max: 32000 }), req.locale);
     if (!parsed.ok) return error(res, 400, parsed.message);
-    const { content, clientMessageId, attachmentIds, overrideLimit } = parsed.data;
+    const { content, clientMessageId, attachmentIds, overrideLimit, budget } = parsed.data;
     const attachments = attachmentIds ? ownedAttachments(s.id, attachmentIds) : undefined;
     if (attachmentIds && !attachments) return error(res, 400, MISSING_ATTACHMENT);
     try {
@@ -348,6 +349,7 @@ export function sessionsRoutes({ store, orchestrator, providerList }: BackendCon
         clientMessageId,
         overrideLimit,
         forceManualApproval(req, store),
+        budget ?? defaultExecutionBudget,
       );
       res.status(202).json(result);
     } catch (e) {
@@ -427,6 +429,7 @@ export function sessionsRoutes({ store, orchestrator, providerList }: BackendCon
         attachments.map(attachmentMeta),
         parsed.data.overrideLimit === true,
         forceManualApproval(req, store),
+        parsed.data.budget,
       );
       res.status(result.started ? 202 : 201).json({ ...result, queue: orchestrator.queue(id(req)) });
     }),
@@ -476,6 +479,7 @@ export function sessionsRoutes({ store, orchestrator, providerList }: BackendCon
         itemId ? { itemId } : { content: content!, clientId, attachments: attachments.map(attachmentMeta) },
         overrideLimit === true,
         forceManualApproval(req, store),
+        parsed.data.budget,
       );
       res.status(202).json({ ...result, queue: orchestrator.queue(id(req)) });
     }),

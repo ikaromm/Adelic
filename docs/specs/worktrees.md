@@ -11,8 +11,8 @@
 - O painel mostra o branch, "N arquivos alterados em relação a <base>" (commits do branch e alterações não commitadas, sem os ignorados) e as ações:
   - **Ver alterações**: lista de arquivos com o diff de cada um (até 200 KB).
   - **Aplicar no projeto** (confirmação): faz commit do que está pendente na cópia com a mensagem `Adelic: <título>` (identidade Adelic só se o repositório não tiver `user.name`/`user.email`) e, na pasta principal, roda `git merge --no-ff <branch>`.
-  - **Descartar worktree** (confirmação): `git worktree remove --force` e apaga o branch só se ele não tiver commits fora do projeto ou se o usuário marcar "Apagar o branch também".
-- Apagar a conversa remove a cópia; o branch fica, a menos que já esteja no projeto. Ao iniciar, registros cuja pasta sumiu são removidos e `git worktree prune` limpa o repositório.
+  - **Descartar worktree** (confirmação): `git worktree remove --force` e apaga o branch só se ele não tiver commits fora do projeto ou se o usuário marcar "Apagar o branch também". Se o usuário escolher manter o branch, a conversa volta imediatamente ao projeto e pode criar outra cópia sem apagar o branch retido.
+- Apagar a conversa remove a cópia; o branch fica, a menos que já esteja no projeto. Ao iniciar, registros ativos cuja pasta sumiu são removidos; um registro de limpeza pendente após remoção da pasta continua persistido (não é um `cwd` ativo) até que branch/prova próprios possam ser tratados. `git worktree prune` limpa metadados do checkout.
 - Com a cópia ligada, a conversa não muda de projeto (409); descarte antes.
 
 ## Garantias
@@ -23,6 +23,7 @@
 - Recusado (409) enquanto houver execução, plano ou outra operação da cópia na conversa, ou execução, desfazer ou outro "Aplicar" na pasta principal; novas execuções ali recebem 409 enquanto o merge roda.
 - Todo comando usa o git endurecido de `server/checkpoints.ts` (`execFile` sem shell, timeout, `GIT_TERMINAL_PROMPT=0`, variáveis `GIT_*` herdadas descartadas). Além disso: hooks de todos os eventos desligados (`core.hooksPath=/dev/null` e `hook.<evento>.enabled=false`), filtros clean/smudge/process e drivers de merge do repositório anulados, `--no-verify`, sem autostash. O agente pode escrever na cópia, e o Adelic roda o git fora do sandbox.
 - Os comandos na cópia usam o `GIT_DIR` encontrado a partir do repositório principal, nunca o arquivo `.git` da cópia (que o agente pode reescrever). A remoção só apaga diretamente pastas dentro de `<dados>/worktrees`.
+- Toda worktree criada pelo Adelic (sessão e executor) recebe, no `AdminDir` Git criado, um marcador de continuidade com nonce aleatório vinculado à sua ref CAS. O registro só confirma propriedade quando criação e gravação do marcador terminaram. Para inspecionar ou remover um ocupante atual, o Adelic exige o marcador no `AdminDir` que o próprio Git registra para aquele caminho, além da branch/ref e do registro de checkout. Recriar o worktree na mesma branch e caminho gera um novo `AdminDir` sem o marcador antigo; coincidência de caminho, branch, commit, `AdminDir` ou histórico não basta. Ausência de marcador/prova (inclusive em registros legados) é incerteza, nunca autorização, e o conteúdo e recursos permanecem preservados para inspeção/recuperação. O descarte captura o OID autorizado antes de remover a pasta; uma releitura posterior apenas permite CAS se a ref continuar exatamente nessa versão. Retry pode limpar recursos próprios ainda presentes segundo inventário e pins persistidos, inclusive uma proofref própria remanescente após pasta e branch terem sido removidos. Checkouts alheios e operações Git em andamento continuam protegidos.
 
 ## API
 
@@ -43,3 +44,4 @@
 - Arquivos com drivers de merge próprios conflitam em vez de rodar o driver; o merge é desfeito e o usuário aplica o branch à mão.
 - Dentro do sandbox, o agente edita os arquivos da cópia, mas comandos git que gravam (`add`, `commit`, `branch`) falham: o índice, os objetos e as refs da cópia ficam no `.git` do projeto, fora da pasta gravável. O commit é feito pelo Adelic no **Aplicar no projeto**.
 - Branches da cópia (`adelic/…`) ficam no repositório até serem apagados pelo descarte ou pelo usuário.
+- O marcador de continuidade protege contra substituição/recriação acidental ou concorrente que não conhece o nonce da execução. Não é uma fronteira de isolamento entre atores no mesmo usuário: quem puder copiar o nonce ou editar metadados do `AdminDir`, refs, armazenamento do repositório ou base de dados do Adelic pode contornar essa proteção. O Adelic não tenta inferir origem de candidatos antigos sem marcador; nesses casos, preserva para recuperação manual. A remoção da branch continua sujeita a verificação de uso por checkouts/rebase/bisect e compare-and-delete do OID.

@@ -1,12 +1,11 @@
 import type { Express } from 'express';
-import { spawnSync } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
-import { join } from 'node:path';
-import type { DelegatedTask } from '../../shared/contracts.js';
+import type { DelegatedTask, SessionWorktree } from '../../shared/contracts.js';
+import { createExecutorWorktree } from '../../server/worktrees.js';
 import type { Store } from '../../server/store.js';
 
 export function installRecoveryFixture(app: Express, store: Store, dataDir: string) {
-  app.post('/e2e/task-recovery/seed', (req, res) => {
+  app.post('/e2e/task-recovery/seed', async (req, res) => {
     const project = store.getProject(String(req.body?.projectId || ''));
     const session = store.getSession(String(req.body?.sessionId || ''));
     if (!project || !session || session.projectId !== project.id)
@@ -15,23 +14,44 @@ export function installRecoveryFixture(app: Express, store: Store, dataDir: stri
     const runId = store.listRuns(session.id).at(-1)?.id;
     if (!runId) return res.status(409).json({ error: 'execute uma conversa real antes de semear a fixture' });
     const now = new Date().toISOString();
-    const base = spawnSync('git', ['-C', project.path, 'rev-parse', 'HEAD'], { encoding: 'utf8' });
-    if (base.status !== 0) return res.status(400).json({ error: 'projeto precisa ser um repositório Git com commit' });
-    const worktreePath = join(dataDir, 'recovery-worktrees', suffix);
-    const branch = `adelic/e2e-recovery-${suffix}`;
-    const added = spawnSync('git', ['-C', project.path, 'worktree', 'add', '-b', branch, worktreePath, 'HEAD'], {
-      encoding: 'utf8',
-    });
-    if (added.status !== 0) return res.status(500).json({ error: added.stderr });
-    writeFileSync(join(worktreePath, 'recovery.txt'), 'alteração preservada antes da integração\n');
-    const noChangesWorktreePath = join(dataDir, 'recovery-worktrees', `${suffix}-no-changes`);
-    const noChangesBranch = `adelic/e2e-no-changes-${suffix}`;
-    const noChangesAdded = spawnSync(
-      'git',
-      ['-C', project.path, 'worktree', 'add', '-b', noChangesBranch, noChangesWorktreePath, 'HEAD'],
-      { encoding: 'utf8' },
+    const siblingId = `e2e-delivered-${suffix}`;
+    const pendingId = `e2e-pending-${suffix}`;
+    const noChangesId = `e2e-no-changes-${suffix}`;
+    const interruptedId = `e2e-interrupted-${suffix}`;
+    const legacyId = `e2e-legacy-${suffix}`;
+    // Use the same producer as real executor worktrees so every known recovery record carries
+    // the snapshot tree, branch proof and creation-bound marker required by the current contract.
+    const noChangesWorktree = await createExecutorWorktree(
+      project,
+      { id: noChangesId, title: 'Tarefa sem alterações' },
+      dataDir,
     );
-    if (noChangesAdded.status !== 0) return res.status(500).json({ error: noChangesAdded.stderr });
+    const interruptedWorktree = await createExecutorWorktree(
+      project,
+      { id: interruptedId, title: 'Conclusão antes da integração' },
+      dataDir,
+    );
+    const legacyWorktree = await createExecutorWorktree(
+      project,
+      { id: legacyId, title: 'Recuperação legada desconhecida' },
+      dataDir,
+    );
+    writeFileSync(`${interruptedWorktree.path}/recovery.txt`, 'alteração preservada antes da integração\\n');
+    // These are explicitly synthetic terminal task states: the provider is not invoked here.
+    // Git creation/snapshot/ownership are real, while the task execution facts model the E2E
+    // terminal states that recovery is designed to reload and reconcile.
+    const syntheticCompletedWorktree = (worktree: SessionWorktree): SessionWorktree => ({
+      ...worktree,
+      ownershipVerified: true,
+      executionStarted: true,
+      recoveryEvidence: {
+        intentRecorded: true,
+        creation: 'confirmed',
+        ownership: 'confirmed',
+        preparation: 'complete',
+        taskExecution: 'started',
+      },
+    });
     const common = {
       projectId: project.id,
       sessionId: session.id,
@@ -44,10 +64,6 @@ export function installRecoveryFixture(app: Express, store: Store, dataDir: stri
       createdAt: now,
       completedAt: now,
     };
-    const siblingId = `e2e-delivered-${suffix}`;
-    const pendingId = `e2e-pending-${suffix}`;
-    const noChangesId = `e2e-no-changes-${suffix}`;
-    const interruptedId = `e2e-interrupted-${suffix}`;
     const tasks: DelegatedTask[] = [
       {
         ...common,
@@ -96,12 +112,7 @@ export function installRecoveryFixture(app: Express, store: Store, dataDir: stri
         instructions: 'A implementação não alterou arquivos.',
         status: 'completed',
         output: 'Concluída sem mudanças.',
-        recoveryWorktree: {
-          path: noChangesWorktreePath,
-          branch: noChangesBranch,
-          base: base.stdout.trim(),
-          createdAt: now,
-        },
+        recoveryWorktree: syntheticCompletedWorktree(noChangesWorktree),
         delivery: {
           status: 'not_implemented',
           reason: 'O processo terminou sem alterações; nenhuma entrega foi aplicada.',
@@ -118,7 +129,7 @@ export function installRecoveryFixture(app: Express, store: Store, dataDir: stri
         instructions: 'Concluída em worktree; integração ainda pendente.',
         status: 'completed',
         output: 'Processo concluído; integração interrompida.',
-        recoveryWorktree: { path: worktreePath, branch, base: base.stdout.trim(), createdAt: now },
+        recoveryWorktree: syntheticCompletedWorktree(interruptedWorktree),
         delivery: {
           status: 'partial',
           reason: 'Processo concluído; alterações existem somente no checkout isolado.',
@@ -127,8 +138,34 @@ export function installRecoveryFixture(app: Express, store: Store, dataDir: stri
           recordedAt: now,
         },
       },
+      {
+        ...common,
+        id: legacyId,
+        agentId: legacyId,
+        title: 'Recuperação legada desconhecida',
+        instructions: 'Registro legado sem prova de continuidade.',
+        status: 'completed',
+        output: 'A continuidade não pode ser comprovada.',
+        // Emulate a pre-contract persisted record: its real checkout exists, but the stored
+        // metadata intentionally omits the proof. It must remain inspect/apply/discard blocked.
+        recoveryWorktree: {
+          path: legacyWorktree.path,
+          branch: legacyWorktree.branch,
+          base: legacyWorktree.base,
+          createdAt: legacyWorktree.createdAt,
+        },
+        delivery: {
+          status: 'unverified',
+          reason: 'Registro legado sem evidência suficiente.',
+          evidence: ['artifact:unknown'],
+          recovery: { action: 'inspect', reason: 'Inspecionar sem alterar recursos desconhecidos.' },
+          recordedAt: now,
+        },
+      },
     ];
     tasks.forEach((task) => store.putTask(task));
-    res.status(201).json({ runId, siblingId, pendingId, noChangesId, interruptedId, projectPath: project.path });
+    res
+      .status(201)
+      .json({ runId, siblingId, pendingId, noChangesId, interruptedId, legacyId, projectPath: project.path });
   });
 }

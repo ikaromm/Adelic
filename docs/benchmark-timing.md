@@ -1,0 +1,9 @@
+# Benchmark harness timing semantics
+
+The opt-in regression journey gives **each harness its own 120,000 ms active-work budget**, shared by its repair and follow-up turns. Adelic and native therefore keep separate clocks even though the runner interleaves their turns (repair in selected order, follow-up in reverse order). Each still has a 60-second per-turn work ceiling; the journey budget cannot renew it.
+
+A harness clock counts only that harness's active turn window: submission/start, model execution (including internal checks, review, and finalization performed by that harness), polling, and cleanup until the run/process is terminal. Setup is excluded: workspace and fixture preparation plus Adelic project/session creation are measured separately as `setupOverheadMs` per harness in results metadata and the first turn result (the legacy `setupWallTimeMs` result field is retained). Setup does not reduce the first turn's 120,000 ms budget.
+
+The independent clocks do not charge fixture grading, idle time between that harness's active windows, or another harness's execution/cleanup. Fixture checks have their own 30-second timeout and are outside model-work budgets. `journeyExternalWaitMs` reports wall time between active windows, including grading, idle, and other-harness work; it is diagnostic and does not consume the budget. Preflight and report generation are also outside both clocks.
+
+The server receives the current remaining journey budget for Adelic turns, while native process timeout is bounded by both the per-turn ceiling and remaining time minus finalization reserve. A failed/incomplete turn gates its dependent follow-up independently of time remaining; `budget_gate` means the same harness has less than the safe submission window left. These are time ceilings, not token, cost, or quality guarantees. The opt-in mini-project is not an official score; no model comparison is approved merely by producing a report.

@@ -25,6 +25,7 @@ import {
   checkpointBefore,
   checkpointDiff,
   classifyGitRepo,
+  git,
   restoreCheckpoint,
 } from '../server/checkpoints.js';
 
@@ -305,5 +306,174 @@ describe('checkpoints on a real git repository', () => {
     symlinkSync(outside, join(dir, 'src'));
     await expect(restoreCheckpoint('run-1', after)).rejects.toMatchObject({ status: 409, conflicts: ['src/a.ts'] });
     expect(readFileSync(join(outside, 'a.ts'), 'utf8')).toBe('b\n');
+  });
+
+  it('awaits Git descendants with ignored stdio after the parent exits', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'adelic-git-process-tree-'));
+    dirs.push(root);
+    const bin = join(root, 'bin');
+    mkdirSync(bin);
+    const marker = join(root, 'late-write');
+    const fakeGit = join(bin, 'git');
+    writeFileSync(
+      fakeGit,
+      '#!/usr/bin/env node\nconst { spawn } = require("node:child_process");\nconst child = spawn(process.execPath, ["-e", "setTimeout(() => require(\\"node:fs\\").writeFileSync(process.env.GIT_TREE_MARKER, \\"escaped\\"), 400)"], { stdio: "ignore" });\nchild.unref();\n',
+    );
+    chmodSync(fakeGit, 0o755);
+
+    await git(root, ['status'], {
+      timeoutMs: 3000,
+      env: { PATH: `${bin}:${process.env.PATH ?? ''}`, GIT_TREE_MARKER: marker },
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  it('contains detached Git descendants outside the process group after the parent exits', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'adelic-git-detached-tree-'));
+    dirs.push(root);
+    const bin = join(root, 'bin');
+    mkdirSync(bin);
+    const marker = join(root, 'late-write');
+    const fakeGit = join(bin, 'git');
+    writeFileSync(
+      fakeGit,
+      `#!/usr/bin/env node
+const { spawn } = require('node:child_process');
+const code = 'setTimeout(() => require("node:fs").writeFileSync(process.env.GIT_TREE_MARKER, "escaped"), 400)';
+const child = spawn(process.execPath, ['-e', code], { detached: true, stdio: 'ignore' });
+child.unref();
+`,
+    );
+    chmodSync(fakeGit, 0o755);
+
+    await git(root, ['status'], {
+      timeoutMs: 3000,
+      env: { PATH: `${bin}:${process.env.PATH ?? ''}`, GIT_TREE_MARKER: marker },
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  it('escalates timed-out Git process groups and waits for descendants ignoring SIGTERM', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'adelic-git-timeout-tree-'));
+    dirs.push(root);
+    const bin = join(root, 'bin');
+    mkdirSync(bin);
+    const marker = join(root, 'late-write');
+    const fakeGit = join(bin, 'git');
+    writeFileSync(
+      fakeGit,
+      `#!/usr/bin/env node
+const { spawn } = require('node:child_process');
+process.on('SIGTERM', () => {});
+const child = spawn(process.execPath, ['-e', "process.on('SIGTERM',()=>{});setTimeout(()=>require('fs').writeFileSync(process.env.GIT_TREE_MARKER,'escaped'),400)"], { detached: true, stdio: 'ignore' });
+child.unref();
+setInterval(() => {}, 1000);
+`,
+    );
+    chmodSync(fakeGit, 0o755);
+
+    await expect(
+      git(root, ['status'], {
+        timeoutMs: 100,
+        env: { PATH: `${bin}:${process.env.PATH ?? ''}`, GIT_TREE_MARKER: marker },
+      }),
+    ).rejects.toMatchObject({ code: 'ETIMEDOUT' });
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  it('bounds the initial checkpoint through a slow update-ref writer', async () => {
+    const dir = makeRepo();
+    const bin = join(dir, 'slow-git-bin');
+    mkdirSync(bin);
+    const wrapper = join(bin, 'git');
+    const updateRefStarted = join(dir, 'update-ref-started');
+    writeFileSync(
+      wrapper,
+      `#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = update-ref ]; then
+    echo started > '${updateRefStarted}'
+    sleep 1.5
+    break
+  fi
+done
+exec /usr/bin/git "$@"
+`,
+    );
+    chmodSync(wrapper, 0o755);
+    const originalPath = process.env.PATH;
+    process.env.PATH = `${bin}:${originalPath ?? ''}`;
+    const started = Date.now();
+    let result;
+    try {
+      result = await checkpointBefore(dir, 'slow-ref', {
+        deadlineAt: new Date(started + 650).toISOString(),
+        reserveMs: 150,
+        signal: new AbortController().signal,
+      });
+    } finally {
+      process.env.PATH = originalPath;
+    }
+    expect(result).toMatchObject({ available: false, captureState: 'failed' });
+    expect(Date.now() - started).toBeLessThan(1300);
+    expect(existsSync(updateRefStarted)).toBe(true);
+    expect(existsSync(join(dir, '.git', 'refs', 'adelic', 'checkpoints', 'slow-ref', 'before'))).toBe(false);
+  });
+
+  it('preserves cancellation when it precedes an already-expired deadline', async () => {
+    const dir = makeRepo();
+    const controller = new AbortController();
+    controller.abort(new Error('cancelled by user'));
+    const result = await checkpointBefore(dir, 'cancelled-before-start', {
+      deadlineAt: new Date(Date.now() - 1000).toISOString(),
+      signal: controller.signal,
+    });
+    expect(result).toMatchObject({ available: false, captureState: 'failed' });
+    expect(result.reason).toContain('cancelled by user');
+  });
+
+  it('keeps cancellation as the first cause when it interrupts a Git write before deadline', async () => {
+    const dir = makeRepo();
+    const bin = join(dir, 'cancel-git-bin');
+    mkdirSync(bin);
+    const wrapper = join(bin, 'git');
+    const updateRefStarted = join(dir, 'cancel-update-ref-started');
+    writeFileSync(
+      wrapper,
+      `#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = update-ref ]; then
+    echo started > '${updateRefStarted}'
+    sleep 1.5
+    break
+  fi
+done
+exec /usr/bin/git "$@"
+`,
+    );
+    chmodSync(wrapper, 0o755);
+    const controller = new AbortController();
+    const originalPath = process.env.PATH;
+    process.env.PATH = `${bin}:${originalPath ?? ''}`;
+    const started = Date.now();
+    const abortTimer = setTimeout(() => controller.abort(new Error('cancelled by user')), 350);
+    let result;
+    try {
+      result = await checkpointBefore(dir, 'cancelled-during-ref', {
+        deadlineAt: new Date(started + 2500).toISOString(),
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(abortTimer);
+      process.env.PATH = originalPath;
+    }
+    expect(existsSync(updateRefStarted)).toBe(true);
+    expect(result).toMatchObject({ available: false, captureState: 'failed' });
+    expect(result.reason).toContain('cancelled by user');
   });
 });

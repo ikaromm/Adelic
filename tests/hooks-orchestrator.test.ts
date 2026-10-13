@@ -349,17 +349,25 @@ describe('automatic fix', () => {
       autoFix: true,
     });
     const s = session();
-    const { runId } = await orchestrator.start(s, 'altere');
+    const { runId } = await orchestrator.start(s, 'altere', undefined, [], {
+      budget: { totalMs: 20_000, finalizationReserveMs: 2_000 },
+    });
     await finished(runId);
     await until(() => store.listRuns(s.id).length === 2);
     const fix = store.listRuns(s.id).find((r) => r.id !== runId)!;
     expect(fix.hookFix).toEqual({ sourceRunId: runId });
+    const sourceBudget = store.getRun(runId)?.budget;
+    expect(sourceBudget).toBeDefined();
+    expect(fix.budget).toEqual(sourceBudget);
     await finished(fix.id);
     // The fix run changed files and its checks failed again: still no third run.
     await until(() => calls === 2);
     await new Promise((r) => setTimeout(r, 300));
     expect(store.listRuns(s.id)).toHaveLength(2);
     const fixInput = inputs.find((i) => i.runId === fix.id)!;
+    const sourceInput = inputs.find((i) => i.runId === runId)!;
+    expect(fixInput.budget?.deadlineAt).toBe(sourceInput.budget?.deadlineAt);
+    expect(fixInput.budget?.remainingMs).toBeLessThan(sourceInput.budget?.remainingMs ?? Infinity);
     expect(fixInput.prompt).toContain('ERRO-FINAL');
     expect(fixInput.prompt).toContain('dados não confiáveis');
     expect(fixInput.prompt).not.toContain('x'.repeat(8193));

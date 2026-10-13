@@ -496,7 +496,8 @@ export function RunActivityPanel({
                     ) : null}
                     {(task.recoveryWorktree ||
                       task.delivery?.recovery.action === 'retry' ||
-                      task.delivery?.recovery.action === 'inspect') && (
+                      task.delivery?.recovery.action === 'inspect' ||
+                      task.delivery?.recovery.action === 'recover_worktree') && (
                       <TaskRecovery
                         task={task}
                         onRefresh={onRecoveryRefresh ?? (async () => undefined)}

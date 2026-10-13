@@ -118,6 +118,8 @@ export class ClaudeProvider {
       let resultError: string | undefined;
       let isError = false;
       let settled = false;
+      let abortObserved = false;
+      let termination: Promise<void> | undefined;
       const finish = (error?: Error, stopReason: 'completed' | 'cancelled' = 'completed') => {
         if (settled) return;
         settled = true;
@@ -129,7 +131,9 @@ export class ClaudeProvider {
         else resolve({ text, stopReason });
       };
       const onAbort = () => {
-        void terminateChildProcess(child).then(() => finish(undefined, 'cancelled'));
+        abortObserved = true;
+        termination ??= terminateChildProcess(child);
+        void termination.then(() => finish(undefined, 'cancelled'));
       };
       child.stdout.setEncoding('utf8').on('data', (chunk: string) => {
         buffer += chunk;
@@ -175,12 +179,17 @@ export class ClaudeProvider {
       child.stderr.on('data', () => {
         /* Never expose raw provider stderr, which may contain credentials. */
       });
-      child.on('error', (error) => finish(new Error(errorMessage(error))));
+      child.on('error', (error) => {
+        if (abortObserved || signal.aborted) onAbort();
+        else finish(new Error(errorMessage(error)));
+      });
       child.on('close', (code) => {
         exitCode = code;
-        finish();
+        if (abortObserved || signal.aborted) onAbort();
+        else finish();
       });
       signal.addEventListener('abort', onAbort, { once: true });
+      if (signal.aborted) onAbort();
       child.stdin.end(boundedPrompt(input));
     });
   }

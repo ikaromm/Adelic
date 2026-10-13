@@ -290,8 +290,21 @@ function setup(
     for (let turns = 0; turns < 10_000 && performance.now() < deadline; turns++)
       await new Promise<void>((resolve) => setImmediate(resolve));
   };
+  const waitForProviderCalls = async (count: number) => {
+    // Provider dispatch follows asynchronous run preparation. Wait for the observable boundary,
+    // not an arbitrary short flush window, while keeping fake scheduler time frozen.
+    const deadline = performance.now() + 5_000;
+    while (provider.inputs.length < count && performance.now() < deadline)
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(provider.inputs.length).toBeGreaterThanOrEqual(count);
+  };
   const runEnded = async () => {
-    for (let i = 0; i < 50 && backend.orchestrator.isActive(get().conversationId ?? ''); i++) await flush();
+    const deadline = performance.now() + 5_000;
+    while (backend.orchestrator.isActive(get().conversationId ?? '') && performance.now() < deadline) {
+      await flush();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    expect(backend.orchestrator.isActive(get().conversationId ?? '')).toBe(false);
   };
   const get = (id = 'a1') => store.getAutomation(id)!;
   return {
@@ -299,6 +312,7 @@ function setup(
     provider,
     ...backend,
     flush,
+    waitForProviderCalls,
     runEnded,
     get,
     close: async () => {
@@ -320,6 +334,7 @@ describe('scheduler', () => {
       expect(t.provider.inputs).toHaveLength(0);
       await vi.advanceTimersByTimeAsync(1);
       await t.flush();
+      await t.waitForProviderCalls(1);
       expect(t.provider.inputs).toHaveLength(1);
       const first = t.get();
       expect(first.lastResult).toMatchObject({ status: 'running', trigger: 'schedule' });
@@ -329,13 +344,14 @@ describe('scheduler', () => {
       const user = t.store.listMessages(session.id).find((m) => m.role === 'user')!;
       expect(user).toMatchObject({ content: 'revise o projeto', automationId: 'a1' });
 
+      await t.waitForProviderCalls(1);
       t.provider.finish();
       await t.runEnded();
-      await t.flush();
       expect(t.get().lastResult?.status).toBe('completed');
 
       await vi.advanceTimersByTimeAsync(24 * HOUR);
       await t.flush();
+      await t.waitForProviderCalls(2);
       expect(t.provider.inputs).toHaveLength(2);
       expect(t.get().conversationId).toBe(session.id);
       expect(t.store.listSessions().filter((s) => s.title === '⏱ Revisão')).toHaveLength(1);
@@ -345,6 +361,7 @@ describe('scheduler', () => {
           .filter((m) => m.role === 'user')
           .map((m) => m.automationId),
       ).toEqual(['a1', 'a1']);
+      await t.waitForProviderCalls(2);
       t.provider.finish();
       await t.runEnded();
     } finally {
@@ -402,6 +419,7 @@ describe('scheduler', () => {
     try {
       await vi.advanceTimersByTimeAsync(HOUR);
       await t.flush();
+      await t.waitForProviderCalls(1);
       expect(t.provider.inputs).toHaveLength(1);
       const runId = t.get().lastResult!.runId;
       await vi.advanceTimersByTimeAsync(HOUR);
@@ -412,13 +430,16 @@ describe('scheduler', () => {
       // "Executar agora" follows the same rule.
       expect(await t.automations.fire('a1', 'manual')).toMatchObject({ ok: false, status: 409 });
       // Concurrent manual starts: only one goes through.
+      await t.waitForProviderCalls(1);
       t.provider.finish();
       await t.runEnded();
       const [a, b] = await Promise.all([t.automations.fire('a1', 'manual'), t.automations.fire('a1', 'manual')]);
       expect([a.ok, b.ok].filter(Boolean)).toHaveLength(1);
       await t.flush();
+      await t.waitForProviderCalls(2);
       expect(t.provider.openTurns).toBe(1);
       expect(t.get().lastResult?.runId).not.toBe(runId);
+      await t.waitForProviderCalls(2);
       t.provider.finish();
       await t.runEnded();
     } finally {
@@ -437,6 +458,7 @@ describe('scheduler', () => {
     });
     try {
       await t.flush();
+      await t.waitForProviderCalls(1);
       expect(t.provider.inputs).toHaveLength(1);
       expect(t.get('a1').lastResult).toMatchObject({ trigger: 'catch-up' });
       expect(t.get('a2').lastResult).toBeUndefined();
@@ -489,6 +511,7 @@ describe('scheduler', () => {
     });
     await vi.advanceTimersByTimeAsync(HOUR);
     await first.flush();
+    await first.waitForProviderCalls(1);
     const conversation = first.get().conversationId!;
     first.automations.stop();
     first.store.close();
@@ -503,6 +526,7 @@ describe('scheduler', () => {
       await second.flush();
       expect(second.get().conversationId).not.toBe(conversation);
       expect(second.store.getSession(second.get().conversationId!)?.title).toBe('⏱ Revisão');
+      await second.waitForProviderCalls(1);
       second.provider.finish();
       await second.runEnded();
     } finally {
@@ -517,6 +541,7 @@ describe('scheduler', () => {
     try {
       expect((await t.automations.fire('a1', 'manual')).ok).toBe(true);
       await t.flush();
+      await t.waitForProviderCalls(1);
       const session = t.store.getSession(t.get().conversationId!)!;
       expect(session).toMatchObject({ model: 'outro', mode: 'deep' });
       expect(t.provider.inputs[0].model).toBe('outro');
@@ -525,6 +550,7 @@ describe('scheduler', () => {
       t.store.putAutomation({ ...t.get(), model: 'm', name: 'Renomeada' });
       expect((await t.automations.fire('a1', 'manual')).ok).toBe(true);
       await t.flush();
+      await t.waitForProviderCalls(2);
       expect(t.store.getSession(session.id)).toMatchObject({ model: 'm', title: '⏱ Renomeada' });
       t.provider.finish();
       await t.runEnded();
@@ -538,6 +564,7 @@ describe('scheduler', () => {
     try {
       expect((await t.automations.fire('a1', 'manual')).ok).toBe(true);
       await t.flush();
+      await t.waitForProviderCalls(1);
       // The built-in /revisar template reached the agent; the message keeps what was written.
       expect(t.provider.inputs[0].prompt).not.toMatch(/^\/revisar/);
       expect(t.provider.inputs[0].prompt).toContain('o módulo X');
@@ -587,6 +614,7 @@ describe('scheduler', () => {
     try {
       expect((await t.automations.fire('a1', 'manual')).ok).toBe(true);
       await t.flush();
+      await t.waitForProviderCalls(1);
       const sessionId = t.get().conversationId!;
       expect(t.store.listApprovals(sessionId)[0].status).toBe('pending');
       expect(t.automations.pendingDenials).toBe(1);
@@ -615,6 +643,7 @@ describe('scheduler', () => {
       // Answered by the user in time: the timer is cleared.
       await t.automations.fire('a1', 'manual');
       await t.flush();
+      await t.waitForProviderCalls(1);
       const first = t.store.listApprovals(t.get().conversationId!)[0];
       await t.orchestrator.decide(first.id, first.sessionId, 'approve');
       expect(t.automations.pendingDenials).toBe(0);
@@ -624,6 +653,7 @@ describe('scheduler', () => {
       // Option off: the run keeps waiting.
       await t.automations.fire('a2', 'manual');
       await t.flush();
+      await t.waitForProviderCalls(2);
       expect(t.automations.pendingDenials).toBe(0);
       await vi.advanceTimersByTimeAsync(2 * HOUR);
       expect(t.store.listApprovals(t.get('a2').conversationId!)[0].status).toBe('pending');
@@ -641,6 +671,7 @@ describe('scheduler', () => {
       });
       await t.orchestrator.start(manual, '[aprovar] manual');
       await t.flush();
+      await t.waitForProviderCalls(3);
       expect(t.automations.pendingDenials).toBe(0);
       await vi.advanceTimersByTimeAsync(2 * HOUR);
       expect(t.store.listApprovals('manual')[0].status).toBe('pending');
@@ -658,6 +689,7 @@ describe('scheduler', () => {
     try {
       await t.automations.fire('a1', 'manual');
       await t.flush();
+      await t.waitForProviderCalls(1);
       expect(t.automations.armed).toBe(true);
       expect(t.automations.pendingDenials).toBe(1);
       t.automations.stop();
@@ -694,6 +726,18 @@ describe('automations API', () => {
     servers.push(server);
     await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
     const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    const waitForProviderCalls = async (count: number) => {
+      const deadline = performance.now() + 5_000;
+      while (provider.inputs.length < count && performance.now() < deadline)
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(provider.inputs).toHaveLength(count);
+    };
+    const waitForRunEnd = async (conversationId: string) => {
+      const deadline = performance.now() + 5_000;
+      while (backend.orchestrator.isActive(conversationId) && performance.now() < deadline)
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(backend.orchestrator.isActive(conversationId)).toBe(false);
+    };
     const call = async (method: string, path: string, body?: unknown) => {
       const res = await fetch(`${base}${path}`, {
         method,
@@ -706,6 +750,8 @@ describe('automations API', () => {
       store,
       provider,
       call,
+      waitForProviderCalls,
+      waitForRunEnd,
       ...backend,
       close: async () => {
         backend.automations.stop();
@@ -822,24 +868,19 @@ describe('automations API', () => {
       expect(ran.status).toBe(202);
       expect(ran.body.runId).toBeTruthy();
       const conversationId = ran.body.automation.conversationId;
-      const idle = async () => {
-        for (let i = 0; i < 100 && t.orchestrator.isActive(conversationId); i++)
-          await new Promise((r) => setTimeout(r, 10));
-        await new Promise((r) => setTimeout(r, 20));
-      };
-      await idle();
+      await t.waitForProviderCalls(1);
       t.provider.finish();
-      await idle();
+      await t.waitForRunEnd(conversationId);
       expect(t.store.getAutomation(a.id)!.lastResult).toMatchObject({ status: 'completed', trigger: 'manual' });
       // Busy: the second occurrence is skipped and recorded as the last result.
       const again = await t.call('POST', `/api/automations/${a.id}/run`, {});
       expect(again.body.automation.conversationId).toBe(conversationId);
+      await t.waitForProviderCalls(2);
       const busy = await t.call('POST', `/api/automations/${a.id}/run`, {});
       expect(busy.status).toBe(409);
       expect(busy.body.automation.lastResult).toMatchObject({ status: 'skipped', detail: AUTOMATION_SKIPPED_ACTIVE });
-      await idle();
       t.provider.finish();
-      await idle();
+      await t.waitForRunEnd(conversationId);
       expect(t.store.getAutomation(a.id)!.lastResult?.status).toBe('skipped');
 
       // Renaming renames its conversation; deleting the automation keeps the conversation.
@@ -870,7 +911,7 @@ describe('migration 10', () => {
     );
     db.exec(`INSERT INTO projects VALUES('p','{}'); INSERT INTO projects VALUES('q','{}');`);
     const result = migrate(db, dir);
-    expect(result.applied).toEqual([9, 10, 11, 12, 13, 14, 15, 16]);
+    expect(result.applied).toEqual([9, 10, 11, 12, 13, 14, 15, 16, 17]);
     db.exec(`PRAGMA foreign_keys=ON;
       INSERT INTO automations VALUES('a','p','{}');
       INSERT INTO automations VALUES('b','q','{}');`);

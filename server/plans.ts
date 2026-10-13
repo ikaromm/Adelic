@@ -111,7 +111,9 @@ export class Plans {
     const task = plan.tasks.find((t) => t.status === 'pending' || t.status === 'failed');
     if (!task) throw httpError(409, 'plans.noPendingTasks');
     return this.deps.start(this.session(plan), taskLabel(plan, task), {
+      continuation: true,
       planTask: { planId: plan.id, taskId: task.id, prompt: buildTaskPrompt(plan, task) },
+      ...(plan.budget ? { budget: plan.budget } : {}),
       ...(overrideLimit ? { overrideLimit } : {}),
       ...(plan.manualApproval ? { manualApproval: true } : {}),
     });
@@ -272,6 +274,7 @@ export class Plans {
       design: parsed.design,
       tasks: mergeTasks([], parsed.tasks),
       markdown: response.trim(),
+      ...(run.budget ? { budget: run.budget } : {}),
       createdAt: now,
       updatedAt: now,
     };

@@ -848,8 +848,12 @@ describe('retry attempt lineage', () => {
     const firstStarted = await orchestrator.retryTask('first-retry');
     expect(store.getRun(firstStarted.runId)?.retryOfTaskId).toBe('first-retry');
 
-    await orchestrator.shutdown();
+    // retryTask reserves/returns the run before its asynchronous execution reaches providers.
+    // Wait for the real call rather than shutting down the just-started run in the same turn.
+    for (let attempt = 0; attempt < 100 && providerCalls === 0; attempt++)
+      await new Promise((resolve) => setTimeout(resolve, 10));
     expect(providerCalls).toBeGreaterThan(0);
+    await orchestrator.shutdown();
     store.close();
   });
 });

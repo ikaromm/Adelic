@@ -552,6 +552,10 @@ export default function App() {
       detail?.events.length,
       pendingApprovalCount,
       stream?.content,
+      // A plan may render after its message/stream event. Re-evaluate stick-to-bottom when
+      // its card arrives or changes so first render fits above the fixed composer, while
+      // useStickToBottom still leaves readers of older messages undisturbed.
+      plans.plans,
     ],
   );
 

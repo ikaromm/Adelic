@@ -725,9 +725,9 @@ describe('migration 8', () => {
     expect(userVersion(db)).toBe(6);
     db.exec(`INSERT INTO sessions VALUES('s',NULL,'{}'); INSERT INTO plans VALUES('p','s','{}');`);
     const result = migrate(db, dir);
-    expect(result).toMatchObject({ from: 6, to: 16, applied: [8, 9, 10, 11, 12, 13, 14, 15, 16] });
+    expect(result).toMatchObject({ from: 6, to: 17, applied: [8, 9, 10, 11, 12, 13, 14, 15, 16, 17] });
     expect(result.backupPath).toBeTruthy();
-    expect(migrations.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
+    expect(migrations.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]);
     expect(db.prepare('SELECT COUNT(*) AS n FROM plans').get()).toEqual({ n: 1 });
     db.exec(`PRAGMA foreign_keys=ON; INSERT INTO compactions VALUES('c','s','{}');`);
     expect(() => db.exec(`INSERT INTO compactions VALUES('x','missing','{}')`)).toThrow();

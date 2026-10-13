@@ -4,7 +4,7 @@ import { observabilityRoutes } from './http/observability.js';
 import { remoteHostsRoutes } from './http/remote-hosts.js';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import { execFileSync } from 'node:child_process';
-import type { ProviderRegistry } from '../shared/contracts.js';
+import type { ExecutionBudget, ProviderRegistry } from '../shared/contracts.js';
 import { memoryIntegration, memoryIntegrationSnapshot } from './memory.js';
 import { Orchestrator } from './orchestrator.js';
 import { Store } from './store.js';
@@ -39,6 +39,30 @@ import { worktreesRoutes } from './http/worktrees.js';
 import { updateRoutes } from './http/update.js';
 import { SelfUpdateService, type SelfUpdater } from './self-update.js';
 
+function configuredExecutionBudget(): Pick<ExecutionBudget, 'totalMs' | 'finalizationReserveMs'> | undefined {
+  const rawTotal = process.env.ADELIC_RUN_BUDGET_MS;
+  const rawReserve = process.env.ADELIC_RUN_FINALIZATION_RESERVE_MS;
+  if (rawTotal === undefined) {
+    if (rawReserve !== undefined) throw new Error('ADELIC_RUN_FINALIZATION_RESERVE_MS requires ADELIC_RUN_BUDGET_MS');
+    return undefined;
+  }
+  const totalMs = Number(rawTotal);
+  const finalizationReserveMs =
+    rawReserve === undefined ? Math.min(600_000, Math.max(1_000, Math.floor(totalMs * 0.15))) : Number(rawReserve);
+  if (
+    !Number.isSafeInteger(totalMs) ||
+    totalMs < 10_000 ||
+    totalMs > 86_400_000 ||
+    !Number.isSafeInteger(finalizationReserveMs) ||
+    finalizationReserveMs < 1_000 ||
+    finalizationReserveMs > 600_000 ||
+    finalizationReserveMs >= totalMs
+  ) {
+    throw new Error('Invalid ADELIC_RUN_BUDGET_MS / ADELIC_RUN_FINALIZATION_RESERVE_MS');
+  }
+  return { totalMs, finalizationReserveMs };
+}
+
 export function createBackend(
   store: Store,
   providers: ProviderRegistry,
@@ -48,9 +72,9 @@ export function createBackend(
   // Test hook for the retry delays (production uses DEFAULT_RETRY).
   retryOverrides?: Partial<RetryPolicy>,
   // Local voice dictation (server/voice.ts); tests inject fake command runners.
-  voice: VoiceService = new VoiceService(),
+  voice?: VoiceService,
   // Integrated command runner; tests may inject one with another sandbox wrapper.
-  terminal: TerminalService = new TerminalService(),
+  terminal?: TerminalService,
   // Test hook for the automations scheduler (production uses the system clock).
   automationClock?: AutomationClock,
   // Test hook for the after-edit check runner (production uses bubblewrap; server/hooks.ts).
@@ -58,8 +82,12 @@ export function createBackend(
   // Remote login and Tailscale Funnel (docs/specs/remote-access.md); tests inject the CLI runner.
   remoteOptions: RemoteOptions = {},
   // "Atualizar Adelic" (server/self-update.ts); the runtime passes one with a restart function.
-  selfUpdater: SelfUpdater = new SelfUpdateService(),
+  selfUpdater?: SelfUpdater,
 ) {
+  const defaultExecutionBudget = configuredExecutionBudget();
+  const voiceService = voice ?? new VoiceService();
+  const terminalService = terminal ?? new TerminalService();
+  const updater = selfUpdater ?? new SelfUpdateService();
   const observations = createObservability(store);
   const app = express();
   app.disable('x-powered-by');
@@ -87,6 +115,7 @@ export function createBackend(
     retryOverrides,
     checkRunner,
     observations,
+    defaultExecutionBudget,
   );
   // Worktree records whose folder is gone (docs/specs/worktrees.md).
   void orchestrator.pruneWorktrees().catch(() => undefined);
@@ -189,7 +218,13 @@ export function createBackend(
   });
   // Scheduled automations run only inside this process; runtime.close() stops the timers.
   const automations = new AutomationService(store, orchestrator, automationClock);
-  const context: BackendContext = { store, orchestrator, providerList, automations };
+  const context: BackendContext = {
+    store,
+    orchestrator,
+    providerList,
+    automations,
+    defaultExecutionBudget,
+  };
   // SSH capabilities are available only from this computer's browser, including indirect actions.
   app.use('/api', (req, res, next) => {
     if (requestKind(req) === 'local') return next();
@@ -222,9 +257,9 @@ export function createBackend(
   app.use(mcpRoutes(context));
   app.use(diagnosticsRoutes(context));
   app.use(observabilityRoutes(context));
-  app.use(updateRoutes(context, selfUpdater));
-  app.use(voiceRoutes(context, voice));
-  app.use(terminalRoutes(context, terminal));
+  app.use(updateRoutes(context, updater));
+  app.use(voiceRoutes(context, voiceService));
+  app.use(terminalRoutes(context, terminalService));
   app.get('/api/health', async (_req, res) => {
     res.json({
       status: 'ok',
@@ -240,7 +275,16 @@ export function createBackend(
     error(res, 400, e instanceof Error ? e : String(e)),
   );
   automations.start();
-  return { app, orchestrator, graphify: graphifyService, terminal, automations, access, funnel, observations };
+  return {
+    app,
+    orchestrator,
+    graphify: graphifyService,
+    terminal: terminalService,
+    automations,
+    access,
+    funnel,
+    observations,
+  };
 }
 
 export interface RemoteOptions {

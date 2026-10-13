@@ -3,7 +3,7 @@
 // configuration the user typed in Adelic (SQLite), never from repository files.
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import type { RunEvent, Sandbox } from '../shared/contracts.js';
+import type { ExecutionBudget, RunEvent, Sandbox } from '../shared/contracts.js';
 import { checkHeadlineKey } from '../shared/event-text.js';
 import {
   CHECK_OUTPUT_MAX,
@@ -198,7 +198,7 @@ export function fixPrompt(failures: CheckResult[]) {
 export interface HookChecksDeps {
   saveEvent(event: RunEvent): void;
   /** Starts the single automatic fix run; a rejection is noted on the checked run. */
-  startFix(sessionId: string, sourceRunId: string, failures: CheckResult[]): Promise<void>;
+  startFix(sessionId: string, sourceRunId: string, failures: CheckResult[], budget?: ExecutionBudget): Promise<void>;
   runner?: typeof runCheck;
   /** How often a running check's output is saved (default 2 s). */
   progressMs?: number;
@@ -233,7 +233,7 @@ export class HookChecks {
     projectId: string,
     cwd: string,
     sandbox: Sandbox,
-    run: { id: string; sessionId: string },
+    run: { id: string; sessionId: string; budget?: ExecutionBudget },
     checks: AfterEditCheck[],
     fix: boolean,
   ): Promise<void> {
@@ -254,7 +254,7 @@ export class HookChecks {
     return done.then(async () => {
       if (!fix || !failures.length || controller.signal.aborted) return;
       try {
-        await this.deps.startFix(run.sessionId, run.id, failures);
+        await this.deps.startFix(run.sessionId, run.id, failures, run.budget);
       } catch (error) {
         this.note(run, `Correção automática não iniciada: ${error instanceof Error ? error.message : String(error)}`);
       }

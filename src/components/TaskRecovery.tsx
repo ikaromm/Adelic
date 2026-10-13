@@ -35,7 +35,33 @@ export function TaskRecovery({
   // Inspection is read-only and remains available alongside retry for any persisted recovery state.
   const canInspect = Boolean((recovery && recovery.action !== 'none') || worktree || task.integration);
 
-  const canApply = Boolean(worktree && task.integration?.status !== 'applied');
+  const evidence = worktree?.recoveryEvidence;
+  const ownershipConfirmed = Boolean(worktree?.ownershipVerified === true && evidence?.ownership !== 'unknown');
+  const unverifiedWorktree = Boolean(worktree && !ownershipConfirmed);
+  const preparationIncomplete = Boolean(
+    worktree && (worktree.preparationFailed === true || evidence?.preparation === 'incomplete'),
+  );
+  const taskNotStarted = Boolean(worktree && worktree.executionStarted === false);
+  const taskExecutionUnconfirmed = Boolean(worktree && ownershipConfirmed && worktree.executionStarted === undefined);
+  const creationEvidence = evidence?.creation ?? (worktree?.ownershipVerified === true ? 'confirmed' : 'unknown');
+  const ownershipEvidence = ownershipConfirmed ? (evidence?.ownership ?? 'confirmed') : 'unknown';
+  const preparationEvidence =
+    evidence?.preparation ?? (worktree?.preparationFailed === true ? 'incomplete' : 'unknown');
+  const executionEvidence =
+    evidence?.taskExecution ??
+    (worktree?.executionStarted === true
+      ? 'started'
+      : worktree?.executionStarted === false
+        ? 'not_started'
+        : 'unknown');
+  const canApply = Boolean(
+    worktree &&
+    ownershipConfirmed &&
+    !preparationIncomplete &&
+    worktree.executionStarted === true &&
+    (!evidence || (evidence.preparation === 'complete' && evidence.taskExecution === 'started')) &&
+    task.integration?.status !== 'applied',
+  );
   if (!worktree && !canRetry && !canInspect && !task.integration) return null;
 
   const apply = async () => {
@@ -137,8 +163,53 @@ export function TaskRecovery({
           </>
         )}
       </dl>
+      {integration && (integration.cleanupResources || integration.cleanup === 'pending') && (
+        <small data-testid="task-cleanup-resources">
+          {t('chat.task.cleanupResources', {
+            worktree: integration.cleanupResources?.worktree ?? 'unknown',
+            branch: integration.cleanupResources?.branch ?? 'unknown',
+            proof: integration.cleanupResources?.ownershipProof ?? 'unknown',
+          })}
+        </small>
+      )}
       {integration?.reason && <p>{integration.reason}</p>}
-      {worktree && <small>{t('chat.task.recoveryAvailable', { branch: worktree.branch })}</small>}
+      {worktree && <small>{t('chat.task.recoveryCandidate', { branch: worktree.branch })}</small>}
+      {worktree && (
+        <small data-testid="task-recovery-evidence">
+          {[
+            ...(evidence?.intentRecorded ? [t('chat.task.recoveryEvidenceIntent')] : []),
+            t(`chat.task.recoveryEvidenceCreation.${creationEvidence}`),
+            t(`chat.task.recoveryEvidenceOwnership.${ownershipEvidence}`),
+            t(`chat.task.recoveryEvidencePreparation.${preparationEvidence}`),
+            t(`chat.task.recoveryEvidenceExecution.${executionEvidence}`),
+          ].join(' · ')}
+        </small>
+      )}
+      {worktree && unverifiedWorktree && (
+        <p role="status" data-testid="task-recovery-unverified">
+          {t('chat.task.recoveryUnverified')}
+        </p>
+      )}
+      {worktree && preparationIncomplete && (
+        <p role="status" data-testid="task-recovery-preparation-incomplete">
+          {t('chat.task.recoveryPreparationIncomplete')}
+        </p>
+      )}
+      {worktree && taskNotStarted && (
+        <p role="status" data-testid="task-recovery-not-started">
+          {t('chat.task.recoveryNotStarted')}
+        </p>
+      )}
+      {worktree && taskExecutionUnconfirmed && (
+        <p role="status" data-testid="task-recovery-execution-unconfirmed">
+          {t('chat.task.recoveryExecutionUnconfirmed')}
+        </p>
+      )}
+      {worktree?.recoveryReason && (
+        <small data-testid="task-recovery-reported-reason">
+          {t('chat.task.recoveryReportedReason', { reason: worktree.recoveryReason })}
+        </small>
+      )}
       {recovery?.reason && <p>{recovery.reason}</p>}
       {disabled && <small>{t('chat.task.recoveryBusy')}</small>}
       <div className="retry-actions">
@@ -184,7 +255,7 @@ export function TaskRecovery({
             {t('chat.task.recoveryApply')}
           </button>
         )}
-        {worktree && (
+        {worktree && ownershipConfirmed && (
           <button
             type="button"
             className="ghost-button"

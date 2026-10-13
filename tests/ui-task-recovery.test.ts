@@ -169,6 +169,8 @@ describe('TaskRecovery states and controls', () => {
             branch: 'task-a',
             base: 'abc',
             createdAt: new Date(0).toISOString(),
+            ownershipVerified: true,
+            executionStarted: true,
           },
         }),
         onRefresh: async () => undefined,
@@ -178,6 +180,104 @@ describe('TaskRecovery states and controls', () => {
     expect(html).toContain('data-testid="task-recovery-inspect"');
     expect(html).toContain('data-testid="task-recovery-apply"');
     expect(html).toContain('task-a');
+  });
+
+  it('shows unverified recovery intent but blocks automatic apply and discard controls', () => {
+    const html = renderToStaticMarkup(
+      createElement(TaskRecovery, {
+        task: task({
+          recoveryWorktree: {
+            path: '/private/worktrees/task-a',
+            branch: 'adelic/task-a',
+            base: 'abc',
+            createdAt: new Date(0).toISOString(),
+            ownershipVerified: false,
+            preparationFailed: true,
+            executionStarted: false,
+            recoveryReason: 'Criação parcial; descoberta do admin excedeu o prazo.',
+            recoveryEvidence: {
+              intentRecorded: true,
+              creation: 'unknown',
+              ownership: 'unknown',
+              preparation: 'incomplete',
+              taskExecution: 'not_started',
+            },
+          },
+        }),
+        onRefresh: async () => undefined,
+        onInspect: async () => undefined,
+      }),
+    );
+    expect(html).toContain('task-recovery-unverified');
+    expect(html).toContain('propriedade deste candidato é desconhecida');
+    expect(html).toContain('Aplicar ou descartar está bloqueado');
+    expect(html).toContain('recursos e referência foram preservados');
+    expect(html).toContain('task-recovery-preparation-incomplete');
+    expect(html).toContain('task-recovery-not-started');
+    expect(html).toContain('Detalhe reportado: Criação parcial; descoberta do admin excedeu o prazo.');
+    expect(html).toContain('criação desconhecida');
+    expect(html).toContain('propriedade desconhecida');
+    expect(html).toContain('preparação incompleta');
+    expect(html).toContain('execução não iniciada');
+    expect(html).toContain('data-testid="task-recovery-inspect"');
+    expect(html).toContain('data-testid="task-recovery-retry"');
+    expect(html).not.toContain('data-testid="task-recovery-apply"');
+    expect(html).not.toContain('data-testid="task-recovery-discard"');
+  });
+
+  it('fails closed for legacy recovery records without an ownership proof', () => {
+    const html = renderToStaticMarkup(
+      createElement(TaskRecovery, {
+        task: task({
+          recoveryWorktree: {
+            path: '/private/worktrees/task-a',
+            branch: 'adelic/task-a',
+            base: 'abc',
+            createdAt: new Date(0).toISOString(),
+          },
+        }),
+        onRefresh: async () => undefined,
+        onInspect: async () => undefined,
+      }),
+    );
+    expect(html).toContain('task-recovery-unverified');
+    expect(html).not.toContain('data-testid="task-recovery-apply"');
+    expect(html).not.toContain('data-testid="task-recovery-discard"');
+  });
+
+  it('shows incomplete preparation and permits only explicit discard for owned resources', () => {
+    const html = renderToStaticMarkup(
+      createElement(TaskRecovery, {
+        task: task({
+          recoveryWorktree: {
+            path: '/private/worktrees/task-a',
+            branch: 'adelic/task-a',
+            base: 'abc',
+            createdAt: new Date(0).toISOString(),
+            ownershipVerified: true,
+            preparationFailed: true,
+            executionStarted: false,
+            recoveryReason: 'Baseline não preparado; execução não iniciada.',
+            recoveryEvidence: {
+              intentRecorded: true,
+              creation: 'confirmed',
+              ownership: 'confirmed',
+              preparation: 'incomplete',
+              taskExecution: 'not_started',
+            },
+          },
+        }),
+        onRefresh: async () => undefined,
+        onInspect: async () => undefined,
+      }),
+    );
+    expect(html).toContain('task-recovery-preparation-incomplete');
+    expect(html).toContain('task-recovery-evidence');
+    expect(html).toContain('criação confirmada');
+    expect(html).toContain('execução não iniciada');
+    expect(html).toContain('data-testid="task-recovery-inspect"');
+    expect(html).not.toContain('data-testid="task-recovery-apply"');
+    expect(html).toContain('data-testid="task-recovery-discard"');
   });
 
   it('does not offer a second retry while the persisted task process is queued', () => {
@@ -234,6 +334,8 @@ describe('TaskRecovery states and controls', () => {
             branch: 'task-a',
             base: 'abc',
             createdAt: new Date(0).toISOString(),
+            ownershipVerified: true,
+            executionStarted: true,
           },
         }),
         onRefresh: async () => undefined,

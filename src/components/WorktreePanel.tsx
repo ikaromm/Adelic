@@ -453,7 +453,12 @@ function DiscardDialog({
       working={working}
       onCancel={onCancel}
       actions={
-        <button type="button" className="danger-button" onClick={() => onConfirm(deleteBranch)} disabled={working}>
+        <button
+          type="button"
+          className="danger-button"
+          onClick={() => onConfirm(merged || deleteBranch)}
+          disabled={working}
+        >
           {working ? <LoaderCircle className="spin" size={14} /> : <Trash2 size={14} />}
           {t('worktree.discardDialog.confirm')}
         </button>

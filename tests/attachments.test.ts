@@ -278,6 +278,9 @@ describe('attachment routes', () => {
         'Imagens anexadas pelo usuário (vistas pelo planejador e pelos executores): diagrama.png',
       );
     }
+    expect(reviewer!.prompt).toContain('spec.md');
+    expect(reviewer!.prompt).not.toContain('Contexto de memória selecionado');
+    expect(synthesis!.prompt).toContain('spec.md');
   });
 
   it('fails before starting when the provider does not accept images', async () => {

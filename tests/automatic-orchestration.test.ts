@@ -7,11 +7,12 @@ import {
   readFileSync,
   rmSync,
   symlinkSync,
+  watch,
   writeFileSync,
 } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { Orchestrator } from '../server/orchestrator';
 import { Store } from '../server/store';
 import { createExecutorWorktree, removeWorktree } from '../server/worktrees';
@@ -537,6 +538,30 @@ exec "${realGit}" "$@"
       rmSync(shimDir, { recursive: true, force: true });
     },
   };
+}
+
+function waitForMarker(path: string, timeoutMs: number, diagnostic: string): Promise<void> {
+  if (existsSync(path)) return Promise.resolve();
+  return new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const watcher = watch(dirname(path), (_event, filename) => {
+      if (filename?.toString() === basename(path) && existsSync(path)) finish();
+    });
+    const timeout = setTimeout(
+      () => finish(new Error(`Timed out after ${timeoutMs}ms waiting for ${diagnostic} (marker: ${path})`)),
+      timeoutMs,
+    );
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      watcher.close();
+      if (error) reject(error);
+      else resolve();
+    };
+    // Close the check/watch race if the shim wrote the marker as the watcher was installed.
+    if (existsSync(path)) finish();
+  });
 }
 
 function slowWorktreeAddGit(projectRoot: string, createBeforeDelay = false) {
@@ -1304,70 +1329,75 @@ describe('automatic orchestration', () => {
       test.store.listSessionTasks(test.session.id).find((task) => task.role === 'worker')?.isolationReason,
     ).toBeUndefined();
   });
-  it('retains integration conflicts for retry or explicit discard and records recovery events', async () => {
-    const test = setup({ artifactChange: true, gitProject: true, integrationConflict: true });
-    let terminal!: () => void;
-    const done = new Promise<void>((resolve) => (terminal = resolve));
-    const unsubscribe = test.orchestrator.subscribe((event) => {
-      if (event.type === 'run' && event.run.sessionId === test.session.id && event.run.status !== 'running') terminal();
-    });
-    try {
-      await test.orchestrator.start(test.session, 'Implemente uma melhoria no projeto');
-      await done;
-    } finally {
-      unsubscribe();
-    }
-    const task = test.store.listSessionTasks(test.session.id).find((entry) => entry.role === 'worker')!;
-    expect(task.status).toBe('completed');
-    expect(task.integration).toMatchObject({ status: 'blocked', cleanup: 'pending' });
-    expect(task.recoveryWorktree?.path).toBeTruthy();
-    const recoveryWorktree = task.recoveryWorktree!;
-    expect(task.delivery).toMatchObject({
-      status: 'partial',
-      evidence: expect.arrayContaining(['integration:blocked', 'recovery:workspace-retained']),
-      recovery: { action: 'recover_worktree' },
-    });
-    const synthesis = test.inputs.find((input) => input.prompt.includes('Fatos estruturados de execução'))!;
-    expect(synthesis).toBeDefined();
-    expect(synthesis.prompt).toContain('"role":"worker"');
-    expect(synthesis.prompt).toContain('"status":"completed"');
-    expect(synthesis.prompt).toContain('"status":"partial"');
-    expect(synthesis.prompt).toContain('"action":"recover_worktree"');
-    expect(synthesis.prompt).toContain('"available":true,"retainedWorkspace":true');
-    expect(synthesis.prompt).toContain('integration:blocked');
-    expect(synthesis.prompt).toContain('Integração bloqueada; entrega não integrada');
-    const answer = test.store
-      .listMessages(test.session.id)
-      .find((message) => message.runId === task.runId && message.role === 'assistant');
-    expect(answer?.content).toContain('integração bloqueada');
-    expect(answer?.content).toContain('validação não confirmada');
-    expect(readFileSync(join(test.projectRoot, 'src/implemented.ts'), 'utf8')).toBe('user change\\n');
+  it(
+    'retains integration conflicts for retry or explicit discard and records recovery events',
+    async () => {
+      const test = setup({ artifactChange: true, gitProject: true, integrationConflict: true });
+      let terminal!: () => void;
+      const done = new Promise<void>((resolve) => (terminal = resolve));
+      const unsubscribe = test.orchestrator.subscribe((event) => {
+        if (event.type === 'run' && event.run.sessionId === test.session.id && event.run.status !== 'running')
+          terminal();
+      });
+      try {
+        await test.orchestrator.start(test.session, 'Implemente uma melhoria no projeto');
+        await done;
+      } finally {
+        unsubscribe();
+      }
+      const task = test.store.listSessionTasks(test.session.id).find((entry) => entry.role === 'worker')!;
+      expect(task.status).toBe('completed');
+      expect(task.integration).toMatchObject({ status: 'blocked', cleanup: 'pending' });
+      expect(task.recoveryWorktree?.path).toBeTruthy();
+      const recoveryWorktree = task.recoveryWorktree!;
+      expect(task.delivery).toMatchObject({
+        status: 'partial',
+        evidence: expect.arrayContaining(['integration:blocked', 'recovery:workspace-retained']),
+        recovery: { action: 'recover_worktree' },
+      });
+      const synthesis = test.inputs.find((input) => input.prompt.includes('Fatos estruturados de execução'))!;
+      expect(synthesis).toBeDefined();
+      expect(synthesis.prompt).toContain('"role":"worker"');
+      expect(synthesis.prompt).toContain('"status":"completed"');
+      expect(synthesis.prompt).toContain('"status":"partial"');
+      expect(synthesis.prompt).toContain('"action":"recover_worktree"');
+      expect(synthesis.prompt).toContain('"available":true,"retainedWorkspace":true');
+      expect(synthesis.prompt).toContain('integration:blocked');
+      expect(synthesis.prompt).toContain('Integração bloqueada; entrega não integrada');
+      const answer = test.store
+        .listMessages(test.session.id)
+        .find((message) => message.runId === task.runId && message.role === 'assistant');
+      expect(answer?.content).toContain('integração bloqueada');
+      expect(answer?.content).toContain('validação não confirmada');
+      expect(readFileSync(join(test.projectRoot, 'src/implemented.ts'), 'utf8')).toBe('user change\\n');
 
-    rmSync(join(test.projectRoot, 'src/implemented.ts'));
-    const recovered = await test.orchestrator.recoverTaskWorktree(task.id, 'apply');
-    expect(recovered.applied).toBe(true);
-    expect(readFileSync(join(test.projectRoot, 'src/implemented.ts'), 'utf8')).toContain('implemented');
-    expect(recovered.task.delivery).toMatchObject({ status: 'implemented', recovery: { action: 'inspect' } });
-    expect(recovered.task.integration).toMatchObject({
-      status: 'applied',
-      cleanup: 'complete',
-      cleanupResources: { worktree: 'removed', branch: 'removed', ownershipProof: 'removed' },
-    });
-    expect(recovered.task.recoveryWorktree).toBeUndefined();
-    expect(gitIn(test.projectRoot, 'branch', '--list', recoveryWorktree.branch).trim()).toBe('');
-    expect(existsSync(recoveryWorktree.path)).toBe(false);
-    expect(gitIn(test.projectRoot, 'worktree', 'list', '--porcelain')).not.toContain(recoveryWorktree.path);
-    expect(() =>
-      gitIn(test.projectRoot, 'show-ref', '--verify', '--quiet', recoveryWorktree.ownershipProofRef!),
-    ).toThrow();
-    expect(test.store.getTask(task.id)?.integration).toMatchObject({
-      status: 'applied',
-      cleanup: 'complete',
-      cleanupResources: { worktree: 'removed', branch: 'removed', ownershipProof: 'removed' },
-    });
-    const recoveryEvent = test.store.listEvents(test.session.id).find((event) => event.text.includes('recuperadas'));
-    expect(recoveryEvent).toMatchObject({ taskId: task.id, agentId: task.agentId, phase: 'worker' });
-  });
+      rmSync(join(test.projectRoot, 'src/implemented.ts'));
+      const recovered = await test.orchestrator.recoverTaskWorktree(task.id, 'apply');
+      expect(recovered.applied).toBe(true);
+      expect(readFileSync(join(test.projectRoot, 'src/implemented.ts'), 'utf8')).toContain('implemented');
+      expect(recovered.task.delivery).toMatchObject({ status: 'implemented', recovery: { action: 'inspect' } });
+      expect(recovered.task.integration).toMatchObject({
+        status: 'applied',
+        cleanup: 'complete',
+        cleanupResources: { worktree: 'removed', branch: 'removed', ownershipProof: 'removed' },
+      });
+      expect(recovered.task.recoveryWorktree).toBeUndefined();
+      expect(gitIn(test.projectRoot, 'branch', '--list', recoveryWorktree.branch).trim()).toBe('');
+      expect(existsSync(recoveryWorktree.path)).toBe(false);
+      expect(gitIn(test.projectRoot, 'worktree', 'list', '--porcelain')).not.toContain(recoveryWorktree.path);
+      expect(() =>
+        gitIn(test.projectRoot, 'show-ref', '--verify', '--quiet', recoveryWorktree.ownershipProofRef!),
+      ).toThrow();
+      expect(test.store.getTask(task.id)?.integration).toMatchObject({
+        status: 'applied',
+        cleanup: 'complete',
+        cleanupResources: { worktree: 'removed', branch: 'removed', ownershipProof: 'removed' },
+      });
+      const recoveryEvent = test.store.listEvents(test.session.id).find((event) => event.text.includes('recuperadas'));
+      expect(recoveryEvent).toMatchObject({ taskId: task.id, agentId: task.agentId, phase: 'worker' });
+    },
+    REAL_GIT_WORKFLOW_TIMEOUT_MS,
+  );
 
   it('explicitly discards an owned task checkout and its exclusive branch, then reloads complete cleanup facts', async () => {
     const test = setup({ artifactChange: true, gitProject: true, integrationConflict: true });
@@ -1462,72 +1492,77 @@ describe('automatic orchestration', () => {
     }
   });
 
-  it('reconciles completed physical task cleanup after Store reload', async () => {
-    const test = setup({ artifactChange: true, gitProject: true, retainBranchCheckout: true });
-    let terminal!: () => void;
-    const done = new Promise<void>((resolve) => (terminal = resolve));
-    const unsubscribe = test.orchestrator.subscribe((event) => {
-      if (event.type === 'run' && event.run.sessionId === test.session.id && event.run.status !== 'running') terminal();
-    });
-    try {
-      await test.orchestrator.start(test.session, 'Implemente uma melhoria no projeto');
-      await done;
-    } finally {
-      unsubscribe();
-    }
-    const task = test.store.listSessionTasks(test.session.id).find((entry) => entry.role === 'worker')!;
-    expect(task.integration).toMatchObject({ status: 'applied', cleanup: 'pending' });
-    gitIn(test.projectRoot, 'worktree', 'remove', '--force', test.branchProtectorPath);
-    // Automatic cleanup already removed the original folder while preserving its pinned branch;
-    // create a real executor checkout to reproduce the narrower remove-return interruption.
-    const worktree = await createExecutorWorktree(
-      test.store.getProject(task.projectId!)!,
-      { id: 'interrupted-cleanup-task', title: 'Interrupted cleanup' },
-      test.store.dataDir,
-    );
-    task.recoveryWorktree = { ...worktree, executionStarted: true };
-    test.store.putTask(task);
-    gitIn(test.projectRoot, 'worktree', 'add', '--quiet', '--force', test.branchProtectorPath, worktree.branch);
-    await expect(
-      removeWorktree(test.store.getProject(task.projectId!)!, worktree, test.store.dataDir, {
-        deleteBranch: true,
-        onCleanupAuthorized: async (tip) => {
-          task.recoveryWorktree = { ...worktree, cleanupBranchTip: tip };
-          test.store.putTask(task);
-        },
-        // Simulate process interruption after the filesystem operation, not an OS crash.
-        afterWorktreeRemoval: async () => {
-          expect(existsSync(worktree.path)).toBe(false);
-          throw new Error('simulated interruption after physical removal');
-        },
-      }),
-    ).rejects.toThrow('simulated interruption after physical removal');
-    expect(readFileSync(join(test.projectRoot, 'src/implemented.ts'), 'utf8')).toContain('implemented');
-    const authorizedTip = task.recoveryWorktree!.cleanupBranchTip!;
-    expect(gitIn(test.projectRoot, 'rev-parse', `refs/heads/${worktree.branch}`).trim()).toBe(authorizedTip);
-
-    const resumedStore = new Store(test.store.dataDir);
-    expect(resumedStore.getTask(task.id)?.recoveryWorktree?.cleanupBranchTip).toBe(authorizedTip);
-    await test.orchestrator.shutdown();
-    const resumed = new Orchestrator(resumedStore, test.providers);
-    try {
-      const firstRecovery = await resumed.recoverTaskWorktree(task.id, 'discard');
-      expect(firstRecovery.cleanupPending).toBe(true);
-      expect(firstRecovery.task.recoveryWorktree?.cleanupBranchTip).toBe(authorizedTip);
-      expect(gitIn(test.projectRoot, 'rev-parse', `refs/heads/${worktree.branch}`).trim()).toBe(authorizedTip);
-      gitIn(test.projectRoot, 'worktree', 'remove', '--force', test.branchProtectorPath);
-      const recovered = await resumed.recoverTaskWorktree(task.id, 'discard');
-      expect(recovered.cleanupPending).toBe(false);
-      expect(recovered.task.recoveryWorktree).toBeUndefined();
-      expect(recovered.task.integration).toMatchObject({
-        cleanup: 'complete',
-        cleanupResources: { worktree: 'removed', branch: 'removed', ownershipProof: 'removed' },
+  it(
+    'reconciles completed physical task cleanup after Store reload',
+    async () => {
+      const test = setup({ artifactChange: true, gitProject: true, retainBranchCheckout: true });
+      let terminal!: () => void;
+      const done = new Promise<void>((resolve) => (terminal = resolve));
+      const unsubscribe = test.orchestrator.subscribe((event) => {
+        if (event.type === 'run' && event.run.sessionId === test.session.id && event.run.status !== 'running')
+          terminal();
       });
-    } finally {
-      await resumed.shutdown();
-      resumedStore.close();
-    }
-  });
+      try {
+        await test.orchestrator.start(test.session, 'Implemente uma melhoria no projeto');
+        await done;
+      } finally {
+        unsubscribe();
+      }
+      const task = test.store.listSessionTasks(test.session.id).find((entry) => entry.role === 'worker')!;
+      expect(task.integration).toMatchObject({ status: 'applied', cleanup: 'pending' });
+      gitIn(test.projectRoot, 'worktree', 'remove', '--force', test.branchProtectorPath);
+      // Automatic cleanup already removed the original folder while preserving its pinned branch;
+      // create a real executor checkout to reproduce the narrower remove-return interruption.
+      const worktree = await createExecutorWorktree(
+        test.store.getProject(task.projectId!)!,
+        { id: 'interrupted-cleanup-task', title: 'Interrupted cleanup' },
+        test.store.dataDir,
+      );
+      task.recoveryWorktree = { ...worktree, executionStarted: true };
+      test.store.putTask(task);
+      gitIn(test.projectRoot, 'worktree', 'add', '--quiet', '--force', test.branchProtectorPath, worktree.branch);
+      await expect(
+        removeWorktree(test.store.getProject(task.projectId!)!, worktree, test.store.dataDir, {
+          deleteBranch: true,
+          onCleanupAuthorized: async (tip) => {
+            task.recoveryWorktree = { ...worktree, cleanupBranchTip: tip };
+            test.store.putTask(task);
+          },
+          // Simulate process interruption after the filesystem operation, not an OS crash.
+          afterWorktreeRemoval: async () => {
+            expect(existsSync(worktree.path)).toBe(false);
+            throw new Error('simulated interruption after physical removal');
+          },
+        }),
+      ).rejects.toThrow('simulated interruption after physical removal');
+      expect(readFileSync(join(test.projectRoot, 'src/implemented.ts'), 'utf8')).toContain('implemented');
+      const authorizedTip = task.recoveryWorktree!.cleanupBranchTip!;
+      expect(gitIn(test.projectRoot, 'rev-parse', `refs/heads/${worktree.branch}`).trim()).toBe(authorizedTip);
+
+      const resumedStore = new Store(test.store.dataDir);
+      expect(resumedStore.getTask(task.id)?.recoveryWorktree?.cleanupBranchTip).toBe(authorizedTip);
+      await test.orchestrator.shutdown();
+      const resumed = new Orchestrator(resumedStore, test.providers);
+      try {
+        const firstRecovery = await resumed.recoverTaskWorktree(task.id, 'discard');
+        expect(firstRecovery.cleanupPending).toBe(true);
+        expect(firstRecovery.task.recoveryWorktree?.cleanupBranchTip).toBe(authorizedTip);
+        expect(gitIn(test.projectRoot, 'rev-parse', `refs/heads/${worktree.branch}`).trim()).toBe(authorizedTip);
+        gitIn(test.projectRoot, 'worktree', 'remove', '--force', test.branchProtectorPath);
+        const recovered = await resumed.recoverTaskWorktree(task.id, 'discard');
+        expect(recovered.cleanupPending).toBe(false);
+        expect(recovered.task.recoveryWorktree).toBeUndefined();
+        expect(recovered.task.integration).toMatchObject({
+          cleanup: 'complete',
+          cleanupResources: { worktree: 'removed', branch: 'removed', ownershipProof: 'removed' },
+        });
+      } finally {
+        await resumed.shutdown();
+        resumedStore.close();
+      }
+    },
+    REAL_GIT_WORKFLOW_TIMEOUT_MS,
+  );
 
   it('reloads pre-catch automatic cleanup authorization and applies from that checkpoint', async () => {
     const test = setup({ artifactChange: true, gitProject: true, retainBranchCheckout: true });
@@ -1690,39 +1725,43 @@ describe('automatic orchestration', () => {
     ).toBe('failed');
   });
 
-  it('keeps a recovery retryable when integration reports no newly applicable changes', async () => {
-    const test = setup({ artifactChange: true, gitProject: true, integrationConflict: true });
-    let completed!: () => void;
-    const done = new Promise<void>((resolve) => (completed = resolve));
-    const unsubscribe = test.orchestrator.subscribe((event) => {
-      if (event.type === 'run' && event.run.sessionId === test.session.id && event.run.status !== 'running')
-        completed();
-    });
-    try {
-      await test.orchestrator.start(test.session, 'Implemente uma melhoria no projeto');
-      await done;
-    } finally {
-      unsubscribe();
-    }
-    const task = test.store.listSessionTasks(test.session.id).find((entry) => entry.role === 'worker')!;
-    expect(task.recoveryWorktree).toBeDefined();
-    // Remove the executor's added artifact so applying the preserved checkout is a no-op.
-    rmSync(join(task.recoveryWorktree!.path, 'src/implemented.ts'));
-    const result = await test.orchestrator.recoverTaskWorktree(task.id, 'apply');
-    expect(result.applied).toBe(false);
-    expect(result.task.integration).toBeUndefined();
-    expect(result.task.delivery).toMatchObject({ status: 'not_implemented', recovery: { action: 'retry' } });
-    expect(result.task.recoveryWorktree).toBeDefined();
-    expect(readFileSync(join(test.projectRoot, 'src/implemented.ts'), 'utf8')).toContain('user change');
+  it(
+    'keeps a recovery retryable when integration reports no newly applicable changes',
+    async () => {
+      const test = setup({ artifactChange: true, gitProject: true, integrationConflict: true });
+      let completed!: () => void;
+      const done = new Promise<void>((resolve) => (completed = resolve));
+      const unsubscribe = test.orchestrator.subscribe((event) => {
+        if (event.type === 'run' && event.run.sessionId === test.session.id && event.run.status !== 'running')
+          completed();
+      });
+      try {
+        await test.orchestrator.start(test.session, 'Implemente uma melhoria no projeto');
+        await done;
+      } finally {
+        unsubscribe();
+      }
+      const task = test.store.listSessionTasks(test.session.id).find((entry) => entry.role === 'worker')!;
+      expect(task.recoveryWorktree).toBeDefined();
+      // Remove the executor's added artifact so applying the preserved checkout is a no-op.
+      rmSync(join(task.recoveryWorktree!.path, 'src/implemented.ts'));
+      const result = await test.orchestrator.recoverTaskWorktree(task.id, 'apply');
+      expect(result.applied).toBe(false);
+      expect(result.task.integration).toBeUndefined();
+      expect(result.task.delivery).toMatchObject({ status: 'not_implemented', recovery: { action: 'retry' } });
+      expect(result.task.recoveryWorktree).toBeDefined();
+      expect(readFileSync(join(test.projectRoot, 'src/implemented.ts'), 'utf8')).toContain('user change');
 
-    const discarded = await test.orchestrator.recoverTaskWorktree(task.id, 'discard');
-    expect(discarded.task.recoveryWorktree).toBeUndefined();
-    expect(discarded.task.integration).toMatchObject({
-      status: 'not_required',
-      cleanup: 'complete',
-      reason: expect.stringContaining('Checkout descartado'),
-    });
-  });
+      const discarded = await test.orchestrator.recoverTaskWorktree(task.id, 'discard');
+      expect(discarded.task.recoveryWorktree).toBeUndefined();
+      expect(discarded.task.integration).toMatchObject({
+        status: 'not_required',
+        cleanup: 'complete',
+        reason: expect.stringContaining('Checkout descartado'),
+      });
+    },
+    REAL_GIT_WORKFLOW_TIMEOUT_MS,
+  );
 
   it.each([
     { worker: 'claude' as const, reviewer: undefined, role: 'executor' },
@@ -2408,12 +2447,12 @@ describe('automatic orchestration', () => {
           budget: { totalMs: 60_000, finalizationReserveMs: 1_000 },
         },
       );
-      for (let attempt = 0; attempt < 400 && !existsSync(git.entered); attempt++)
-        await new Promise((resolve) => setTimeout(resolve, 5));
-      expect(existsSync(git.entered)).toBe(true);
-      for (let attempt = 0; attempt < 400 && !existsSync(git.created); attempt++)
-        await new Promise((resolve) => setTimeout(resolve, 5));
-      expect(existsSync(git.created)).toBe(true); // Real Git created this worktree before cancellation.
+      // start() can finish before Git reaches the shim; synchronize on the shim's actual
+      // process-entry marker, then on real Git's completed worktree-add marker before cancelling.
+      const markerDeadline = Date.now() + REAL_GIT_WORKFLOW_TIMEOUT_MS;
+      await waitForMarker(git.entered, markerDeadline - Date.now(), 'worktree-add shim entry');
+      await waitForMarker(git.created, markerDeadline - Date.now(), 'real Git worktree creation');
+      expect(existsSync(git.created), 'real Git must create the checkout before cancellation').toBe(true);
       await test.orchestrator.cancel(test.session.id);
       await finished;
       expect(test.store.getRun(started.runId)).toMatchObject({ status: 'cancelled', termination: 'user_cancelled' });

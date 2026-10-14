@@ -137,7 +137,7 @@ function setup(projectPath: string, opts: { runHooks?: boolean } = {}) {
     new Promise<Run>((resolve) => {
       const check = () => {
         const run = store.getRun(runId);
-        if (run && run.status !== 'running') return resolve(run);
+        if (run && run.status !== 'running' && !orchestrator.isActive(run.sessionId)) return resolve(run);
         setTimeout(check, 10);
       };
       check();

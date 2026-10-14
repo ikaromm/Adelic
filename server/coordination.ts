@@ -223,13 +223,14 @@ export function synthesisExecutionFacts(tasks: DelegatedTask[]): string {
 }
 
 /**
- * Keep review findings, not conversational lead-in or progress chatter, in bounded coordinator
- * context. Findings are recognised by explicit severity/issue headings; when the source or the
- * budget cannot be represented completely the returned text says so rather than implying approval.
+ * Reduce review text for coordinator context. `incomplete` describes this bounded context only;
+ * it says nothing about provider completion or review approval. Full output is persisted on the
+ * reviewer task and can be fetched on demand through the task-output endpoint.
  */
 export function summarizeReview(
   text: string,
   maxChars = 1600,
+  rawReference = 'tarefa de revisão',
 ): { text: string; incomplete: boolean; findings: number } {
   const lines = text.split(/\r?\n/);
   const findingStart =
@@ -244,8 +245,14 @@ export function summarizeReview(
   if (starts.length === 0) {
     const compact = text.trim();
     if (compact.length <= maxChars) return { text: compact, incomplete: false, findings: 0 };
-    const marker = 'REVISÃO INCOMPLETA: saída sem achados estruturados foi truncada; não concluir aprovação.';
-    return { text: marker.slice(0, maxChars), incomplete: true, findings: 0 };
+    // Unstructured reviews are common (including free-form audit reports). Preserve both
+    // ends of the source in context rather than replacing a defect at the start with a generic warning.
+    const marker = ` … [contexto reduzido; saída completa em ${rawReference}] … `;
+    const available = Math.max(0, maxChars - marker.length);
+    const headLength = Math.ceil(available / 2);
+    const tailLength = Math.floor(available / 2);
+    const excerpt = `${text.slice(0, headLength)}${marker.slice(0, Math.max(0, maxChars - headLength - tailLength))}${tailLength ? text.slice(-tailLength) : ''}`;
+    return { text: excerpt, incomplete: true, findings: 0 };
   }
 
   const prefixLines = lines
@@ -268,7 +275,7 @@ export function summarizeReview(
   const completeText = allLines.join('\n');
   if (completeText.length <= maxChars) return { text: completeText, incomplete: false, findings: findingCount };
 
-  const markerText = ' [REVISÃO INCOMPLETA: achados ou detalhes omitidos pelo limite; não concluir aprovação.]';
+  const markerText = ` [RESUMO REDUZIDO: achados/detalhes omitidos; saída completa em ${rawReference}.]`;
   const marker = markerText.slice(0, maxChars);
   let remaining = Math.max(0, maxChars - marker.length);
   const kept: string[] = [];
@@ -350,7 +357,7 @@ export function canSkipCoordinationPlanner(text: string): boolean {
   ];
   if (workAreas.filter((area) => area.test(workRequest)).length > 1) return false;
   const continuation =
-    /\b(now|then|also|instead|continue|continuing|same|that|this|it|keep|make it|additionally|agora|depois|tamb[eé]m|ent[aã]o|mantenha|isso|esse|essa|nele|nela)\b/i.test(
+    /\b(now|then|also|instead|continue|continuing|continuar|fechar|fechando|corrigir|corrija|corrigindo|fix|fixed|fixing|formatar|formate|formatação|format|formatted|same|that|this|it|keep|make it|additionally|agora|depois|tamb[eé]m|ent[aã]o|mantenha|isso|esse|essa|nele|nela)\b/i.test(
       request,
     );
   const followUp = continuation;
@@ -368,7 +375,7 @@ export function canSkipCoordinationPlanner(text: string): boolean {
 
 /** True when the current request uses a reference whose subject must come from this conversation. */
 export function requiresResolvedContinuity(text: string): boolean {
-  return /\b(it|this|that|these|those|same|isso|isto|aquilo|esse|essa|esses|essas|nele|nela|now|then|also|instead|continue|continuing|additionally|agora|depois|tamb[eé]m|ent[aã]o|mantenha)\b/i.test(
+  return /\b(it|this|that|these|those|same|isso|isto|aquilo|esse|essa|esses|essas|nele|nela|now|then|also|instead|continue|continuing|continuar|continuei|continuem|additionally|agora|depois|tamb[eé]m|ent[aã]o|mantenha)\b/i.test(
     text,
   );
 }

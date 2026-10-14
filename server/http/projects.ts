@@ -288,7 +288,15 @@ export function projectsRoutes({ store, orchestrator }: BackendContext) {
     try {
       res.json(await orchestrator.recoverTaskWorktree(req.params.id, 'apply'));
     } catch (e) {
-      error(res, errorStatus(e) ?? 500, e as Error);
+      const conflicts = (e as { conflicts?: unknown })?.conflicts;
+      const status = errorStatus(e) ?? 500;
+      const message = errorText(res, e);
+      return res.status(status).json({
+        error: message,
+        ...(Array.isArray(conflicts) && conflicts.every((path) => typeof path === 'string')
+          ? { conflicts: conflicts.slice(0, 100) }
+          : {}),
+      });
     }
   });
   app.delete('/api/tasks/:id/worktree', async (req, res) => {

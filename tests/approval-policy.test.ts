@@ -18,6 +18,7 @@ describe('classifyApproval', () => {
     oldPath = process.env.PATH;
     process.env.PATH = `/usr/bin:/bin:${bindir}`;
     await writeFile(path.join(root, 'note.txt'), 'ok');
+    await writeFile(path.join(root, 'package.json'), '{"name":"fixture"}');
     await mkdir(path.join(root, 'sub'));
   });
   afterEach(async () => {
@@ -34,6 +35,15 @@ describe('classifyApproval', () => {
       sandbox: 'workspace-write',
       ...extra,
     } as never);
+  it('auto-approves the realistic read command used by evidence reviewers under the safe configured mode', async () => {
+    const result = await run('/usr/bin/cat package.json', {
+      mode: 'auto-safe',
+      sandbox: 'read-only',
+      trustedNonLoginShell: true,
+    });
+    expect(result.decision).toBe('auto');
+  });
+
   it('allows exact safe commands and safe workspace reads', async () => {
     expect((await run('pwd')).decision).toBe('auto');
     expect((await run('ls -la note.txt')).decision).toBe('auto');

@@ -19,6 +19,14 @@ export const ItemParams = z
         command: z.string().optional(),
         title: z.string().optional(),
         status: z.string().optional(),
+        // MCP diagnostics are metadata only; arguments and results are deliberately ignored.
+        server: z.string().max(4096).optional(),
+        tool: z.string().max(4096).optional(),
+        error: z.unknown().optional(),
+        /** Codex 0.160 agentMessage item content; phase is optional/null in older or
+         * incomplete protocol frames, and must not be guessed from array position. */
+        text: z.string().optional(),
+        phase: z.enum(['commentary', 'final_answer']).nullable().optional(),
       })
       .passthrough(),
   })
@@ -35,6 +43,7 @@ export const ErrorParams = z
   .object({
     threadId: id,
     error: z.object({ message: z.unknown().optional() }).passthrough().optional(),
+    willRetry: z.boolean().optional(),
     message: z.unknown().optional(),
   })
   .passthrough();

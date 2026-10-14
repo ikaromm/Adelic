@@ -180,6 +180,25 @@ describe('SSH remote host transport', () => {
     const legacy = reconstructRemoteError('SYNTHETIC_SECRET', undefined);
     expect(legacy.category).toBeUndefined();
     expect(legacy.message).toBe('remote tool failed');
+    const modernSearch = reconstructRemoteError(
+      "path is not a directory; search accepts directories only, use the file's parent directory",
+      'invalid_request',
+    );
+    expect(modernSearch.message).toContain('search accepts directories only');
+    expect(remoteToolError(modernSearch)).toMatch(/path.*diretórios.*não arquivos/i);
+    const legacySearch = reconstructRemoteError('search path is not a directory', 'invalid_request');
+    expect(remoteToolError(legacySearch)).toMatch(/path.*diretórios.*não arquivos/i);
+    const knownField = reconstructRemoteError(
+      "unsupported argument field 'file'; check this tool's supported fields",
+      'invalid_request',
+    );
+    expect(remoteToolError(knownField)).toMatch(/field 'file'.*campos aceitos/i);
+    expect(
+      reconstructRemoteError(
+        "unsupported argument field '/secret'; check this tool's supported fields",
+        'invalid_request',
+      ).message,
+    ).toBe('invalid tool request or file');
     const invalid = reconstructRemoteError('SYNTHETIC_SECRET', 'SYNTHETIC_SECRET_CATEGORY');
     expect(invalid.category).toBeUndefined();
     expect(invalid.message).toBe('remote tool failed');

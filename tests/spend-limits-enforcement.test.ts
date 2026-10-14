@@ -260,9 +260,12 @@ describe('enforcement', () => {
     const run = t.store.listRuns('s')[0];
     const tasks = t.store.listSessionTasks('s').filter((task) => task.runId === run.id);
     expect(tasks.length).toBeGreaterThan(1);
-    // Every delegated call reported 100 + 10; the run carries their sum.
-    expect(run.inputTokens).toBe(100 * tasks.length);
-    expect((await t.call('GET', '/api/usage?projectId=p')).body.project.month.tokens).toBe(110 * tasks.length);
+    // Persisted task records are not model-call attempts: a run may record coordination/factual
+    // tasks without invoking the provider for each. Usage is measured by actual provider attempts.
+    const attempts = t.provider.calls();
+    expect(attempts).toBeGreaterThan(0);
+    expect(run.inputTokens).toBe(100 * attempts);
+    expect((await t.call('GET', '/api/usage?projectId=p')).body.project.month.tokens).toBe(110 * attempts);
     await t.call('PATCH', '/api/settings', { spendLimits: { enabled: true } });
     expect(
       (await t.call('PATCH', '/api/projects/p', { spendLimits: { monthlyTokens: 100 } })).body.spendLimits,

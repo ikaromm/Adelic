@@ -403,3 +403,40 @@ it('does not copy arbitrary request path identifiers into HTTP telemetry', async
   expect(data.recentEvents.some((event: { name: string }) => event.name === 'http.request')).toBe(true);
   expect(JSON.stringify(data)).not.toContain(privateId);
 });
+
+it('persists coordination phase attributes through SQLite reload', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'adelic-observability-phases-'));
+  cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
+  const first = new Store(dir);
+  for (const [id, phase] of [
+    ['prepare', 'preparation'],
+    ['context', 'planner_context'],
+    ['integration', 'integration'],
+    ['checks', 'checks'],
+    ['review', 'review'],
+    ['finalization', 'finalization'],
+  ]) {
+    first.recordObservabilityEvent({
+      id,
+      runId: 'phase-run',
+      sessionId: 'phase-session',
+      at: new Date().toISOString(),
+      name: `coordination.${id}`,
+      component: 'orchestration',
+      kind: 'span',
+      status: 'success',
+      durationMs: 12,
+      attributes: { phase },
+    });
+  }
+  first.close();
+  const second = new Store(dir);
+  cleanup.push(() => second.close());
+  const phases = second.db
+    .prepare(
+      "SELECT id,json_extract(attributes,'$.phase') AS phase,duration_ms FROM observability_events WHERE run_id='phase-run' ORDER BY id",
+    )
+    .all() as { phase: string | null; duration_ms: number }[];
+  expect(phases).toHaveLength(6);
+  expect(phases.every((row) => Boolean(row.phase) && row.duration_ms === 12)).toBe(true);
+});

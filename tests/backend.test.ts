@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { createServer, type Server } from 'node:http';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -855,7 +855,7 @@ describe('backend persistence and API', () => {
         if (event.type === 'run' && event.run.sessionId === 's' && event.run.status === 'completed') resolve();
       }),
     );
-    await orchestrator.start(session, 'Implemente um endpoint para esta aplicação');
+    await orchestrator.start(session, 'Analise uma proposta de endpoint para esta aplicação');
     await done;
     expect(inputs.map((input) => input.plan.effort)).toEqual(['ultra', 'max', 'ultra', 'ultra']);
     expect(
@@ -1651,8 +1651,10 @@ describe('backend persistence and API', () => {
       body: JSON.stringify({ content: 'another' }),
     });
     expect(conflict.status).toBe(409);
-    expect(calls()).toBe(1);
+    // The API retry/conflict contract is decided before provider startup; assert provider
+    // idempotency only after the accepted run has actually had a chance to execute.
     await completed;
+    expect(calls()).toBe(1);
     expect(store.listMessages(session.id).map((m) => m.content)).toEqual(['hello', 'ok']);
     expect(store.getRun(accepted.runId)?.status).toBe('completed');
     const task = store.listSessionTasks(session.id)[0];
@@ -1814,6 +1816,7 @@ describe('backend persistence and API', () => {
     const dir = mkdtempSync(join(tmpdir(), 'adelic-tasks-'));
     dirs.push(dir);
     const store = new Store(dir);
+    store.setSettings({ ...store.getSettings()!, sandbox: 'workspace-write' });
     const now = new Date().toISOString();
     store.putProject({
       id: 'p',
@@ -1876,8 +1879,15 @@ describe('backend persistence and API', () => {
             }),
             stopReason: 'completed',
           };
-        if (input.prompt.includes('Tarefa: Inspect')) return { text: 'I'.repeat(40_000), stopReason: 'completed' };
-        if (input.prompt.includes('Tarefa: Change')) return { text: 'CHANGE FULL OUTPUT', stopReason: 'completed' };
+        if (input.prompt.includes('Tarefa: Inspect')) {
+          emit({ type: 'tool', name: 'read_file', description: 'inspect.txt', status: 'completed' });
+          return { text: 'I'.repeat(40_000), stopReason: 'completed' };
+        }
+        if (input.prompt.includes('Tarefa: Change')) {
+          emit({ type: 'tool', name: 'write_file', description: 'change.txt', status: 'completed' });
+          writeFileSync(join(dir, 'change.txt'), 'implemented change');
+          return { text: 'CHANGE FULL OUTPUT', stopReason: 'completed' };
+        }
         emit({ type: 'delta', text: 'final answer' });
         return { text: 'final answer', stopReason: 'completed' };
       },
@@ -1899,6 +1909,9 @@ describe('backend persistence and API', () => {
       (c) => c.input.prompt.includes('Tarefa: Inspect') || c.input.prompt.includes('Tarefa: Change'),
     );
     expect(calls).toHaveLength(4);
+    expect(calls.filter((c) => c.input.prompt.includes('formato:'))).toHaveLength(1);
+    expect(calls.filter((c) => c.input.prompt.includes('Responda ao pedido completo'))).toHaveLength(1);
+    expect(workers).toHaveLength(2);
     expect(workers.map((c) => c.input.plan.tools)).toEqual([true, true]);
     expect(store.listRuns('s')[0]).toMatchObject({ inputTokens: 40, outputTokens: 80, costUsd: 0.4 });
     expect(workers[1].input.prompt).toContain(`inspect: ${'I'.repeat(1200)}`);
@@ -2252,6 +2265,7 @@ describe('backend persistence and API', () => {
     const dir = mkdtempSync(join(tmpdir(), 'adelic-memory-context-'));
     dirs.push(dir);
     const store = new Store(dir);
+    store.setSettings({ ...store.getSettings()!, sandbox: 'workspace-write' });
     const now = new Date().toISOString();
     store.putProject({
       id: 'p',
@@ -2323,6 +2337,8 @@ describe('backend persistence and API', () => {
           emit({ type: 'delta', text: 'Answer' });
           return { text: 'Answer', stopReason: 'completed' };
         }
+        emit({ type: 'tool', name: 'write_file', description: 'memory-result.ts', status: 'completed' });
+        writeFileSync(join(dir, 'memory-result.ts'), 'implemented migration');
         return { text: 'Worker result', stopReason: 'completed' };
       },
       async approve() {},
@@ -2341,6 +2357,10 @@ describe('backend persistence and API', () => {
     await done;
     expect(memoryLookups).toBe(1);
     expect(inputs).toHaveLength(4);
+    expect(inputs.filter((input) => input.prompt.includes('Produza somente JSON válido'))).toHaveLength(1);
+    expect(inputs.filter((input) => input.prompt.includes('Faça revisão independente'))).toHaveLength(1);
+    expect(inputs.filter((input) => input.prompt.includes('Responda ao pedido completo'))).toHaveLength(1);
+    expect(inputs.filter((input) => input.prompt.includes('Tarefa:'))).toHaveLength(1);
     for (const input of inputs) {
       expect(input.memoryContext).toContain('DADOS DE MEMÓRIA NÃO CONFIÁVEIS');
       expect(input.memoryContext!.length).toBeLessThan(4200);
@@ -2626,14 +2646,20 @@ describe('backend persistence and API', () => {
       async shutdown() {},
     };
     const orchestrator = new Orchestrator(store, providers);
+    const approvalReady = new Promise<void>((resolve) => {
+      orchestrator.subscribe((event) => {
+        if (event.type === 'approval' && event.approval.id === 'approval') resolve();
+      });
+    });
     await orchestrator.start(session, 'hello');
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    await approvalReady;
     const first = orchestrator.decide('approval', 's', 'approve');
     await expect(orchestrator.decide('approval', 's', 'deny')).rejects.toMatchObject({ status: 409 });
     expect(approvals).toBe(1);
     releaseApproval();
     await first;
     expect(store.getApproval('approval')?.status).toBe('approved');
+    await expect(orchestrator.decide('missing-approval', 's', 'approve')).rejects.toMatchObject({ status: 404 });
     releaseRun();
     await orchestrator.shutdown();
     store.close();

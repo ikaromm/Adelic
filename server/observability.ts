@@ -87,7 +87,15 @@ export async function withObservation<T>(
     kind: 'span',
     status: 'running',
     at: new Date(start).toISOString(),
-    attributes: inherited.providerId ? { providerId: inherited.providerId } : {},
+    attributes: Object.fromEntries(
+      Object.entries({
+        providerId: inherited.providerId,
+        attemptId: inherited.attemptId,
+        taskId: inherited.taskId,
+        agentId: inherited.agentId,
+        phase: inherited.phase,
+      }).filter((entry): entry is [string, string] => typeof entry[1] === 'string'),
+    ),
   };
   try {
     parent.store.recordObservabilityEvent(input);

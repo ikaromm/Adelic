@@ -5,6 +5,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   symlinkSync,
   watch,
@@ -14,6 +15,7 @@ import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { Orchestrator } from '../server/orchestrator';
+import { RunEvidenceStore } from '../server/run-evidence';
 import { Store } from '../server/store';
 import { createExecutorWorktree, removeWorktree } from '../server/worktrees';
 import type { ProviderInfo, ProviderRegistry, RunInput, Session } from '../shared/contracts';
@@ -59,6 +61,7 @@ function setup(options: {
   review?: boolean;
   reviewStaticOnly?: boolean;
   reviewerFailure?: boolean;
+  longReviewerOutput?: boolean;
   slowReviewer?: boolean;
   reviewerCleanupDelayMs?: number;
   workerFailure?: boolean;
@@ -68,6 +71,9 @@ function setup(options: {
   gitProject?: boolean;
   parallelTasks?: boolean;
   threeTaskTimeout?: boolean;
+  progressiveTasks?: boolean;
+  overlappingTasks?: boolean;
+  integrationDependency?: boolean;
   dirtyProject?: boolean;
   integrationConflict?: boolean;
   commitExecutorChanges?: boolean;
@@ -75,6 +81,7 @@ function setup(options: {
   noGitSerialExecutor?: boolean;
   synthesisStreaming?: boolean;
   synthesisResponse?: string;
+  directStreaming?: boolean;
   fastResponse?: string;
   orchestrationEnabled?: boolean;
   slowDiscovery?: boolean;
@@ -83,6 +90,8 @@ function setup(options: {
   directProviderFailure?: boolean;
   slowWorktreeCreation?: boolean;
   retainBranchCheckout?: boolean;
+  checkBeforeReview?: boolean;
+  checkFails?: boolean;
 }) {
   const directory = mkdtempSync(join(tmpdir(), 'adelic-auto-coordination-'));
   const projectRoot = join(directory, 'project-root');
@@ -138,6 +147,9 @@ function setup(options: {
   let inFlight = 0;
   let maxInFlight = 0;
   let isolatedArrivals = 0;
+  let slowProgressiveWorkerFinished = false;
+  let progressiveThirdStartedEarly = false;
+  let dependencySawAppliedIntegration = false;
   let releaseIsolated!: () => void;
   const bothIsolated = new Promise<void>((resolve) => (releaseIsolated = resolve));
   let listCalls = 0;
@@ -155,29 +167,127 @@ function setup(options: {
       if (input.prompt.includes('Produza somente JSON válido')) {
         return {
           text: JSON.stringify({
-            tasks: options.threeTaskTimeout
+            tasks: options.integrationDependency
               ? [
-                  { id: 'one', title: 'Task 1', instructions: 'Observe a fact', scope: [], dependsOn: [] },
-                  { id: 'two', title: 'Task 2', instructions: 'Wait for interruption', scope: [], dependsOn: ['one'] },
-                  { id: 'three', title: 'Task 3', instructions: 'Must remain pending', scope: [], dependsOn: ['two'] },
+                  {
+                    id: 'parent',
+                    title: 'Integration parent',
+                    instructions: 'Create src/implemented.ts',
+                    scope: [],
+                    dependsOn: [],
+                  },
+                  {
+                    id: 'child',
+                    title: 'Integration child',
+                    instructions: 'Continue after integration',
+                    scope: [],
+                    dependsOn: ['parent'],
+                  },
                 ]
-              : options.parallelTasks
+              : options.overlappingTasks
                 ? [
-                    { id: 'one', title: 'Task A', instructions: 'Create task-a.txt', scope: [], dependsOn: [] },
-                    { id: 'two', title: 'Task B', instructions: 'Create task-b.txt', scope: [], dependsOn: [] },
-                  ]
-                : [
                     {
-                      id: 'one',
-                      title: 'Task',
-                      instructions: options.slowWorktreeCreation ? 'Create src/implemented.ts' : 'Inspect the project',
-                      scope: [],
+                      id: 'first',
+                      title: 'Shared test edit A',
+                      instructions: 'Edit the shared test file',
+                      scope: ['tests/shared.test.ts'],
                       dependsOn: [],
                     },
-                  ],
+                    {
+                      id: 'second',
+                      title: 'Shared test edit B',
+                      instructions: 'Edit the same test file',
+                      scope: ['tests/shared.test.ts'],
+                      dependsOn: [],
+                    },
+                    {
+                      id: 'independent',
+                      title: 'Independent task',
+                      instructions: 'Edit a separate file',
+                      scope: ['src/independent.ts'],
+                      dependsOn: [],
+                    },
+                  ]
+                : options.progressiveTasks
+                  ? [
+                      {
+                        id: 'slow',
+                        title: 'Progressive slow',
+                        instructions: 'Long independent task',
+                        scope: [],
+                        dependsOn: [],
+                      },
+                      {
+                        id: 'fast',
+                        title: 'Progressive fast',
+                        instructions: 'Short independent task',
+                        scope: [],
+                        dependsOn: [],
+                      },
+                      {
+                        id: 'third',
+                        title: 'Progressive third',
+                        instructions: 'Use the released slot',
+                        scope: [],
+                        dependsOn: [],
+                      },
+                    ]
+                  : options.threeTaskTimeout
+                    ? [
+                        { id: 'one', title: 'Task 1', instructions: 'Observe a fact', scope: [], dependsOn: [] },
+                        {
+                          id: 'two',
+                          title: 'Task 2',
+                          instructions: 'Wait for interruption',
+                          scope: [],
+                          dependsOn: ['one'],
+                        },
+                        {
+                          id: 'three',
+                          title: 'Task 3',
+                          instructions: 'Must remain pending',
+                          scope: [],
+                          dependsOn: ['two'],
+                        },
+                      ]
+                    : options.parallelTasks
+                      ? [
+                          { id: 'one', title: 'Task A', instructions: 'Create task-a.txt', scope: [], dependsOn: [] },
+                          { id: 'two', title: 'Task B', instructions: 'Create task-b.txt', scope: [], dependsOn: [] },
+                        ]
+                      : [
+                          {
+                            id: 'one',
+                            title: 'Task',
+                            instructions: options.slowWorktreeCreation
+                              ? 'Create src/implemented.ts'
+                              : 'Inspect the project',
+                            scope: [],
+                            dependsOn: [],
+                          },
+                        ],
           }),
           stopReason: 'completed',
         };
+      }
+      if (options.integrationDependency && input.prompt.includes('Integration child')) {
+        const parent = store.listSessionTasks(session.id).find((task) => task.title === 'Integration parent');
+        dependencySawAppliedIntegration = parent?.integration?.status === 'applied';
+        return { text: 'Child ran after the integration boundary.', stopReason: 'completed' };
+      }
+      if (options.overlappingTasks && input.prompt.includes('Você é um executor delegado')) {
+        inFlight++;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        inFlight--;
+      }
+      if (options.progressiveTasks && input.prompt.includes('Você é um executor delegado')) {
+        if (input.prompt.includes('Progressive slow')) {
+          await new Promise((resolve) => setTimeout(resolve, 180));
+          slowProgressiveWorkerFinished = true;
+        } else if (input.prompt.includes('Progressive fast')) await new Promise((resolve) => setTimeout(resolve, 10));
+        else if (input.prompt.includes('Progressive third'))
+          progressiveThirdStartedEarly = !slowProgressiveWorkerFinished;
       }
       if (options.threeTaskTimeout && input.prompt.includes('Você é um executor delegado')) {
         if (input.prompt.includes('Task 2')) {
@@ -222,6 +332,20 @@ function setup(options: {
       }
       if (input.prompt.includes('Faça revisão independente') && options.reviewerFailure)
         throw new Error('fixture reviewer failure');
+      if (input.prompt.includes('Faça revisão independente') && options.longReviewerOutput) {
+        return {
+          text: [
+            '**P1 — FALHA_CRITICA_FIXTURE**',
+            'Local: server/orchestrator.ts:4000',
+            'A primeira falha concreta precisa continuar visível no resumo. ' + 'detalhe '.repeat(260),
+            '**P2 — SEGUNDA_FALHA_FIXTURE**',
+            'Local: server/store.ts:500',
+            'A segunda falha também deve manter seu título e localização. ' + 'detalhe '.repeat(260),
+            'RAW_FIXTURE_TAIL_NOT_IN_SYNTHESIS',
+          ].join('\\n'),
+          stopReason: 'completed',
+        };
+      }
       if (options.reviewStaticOnly && input.prompt.includes('Faça revisão independente')) {
         return {
           text: 'Revisão estática apenas. O runtime recusou executar Git/typecheck em modo somente leitura; validação dinâmica não realizada.',
@@ -380,18 +504,43 @@ function setup(options: {
         if (options.synthesisStreaming) emit({ type: 'delta', text: 'Resposta da síntese.' });
         return { text: options.synthesisResponse ?? 'Resposta da síntese.', stopReason: 'completed' };
       }
+      if (options.directStreaming) emit({ type: 'delta', text: 'PROGRESS_ONLY' });
       return { text: options.fastResponse ?? 'completed', stopReason: 'completed' };
     },
     async approve() {},
     async shutdown() {},
   };
-  const orchestrator = new Orchestrator(store, providers);
+  if (options.checkBeforeReview)
+    store.putHooks('project', {
+      afterEdit: [{ name: 'fixture typecheck', command: 'npm test', timeoutSec: 10, enabled: true }],
+      blockedCommands: [],
+      autoFix: false,
+    });
+  const orchestrator = new Orchestrator(
+    store,
+    providers,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    options.checkBeforeReview
+      ? async (check) => ({
+          name: check.name,
+          command: check.command,
+          status: options.checkFails ? 'failed' : 'passed',
+          exitCode: options.checkFails ? 1 : 0,
+          durationMs: 3,
+          output: options.checkFails ? 'falha observada' : undefined,
+        })
+      : undefined,
+  );
   cleanup.push(async () => {
     await orchestrator.shutdown();
     store.close();
     rmSync(directory, { recursive: true, force: true });
   });
   return {
+    directory,
     store,
     session,
     orchestrator,
@@ -403,6 +552,8 @@ function setup(options: {
     projectRoot,
     branchProtectorPath,
     listCalls: () => listCalls,
+    progressiveThirdStartedEarly: () => progressiveThirdStartedEarly,
+    dependencySawAppliedIntegration: () => dependencySawAppliedIntegration,
   };
 }
 
@@ -638,6 +789,64 @@ exec "${realGit}" "$@"
 }
 
 describe('automatic orchestration', () => {
+  it('releases a dependent only after its parent changes are integrated', async () => {
+    const test = setup({ integrationDependency: true, artifactChange: true, gitProject: true });
+    let completed!: () => void;
+    const done = new Promise<void>((resolve) => (completed = resolve));
+    const unsubscribe = test.orchestrator.subscribe((event) => {
+      if (event.type === 'run' && event.run.sessionId === test.session.id && event.run.status !== 'running')
+        completed();
+    });
+    try {
+      await test.orchestrator.start(
+        test.session,
+        'Implemente uma melhoria de código em src/implemented.ts e continue após integrar essa tarefa',
+      );
+      await done;
+      expect(test.dependencySawAppliedIntegration(), JSON.stringify(test.store.listSessionTasks(test.session.id))).toBe(
+        true,
+      );
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it('serializes only simultaneous conflicting scopes while independent work proceeds', async () => {
+    const test = setup({ overlappingTasks: true, parallelTasks: true });
+    let completed!: () => void;
+    const done = new Promise<void>((resolve) => (completed = resolve));
+    const unsubscribe = test.orchestrator.subscribe((event) => {
+      if (event.type === 'run' && event.run.sessionId === test.session.id && event.run.status !== 'running')
+        completed();
+    });
+    try {
+      await test.orchestrator.start(test.session, 'Implement two independent tests in the same file');
+      await done;
+      expect(test.maxInFlight()).toBe(2);
+      expect(test.inputs.filter((input) => input.prompt.includes('Você é um executor delegado'))).toHaveLength(3);
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it('fills a newly released worker slot without waiting for the slow sibling', async () => {
+    const test = setup({ progressiveTasks: true, parallelTasks: true });
+    let completed!: () => void;
+    const done = new Promise<void>((resolve) => (completed = resolve));
+    const unsubscribe = test.orchestrator.subscribe((event) => {
+      if (event.type === 'run' && event.run.sessionId === test.session.id && event.run.status !== 'running')
+        completed();
+    });
+    try {
+      await test.orchestrator.start(test.session, 'Implement three independent tasks progressively');
+      await done;
+      expect(test.progressiveThirdStartedEarly()).toBe(true);
+      expect(test.inputs.filter((input) => input.prompt.includes('Você é um executor delegado'))).toHaveLength(3);
+    } finally {
+      unsubscribe();
+    }
+  });
+
   it('bounds scheduler-level executor isolation and pauses the queue without launching a worker', async () => {
     const test = setup({ gitProject: true, artifactChange: true });
     const git = slowConfigGit(test.projectRoot);
@@ -740,9 +949,9 @@ describe('automatic orchestration', () => {
 
       // A portable fixture with Node-backed scripts demonstrates that the compartment,
       // not a native auto-safe npm allowlist, decides which checks can execute.
-      const fixtureBase = join(tmpdir(), 'adelic-test-fixtures');
-      mkdirSync(fixtureBase, { recursive: true });
-      const fixture = mkdtempSync(join(fixtureBase, 'readonly-portable-fixture-'));
+      // Project checkouts are read-only in this path; fixtures belong in the executor's
+      // private scratch rather than a workspace-local .adelic/test-tmp override.
+      const fixture = mkdtempSync(join('/var/tmp', 'adelic-readonly-portable-fixture-'));
       cleanup.push(() => rmSync(fixture, { recursive: true, force: true }));
       mkdirSync(join(fixture, 'node_modules/typescript/bin'), { recursive: true });
       writeFileSync(
@@ -929,6 +1138,304 @@ describe('automatic orchestration', () => {
             .some((task) => task.runId === multiAreaRunId && task.role === 'planner'),
         ).toBe(true);
       }
+  });
+
+  it('produces root-owned evidence capabilities for automatic reviewer and synthesis inputs', async () => {
+    const test = setup({ review: true, artifactChange: true, gitProject: true });
+    let terminal!: () => void;
+    const done = new Promise<void>((resolve) => (terminal = resolve));
+    const unsubscribe = test.orchestrator.subscribe((event) => {
+      if (event.type === 'run' && event.run.sessionId === test.session.id && event.run.status !== 'running') terminal();
+    });
+    try {
+      const started = await test.orchestrator.start(
+        test.session,
+        'Implement coordinated changes across the UI, storage, and API.',
+      );
+      await done;
+      const record = await new RunEvidenceStore(test.directory).get(started.runId);
+      expect(record).toBeDefined();
+      const reviewer = test.inputs.find((input) => input.prompt.includes('Faça revisão independente'))!;
+      const synthesis = test.inputs.find((input) => input.prompt.includes('Fatos estruturados de execução'))!;
+      for (const input of [reviewer, synthesis]) {
+        expect(input.runId).toContain(started.runId);
+        expect(input.evidenceRunId).toBe(started.runId);
+        expect(input.remote?.executionKind).toBe('isolated-local');
+        expect(input.mcpServers).toContainEqual(
+          expect.objectContaining({
+            name: 'adelic-run-evidence',
+            env: expect.objectContaining({
+              ADELIC_RUN_EVIDENCE_FILE: expect.stringContaining(`${started.runId}.json`),
+              ADELIC_RUN_EVIDENCE_LOG_DIR: expect.stringContaining(started.runId),
+            }),
+          }),
+        );
+      }
+      expect(record?.runId).toBe(started.runId);
+      expect(record?.checks).toEqual([]);
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it('continues review and synthesis without broken evidence MCP when a symlink blocks persistence', async () => {
+    const test = setup({ review: true, artifactChange: true });
+    const outside = mkdtempSync(join(tmpdir(), 'adelic-evidence-blocked-'));
+    cleanup.push(() => rmSync(outside, { recursive: true, force: true }));
+    symlinkSync(outside, join(test.directory, 'run-evidence'));
+    let terminal!: () => void;
+    const done = new Promise<void>((resolve) => (terminal = resolve));
+    const unsubscribe = test.orchestrator.subscribe((event) => {
+      if (event.type === 'run' && event.run.sessionId === test.session.id && event.run.status !== 'running') terminal();
+    });
+    try {
+      await test.orchestrator.start(test.session, 'Implement coordinated changes across the UI, storage, and API.');
+      await done;
+      const reviewer = test.inputs.find((input) => input.prompt.includes('Faça revisão independente'))!;
+      const synthesis = test.inputs.find((input) => input.prompt.includes('Fatos estruturados de execução'))!;
+      expect(reviewer).toBeDefined();
+      expect(synthesis).toBeDefined();
+      expect(reviewer.mcpServers ?? []).not.toContainEqual(expect.objectContaining({ name: 'adelic-run-evidence' }));
+      expect(synthesis.mcpServers ?? []).not.toContainEqual(expect.objectContaining({ name: 'adelic-run-evidence' }));
+      for (const prompt of [reviewer.prompt, synthesis.prompt]) {
+        expect(prompt).toContain('get_run_evidence não está disponível nesta fase');
+        expect(prompt).toMatch(/Continue apenas com as (?:evidências|informações) realmente fornecidas/);
+        expect(prompt).toMatch(
+          /(?:declare quando um log ou fato omitido não puder ser confirmado|declare a limitação sem inferir conteúdo omitido)/,
+        );
+        expect(prompt).not.toMatch(/(?:use|consulte) a ferramenta get_run_evidence/i);
+      }
+      expect(test.store.listSessionTasks(test.session.id).some((task) => task.role === 'synthesis')).toBe(true);
+      expect(readdirSync(outside)).toEqual([]);
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it('bounds the review in the actual synthesis prompt and preserves on-demand raw task output', async () => {
+    const test = setup({ review: true, longReviewerOutput: true, artifactChange: true, gitProject: true });
+    let terminal!: () => void;
+    const done = new Promise<void>((resolve) => (terminal = resolve));
+    const unsubscribe = test.orchestrator.subscribe((event) => {
+      if (event.type === 'run' && event.run.sessionId === test.session.id && event.run.status !== 'running') terminal();
+    });
+    try {
+      const started = await test.orchestrator.start(
+        test.session,
+        'Implement coordinated changes across the UI, storage, and API.',
+      );
+      await done;
+      const reviewer = test.store
+        .listSessionTasks(test.session.id)
+        .find((task) => task.runId === started.runId && task.role === 'reviewer')!;
+      const synthesis = test.inputs.find((input) => input.prompt.includes('Fatos estruturados de execução'))!;
+      const reviewSection = /Revisão independente[^\n]*:\n([\s\S]*?)(?:\n\n|$)/.exec(synthesis.prompt)?.[1] ?? '';
+      const reloaded = test.store.getTask(reviewer.id)!;
+      expect(reviewer.output).toContain('RAW_FIXTURE_TAIL_NOT_IN_SYNTHESIS');
+      expect(reloaded.output).toBe(reviewer.output);
+      expect(reloaded.output!.length).toBeGreaterThan(2400);
+      expect(reviewSection.length).toBeLessThanOrEqual(2400);
+      expect(reviewSection).toContain('P1 — FALHA_CRITICA_FIXTURE');
+      expect(reviewSection).toContain('P2 — SEGUNDA_FALHA_FIXTURE');
+      expect(reviewSection).toContain('server/orchestrator.ts:4000');
+      expect(reviewSection).toContain('server/store.ts:500');
+      expect(reviewSection).toContain(`/api/tasks/${reviewer.id}`);
+      expect(reviewSection).toContain('RESUMO REDUZIDO');
+      expect(synthesis.prompt).toContain('contexto reduzido localmente');
+      expect(reviewSection).not.toContain('RAW_FIXTURE_TAIL_NOT_IN_SYNTHESIS');
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it('defers configured pre-review auto-fix until the checked Run releases ownership, then does not recurse', async () => {
+    const test = setup({
+      review: true,
+      artifactChange: true,
+      gitProject: true,
+      checkBeforeReview: true,
+      checkFails: true,
+    });
+    test.store.putHooks('project', {
+      afterEdit: [{ name: 'fixture typecheck', command: 'npm test', timeoutSec: 10, enabled: true }],
+      blockedCommands: [],
+      autoFix: true,
+    });
+    let terminal!: () => void;
+    const done = new Promise<void>((resolve) => (terminal = resolve));
+    const unsubscribe = test.orchestrator.subscribe((event) => {
+      if (event.type === 'run' && event.run.sessionId === test.session.id && event.run.status !== 'running') terminal();
+    });
+    try {
+      const started = await test.orchestrator.start(
+        test.session,
+        'Implement coordinated changes across the UI, storage, and API.',
+      );
+      await done;
+      const sourceCheck = test.store
+        .listEvents(test.session.id)
+        .filter((event) => event.runId === started.runId && event.type === 'check' && event.check?.status !== 'running')
+        .at(-1);
+      expect(sourceCheck?.check).toMatchObject({ status: 'failed', exitCode: 1, output: 'falha observada' });
+      const runDeadline = Date.now() + 8000;
+      while (test.store.listRuns(test.session.id).length < 2 && Date.now() < runDeadline)
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      const runsAfterCheck = test.store.listRuns(test.session.id);
+      const fix = runsAfterCheck.find((run) => run.id !== started.runId);
+      expect(fix).toBeDefined();
+      const fixRun = fix!;
+      expect(fixRun.hookFix).toEqual({ sourceRunId: started.runId });
+      expect(fixRun.budget).toEqual(test.store.getRun(started.runId)?.budget);
+      let secondDone = false;
+      const secondUnsubscribe = test.orchestrator.subscribe((event) => {
+        if (event.type === 'run' && event.run.id === fixRun.id && event.run.status !== 'running') secondDone = true;
+      });
+      const end = Date.now() + 8000;
+      while (!secondDone && Date.now() < end) await new Promise((resolve) => setTimeout(resolve, 10));
+      secondUnsubscribe();
+      expect(secondDone).toBe(true);
+      expect(test.store.listRuns(test.session.id)).toHaveLength(2);
+      expect(
+        test.store.listEvents(test.session.id).filter((event) => event.runId === fixRun.id && event.type === 'check'),
+      ).toHaveLength(0); // the correction made no new artifacts, so no check is fabricated
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it('does not launch a deferred auto-fix when review is cancelled after autoFix is disabled', async () => {
+    const test = setup({
+      review: true,
+      slowReviewer: true,
+      artifactChange: true,
+      gitProject: true,
+      checkBeforeReview: true,
+      checkFails: true,
+    });
+    test.store.putHooks('project', {
+      afterEdit: [{ name: 'fixture typecheck', command: 'npm test', timeoutSec: 10, enabled: true }],
+      blockedCommands: [],
+      autoFix: true,
+    });
+    let terminal!: () => void;
+    const done = new Promise<void>((resolve) => (terminal = resolve));
+    const unsubscribe = test.orchestrator.subscribe((event) => {
+      if (event.type === 'run' && event.run.sessionId === test.session.id && event.run.status !== 'running') terminal();
+    });
+    try {
+      const started = await test.orchestrator.start(
+        test.session,
+        'Implement coordinated changes across the UI, storage, and API.',
+      );
+      for (let attempt = 0; attempt < 2000; attempt++) {
+        const reviewer = test.store
+          .listSessionTasks(test.session.id)
+          .find((task) => task.runId === started.runId && task.role === 'reviewer');
+        if (reviewer?.status === 'running') break;
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      const reviewer = test.store
+        .listSessionTasks(test.session.id)
+        .find((task) => task.runId === started.runId && task.role === 'reviewer');
+      expect(reviewer?.status).toBe('running');
+      for (let attempt = 0; attempt < 2000; attempt++) {
+        if (
+          test.store
+            .listEvents(test.session.id)
+            .some(
+              (event) => event.runId === started.runId && event.type === 'check' && event.check?.status === 'failed',
+            )
+        )
+          break;
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      expect(
+        test.store
+          .listEvents(test.session.id)
+          .some((event) => event.runId === started.runId && event.type === 'check' && event.check?.status === 'failed'),
+      ).toBe(true);
+      test.store.putHooks('project', {
+        afterEdit: [{ name: 'fixture typecheck', command: 'npm test', timeoutSec: 10, enabled: true }],
+        blockedCommands: [],
+        autoFix: false,
+      });
+      await test.orchestrator.cancel(test.session.id);
+      await done;
+      expect(test.store.getRun(started.runId)).toMatchObject({ status: 'cancelled', termination: 'user_cancelled' });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(test.store.listRuns(test.session.id)).toHaveLength(1);
+      expect(test.store.listRuns(test.session.id).some((run) => run.hookFix?.sourceRunId === started.runId)).toBe(
+        false,
+      );
+    } finally {
+      unsubscribe();
+    }
+  }, 15_000);
+
+  it('delivers integrated diff and observed checks to reviewer before review while source identity stays unknown', async () => {
+    const test = setup({
+      review: true,
+      artifactChange: true,
+      gitProject: true,
+      checkBeforeReview: true,
+      checkFails: true,
+    });
+    let terminal!: () => void;
+    const done = new Promise<void>((resolve) => (terminal = resolve));
+    const unsubscribe = test.orchestrator.subscribe((event) => {
+      if (event.type === 'run' && event.run.sessionId === test.session.id && event.run.status !== 'running') terminal();
+    });
+    try {
+      const started = await test.orchestrator.start(
+        test.session,
+        'Implement coordinated changes across the UI, storage, and API.',
+      );
+      await done;
+      const run = test.store.getRun(started.runId)!;
+      const workerInput = test.inputs.findIndex((input) => input.prompt.includes('Você é um executor delegado'));
+      const reviewerInput = test.inputs.findIndex((input) => input.prompt.includes('Faça revisão independente'));
+      const reviewerPrompt = test.inputs[reviewerInput]!.prompt;
+      expect(workerInput).toBeGreaterThanOrEqual(0);
+      expect(reviewerInput).toBeGreaterThan(workerInput);
+      expect(reviewerPrompt).toContain('"integration":"applied"');
+      expect(reviewerPrompt).toContain('"artifact:src/implemented.ts"');
+      expect(reviewerPrompt).toContain('"status":"failed"');
+      expect(reviewerPrompt).toContain('"exitCode":1');
+      // This integration uses an injected check runner; only the production runner can attest source identity.
+      expect(run.checkSource).toMatchObject({ runId: run.id, state: 'unknown' });
+      expect(run.checkSource).not.toHaveProperty('revision');
+      const checkEvents = test.store
+        .listEvents(test.session.id)
+        .filter((event) => event.runId === run.id && event.type === 'check');
+      expect(checkEvents.at(-1)?.check).toMatchObject({ status: 'failed', exitCode: 1 });
+      const persistedEvidence = await test.orchestrator.runEvidence.get(run.id);
+      expect(persistedEvidence?.checks).toContainEqual(
+        expect.objectContaining({ status: 'failed', exitCode: 1, output: 'falha observada' }),
+      );
+      expect(persistedEvidence?.workers).toContainEqual(
+        expect.objectContaining({
+          taskId: expect.any(String),
+          status: 'completed',
+          scope: expect.any(Array),
+          toolCalls: expect.any(Array),
+          deliveryEvidence: expect.any(Array),
+          delivery: expect.any(String),
+          integration: 'applied',
+          recoveryWorktree: null,
+        }),
+      );
+      const synthesis = test.inputs.find((input) => input.prompt.includes('Responda ao pedido completo'))!;
+      expect(synthesis.mcpServers?.map((server) => server.name)).toContain('adelic-run-evidence');
+      const reviewer = test.inputs[reviewerInput]!;
+      expect(reviewer.plan).toMatchObject({ tools: true });
+      expect(reviewer.sandbox).toBe('read-only');
+      expect(reviewer.approvalMode).toBe('automatic');
+      expect(reviewer.remote).toMatchObject({ executionKind: 'isolated-local' });
+      expect(reviewer.mcpServers?.map((server) => server.name)).toContain('adelic-run-evidence');
+      expect(test.store.listRuns(test.session.id)).toHaveLength(1); // autoFix is disabled
+    } finally {
+      unsubscribe();
+    }
   });
 
   it('gives the final answer completed task facts and preserves static-only review limitations', async () => {
@@ -1186,7 +1693,10 @@ describe('automatic orchestration', () => {
       const worker = test.store
         .listSessionTasks(test.session.id)
         .find((task) => task.runId === runId && task.role === 'worker')!;
-      expect(test.store.getRun(runId)?.status).toBe('completed');
+      expect(test.store.getRun(runId)).toMatchObject({
+        status: 'completed',
+        delivery: { response: 'completed', integration: 'applied', objective: 'unknown' },
+      });
       expect(readFileSync(join(test.projectRoot, 'src/implemented.ts'), 'utf8')).toContain('implemented');
       expect(existsSync(worktree.path)).toBe(false);
       expect(gitIn(test.projectRoot, 'worktree', 'list', '--porcelain')).not.toContain(worktree.path);
@@ -1432,65 +1942,70 @@ describe('automatic orchestration', () => {
     reloaded.close();
   });
 
-  it('persists the authorized tip for a real executor commit and recovers it after Store reload', async () => {
-    const test = setup({
-      artifactChange: true,
-      gitProject: true,
-      retainBranchCheckout: true,
-      commitExecutorChanges: true,
-    });
-    let terminal!: () => void;
-    const done = new Promise<void>((resolve) => (terminal = resolve));
-    const unsubscribe = test.orchestrator.subscribe((event) => {
-      if (event.type === 'run' && event.run.sessionId === test.session.id && event.run.status !== 'running') terminal();
-    });
-    try {
-      await test.orchestrator.start(test.session, 'Implemente uma melhoria no projeto');
-      await done;
-    } finally {
-      unsubscribe();
-    }
-    const task = test.store.listSessionTasks(test.session.id).find((entry) => entry.role === 'worker')!;
-    expect(task.integration).toMatchObject({
-      status: 'applied',
-      cleanup: 'pending',
-      cleanupResources: { worktree: 'removed', branch: 'preserved', ownershipProof: 'preserved' },
-    });
-    expect(task.recoveryWorktree?.cleanupBranchTip).toMatch(/^[0-9a-f]{40}$/);
-    expect(task.recoveryWorktree).toMatchObject({
-      executionStarted: true,
-      recoveryEvidence: { taskExecution: 'started' },
-    });
-    const authorizedTip = task.recoveryWorktree!.cleanupBranchTip!;
-    expect(authorizedTip).not.toBe(task.recoveryWorktree!.base);
-    expect(gitIn(test.projectRoot, 'rev-parse', `refs/heads/${task.recoveryWorktree!.branch}`).trim()).toBe(
-      authorizedTip,
-    );
-    expect(test.inputs.find((input) => input.prompt.includes('Você é um executor delegado'))?.cwd).not.toBe(
-      test.projectRoot,
-    );
-    const resumedStore = new Store(test.store.dataDir);
-    expect(resumedStore.getTask(task.id)?.recoveryWorktree).toMatchObject({
-      cleanupBranchTip: authorizedTip,
-      executionStarted: true,
-      recoveryEvidence: { taskExecution: 'started' },
-    });
-    await test.orchestrator.shutdown();
-    const resumed = new Orchestrator(resumedStore, test.providers);
-    try {
-      gitIn(test.projectRoot, 'worktree', 'remove', '--force', test.branchProtectorPath);
-      const recovered = await resumed.recoverTaskWorktree(task.id, 'apply');
-      expect(recovered.cleanupPending).toBe(false);
-      expect(recovered.task.integration).toMatchObject({
-        cleanup: 'complete',
-        cleanupResources: { worktree: 'removed', branch: 'removed', ownershipProof: 'removed' },
+  it(
+    'persists the authorized tip for a real executor commit and recovers it after Store reload',
+    async () => {
+      const test = setup({
+        artifactChange: true,
+        gitProject: true,
+        retainBranchCheckout: true,
+        commitExecutorChanges: true,
       });
-      expect(gitIn(test.projectRoot, 'branch', '--list', task.recoveryWorktree!.branch).trim()).toBe('');
-    } finally {
-      await resumed.shutdown();
-      resumedStore.close();
-    }
-  });
+      let terminal!: () => void;
+      const done = new Promise<void>((resolve) => (terminal = resolve));
+      const unsubscribe = test.orchestrator.subscribe((event) => {
+        if (event.type === 'run' && event.run.sessionId === test.session.id && event.run.status !== 'running')
+          terminal();
+      });
+      try {
+        await test.orchestrator.start(test.session, 'Implemente uma melhoria no projeto');
+        await done;
+      } finally {
+        unsubscribe();
+      }
+      const task = test.store.listSessionTasks(test.session.id).find((entry) => entry.role === 'worker')!;
+      expect(task.integration).toMatchObject({
+        status: 'applied',
+        cleanup: 'pending',
+        cleanupResources: { worktree: 'removed', branch: 'preserved', ownershipProof: 'preserved' },
+      });
+      expect(task.recoveryWorktree?.cleanupBranchTip).toMatch(/^[0-9a-f]{40}$/);
+      expect(task.recoveryWorktree).toMatchObject({
+        executionStarted: true,
+        recoveryEvidence: { taskExecution: 'started' },
+      });
+      const authorizedTip = task.recoveryWorktree!.cleanupBranchTip!;
+      expect(authorizedTip).not.toBe(task.recoveryWorktree!.base);
+      expect(gitIn(test.projectRoot, 'rev-parse', `refs/heads/${task.recoveryWorktree!.branch}`).trim()).toBe(
+        authorizedTip,
+      );
+      expect(test.inputs.find((input) => input.prompt.includes('Você é um executor delegado'))?.cwd).not.toBe(
+        test.projectRoot,
+      );
+      const resumedStore = new Store(test.store.dataDir);
+      expect(resumedStore.getTask(task.id)?.recoveryWorktree).toMatchObject({
+        cleanupBranchTip: authorizedTip,
+        executionStarted: true,
+        recoveryEvidence: { taskExecution: 'started' },
+      });
+      await test.orchestrator.shutdown();
+      const resumed = new Orchestrator(resumedStore, test.providers);
+      try {
+        gitIn(test.projectRoot, 'worktree', 'remove', '--force', test.branchProtectorPath);
+        const recovered = await resumed.recoverTaskWorktree(task.id, 'apply');
+        expect(recovered.cleanupPending).toBe(false);
+        expect(recovered.task.integration).toMatchObject({
+          cleanup: 'complete',
+          cleanupResources: { worktree: 'removed', branch: 'removed', ownershipProof: 'removed' },
+        });
+        expect(gitIn(test.projectRoot, 'branch', '--list', task.recoveryWorktree!.branch).trim()).toBe('');
+      } finally {
+        await resumed.shutdown();
+        resumedStore.close();
+      }
+    },
+    REAL_GIT_WORKFLOW_TIMEOUT_MS,
+  );
 
   it(
     'reconciles completed physical task cleanup after Store reload',
@@ -1670,17 +2185,22 @@ describe('automatic orchestration', () => {
   it.each([false, true])(
     'persists and streams synthesis disclosure (streaming=%s) without duplicating model text',
     async (synthesisStreaming) => {
-      const test = setup({ synthesisStreaming });
+      const test = setup({ synthesisStreaming, toolEvent: true });
       let terminal!: () => void;
       const done = new Promise<void>((resolve) => (terminal = resolve));
       const deltas: string[] = [];
+      let finalMessageEvent: { content: string; runId?: string } | undefined;
       const unsubscribe = test.orchestrator.subscribe((event) => {
         if (event.type === 'delta' && event.sessionId === test.session.id) deltas.push(event.text);
+        if (event.type === 'message' && event.message.sessionId === test.session.id) finalMessageEvent = event.message;
         if (event.type === 'run' && event.run.sessionId === test.session.id && event.run.status !== 'running')
           terminal();
       });
       try {
-        const started = await test.orchestrator.start(test.session, 'Implement a coordinated change');
+        const started = await test.orchestrator.start(
+          test.session,
+          'Analyze the architecture across UI, storage, and API and report observations.',
+        );
         await done;
         const answer = test.store
           .listMessages(test.session.id)
@@ -1688,6 +2208,7 @@ describe('automatic orchestration', () => {
         expect(answer?.content).toContain('Resposta da síntese.');
         expect(answer?.content).toContain('Fatos finais registrados pelo orquestrador');
         expect(answer?.content.split('Resposta da síntese.')).toHaveLength(2);
+        expect(finalMessageEvent).toMatchObject({ id: answer?.id, runId: started.runId, content: answer?.content });
         expect(deltas.join('')).toBe(answer?.content);
         expect(deltas.join('')).toContain('Fatos finais registrados pelo orquestrador');
       } finally {
@@ -1696,7 +2217,7 @@ describe('automatic orchestration', () => {
     },
   );
 
-  it('reports a failed worker and absent checks even when synthesis overclaims success', async () => {
+  it('records a failed worker and absent checks in factual finalization instead of synthesis', async () => {
     const test = setup({ workerFailure: true, synthesisResponse: 'completed' });
     let terminal!: () => void;
     const done = new Promise<void>((resolve) => (terminal = resolve));
@@ -1713,12 +2234,17 @@ describe('automatic orchestration', () => {
     const answer = test.store
       .listMessages(test.session.id)
       .find((message) => message.runId === runId && message.role === 'assistant');
-    expect(answer?.content).toContain('completed');
+    expect(answer?.content).toContain('Resultado factual (finalização estruturada; sem síntese de modelo).');
+    expect(answer?.content).not.toContain('completed');
+    expect(test.inputs.some((input) => input.prompt.includes('Fatos estruturados de execução'))).toBe(false);
     expect(answer?.content).toContain('processo failed');
     expect(answer?.content).toContain('fixture worker failure');
     expect(answer?.content).toContain('Ação recusada/bloqueada');
     expect(answer?.content).toContain('npm test');
     expect(answer?.content).toContain('validação não confirmada');
+    expect(test.store.getRun(runId)).toMatchObject({
+      delivery: { response: 'completed', integration: 'blocked', objective: 'unknown' },
+    });
     expect(
       test.store.listSessionTasks(test.session.id).find((task) => task.runId === runId && task.role === 'worker')
         ?.status,
@@ -1776,8 +2302,8 @@ describe('automatic orchestration', () => {
     expect(test.store.listMessages(test.session.id)).toEqual([]);
   });
 
-  it('captures automatic policy only for tool-enabled workers; tool-less planner and synthesis stay manual', async () => {
-    const test = setup({ worker: 'kiro' });
+  it('keeps planner tool-less and gives synthesis only read-only evidence retrieval', async () => {
+    const test = setup({ worker: 'kiro', artifactChange: true, gitProject: true });
     let completed!: () => void;
     const done = new Promise<void>((resolve) => (completed = resolve));
     const unsubscribe = test.orchestrator.subscribe((event) => {
@@ -1801,19 +2327,24 @@ describe('automatic orchestration', () => {
       plan: { tools: true },
       remote: { executionKind: 'isolated-local' },
     });
-    expect(synthesis).toMatchObject({ approvalMode: 'manual', plan: { tools: false } });
-    expect(synthesis.remote).toBeUndefined();
+    expect(synthesis).toMatchObject({
+      approvalMode: 'automatic',
+      plan: { tools: true },
+      sandbox: 'read-only',
+      remote: { executionKind: 'isolated-local' },
+    });
+    expect(synthesis.mcpServers?.map((server) => server.name)).toContain('adelic-run-evidence');
     expect(synthesis.prompt).toContain('Fatos estruturados de execução (JSON observado pelo orquestrador)');
     expect(synthesis.prompt).toContain('"providerId":"kiro","model":"model","effort":"high"');
     expect(synthesis.prompt).toContain('"status":"completed"');
-    expect(synthesis.prompt).toContain('"status":"not_implemented"');
+    expect(synthesis.prompt).toContain('"status":"implemented"');
     const workerTask = test.store.listSessionTasks(test.session.id).find((task) => task.role === 'worker')!;
     expect(workerTask).toMatchObject({
       agentId: expect.any(String),
       providerId: 'kiro',
       model: 'model',
       status: 'completed',
-      delivery: { status: 'not_implemented', recovery: { action: 'retry' } },
+      delivery: { status: 'implemented', recovery: { action: 'inspect' } },
     });
     const tasksById = new Map(test.store.listSessionTasks(test.session.id).map((task) => [task.id, task]));
     expect(
@@ -1875,6 +2406,60 @@ describe('automatic orchestration', () => {
       status: 'implemented',
       evidence: expect.arrayContaining(['artifact:src/implemented.ts']),
     });
+  });
+
+  it('persists the final provider answer over progress deltas and leaves delivery facts unknown', async () => {
+    const test = setup({
+      mode: 'fast',
+      directStreaming: true,
+      fastResponse: 'FINAL_ANSWER_ONLY',
+    });
+    const session = { ...test.session, mode: 'fast' as const };
+    test.store.putSession(session);
+    let complete!: (runId: string) => void;
+    const done = new Promise<string>((resolve) => (complete = resolve));
+    let finalMessageEvent: { content: string; runId?: string } | undefined;
+    const unsubscribe = test.orchestrator.subscribe((event) => {
+      if (event.type === 'message' && event.message.sessionId === session.id) finalMessageEvent = event.message;
+      if (event.type === 'run' && event.run.sessionId === session.id && event.run.status !== 'running')
+        complete(event.run.id);
+    });
+    try {
+      const started = await test.orchestrator.start(session, 'What is the project status?');
+      const runId = await done;
+      const answer = test.store
+        .listMessages(session.id)
+        .find((message) => message.runId === started.runId && message.role === 'assistant');
+      const storedRun = test.store.getRun(runId)!;
+      expect(answer?.content).toBe('FINAL_ANSWER_ONLY');
+      expect(answer?.content).not.toContain('PROGRESS_ONLY');
+      expect(finalMessageEvent).toMatchObject({
+        id: answer?.id,
+        runId: started.runId,
+        content: 'FINAL_ANSWER_ONLY',
+      });
+      expect(storedRun.providerAttempts).toHaveLength(1);
+      expect(storedRun.providerAttempts?.[0]).toMatchObject({
+        inputTokens: null,
+        outputTokens: null,
+        cachedInputTokens: null,
+        costUsd: null,
+      });
+      expect(storedRun.delivery).toMatchObject({
+        response: 'completed',
+        integration: 'unknown',
+        objective: 'unknown',
+      });
+      const reloaded = new Store(test.directory);
+      try {
+        expect(reloaded.getMessage(answer!.id)?.content).toBe('FINAL_ANSWER_ONLY');
+        expect(reloaded.getRun(runId)?.status).toBe('completed');
+      } finally {
+        reloaded.close();
+      }
+    } finally {
+      unsubscribe();
+    }
   });
 
   it('includes resolved continuity in the effective RunInput for route.fast after long intervening replies', async () => {
@@ -2181,8 +2766,20 @@ describe('automatic orchestration', () => {
   it('cancels autocompact context discovery and continues only after cancellation ends the run', async () => {
     vi.useFakeTimers();
     const test = setup({ orchestrationEnabled: false, autoCompact: true, slowDiscoveryCall: 3 });
+    let initialTerminal!: () => void;
+    const initialFinished = new Promise<void>((resolve) => (initialTerminal = resolve));
+    const unsubscribeInitial = test.orchestrator.subscribe((event) => {
+      if (event.type === 'run' && event.run.sessionId === test.session.id && event.run.status !== 'running')
+        initialTerminal();
+    });
     const initial = await test.orchestrator.start(test.session, 'First question.');
-    for (let i = 0; i < 20 && test.orchestrator.isActive(test.session.id); i++) await vi.advanceTimersByTimeAsync(0);
+    try {
+      for (let i = 0; i < 20 && test.orchestrator.isActive(test.session.id); i++) await vi.advanceTimersByTimeAsync(0);
+      await initialFinished;
+    } finally {
+      unsubscribeInitial();
+    }
+    expect(test.orchestrator.isActive(test.session.id)).toBe(false);
     expect(test.store.getRun(initial.runId)?.status).toBe('completed');
     const previous = test.store.getRun(initial.runId)!;
     previous.inputTokens = 2_000;

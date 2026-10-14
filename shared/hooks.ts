@@ -45,6 +45,11 @@ export interface CheckResult {
   truncated?: boolean;
   /** Why it could not run, or why it was cancelled. */
   detail?: string;
+  /** Per-invocation source/environment observations; absent on legacy or settings-test events. */
+  source?: import('./contracts.js').CheckSource;
+  environment?: import('./contracts.js').CheckEnvironmentEvidence;
+  /** Private operational log stored outside the project; full output is retrieved on demand. */
+  operationalLog?: { status: 'available' | 'truncated' | 'unavailable'; bytes?: number };
 }
 
 /** Trims and collapses every run of whitespace (spaces, tabs, newlines) into one space. */

@@ -57,6 +57,17 @@ function makeRepo() {
 const status = (dir: string) => gitIn(dir, 'status', '--porcelain');
 const head = (dir: string) => gitIn(dir, 'rev-parse', 'HEAD').trim();
 
+function waitForRunIdle(store: Pick<Store, 'getRun'>, isActive: (sessionId: string) => boolean, runId: string) {
+  return new Promise<Run>((resolve) => {
+    const check = () => {
+      const run = store.getRun(runId);
+      if (run && run.status !== 'running' && !isActive(run.sessionId)) return resolve(run);
+      setTimeout(check, 10);
+    };
+    check();
+  });
+}
+
 function setup(projectPath: string, opts: { dataDir?: string } = {}) {
   const dataDir = opts.dataDir ?? realpathSync(mkdtempSync(join(tmpdir(), 'adelic-wt-data-')));
   const store = new Store(dataDir);
@@ -127,15 +138,7 @@ function setup(projectPath: string, opts: { dataDir?: string } = {}) {
     if (server.listening) done();
     else server.once('listening', done);
   });
-  const finished = (runId: string) =>
-    new Promise<Run>((resolve) => {
-      const check = () => {
-        const run = store.getRun(runId);
-        if (run && run.status !== 'running') return resolve(run);
-        setTimeout(check, 10);
-      };
-      check();
-    });
+  const finished = (runId: string) => waitForRunIdle(store, (sessionId) => orchestrator.isActive(sessionId), runId);
   const session = (title = 'Corrigir o relatório', projectId: string | null = 'p') => {
     const s: Session = {
       id: `s${Math.random().toString(36).slice(2)}-${Date.now()}`,
@@ -1516,50 +1519,54 @@ describe('worktree per conversation', () => {
     await op;
   });
 
-  it('applies with a commit in the worktree and a --no-ff merge commit in the main checkout', async () => {
-    const repo = makeRepo();
-    const t = setup(repo);
-    const s = t.session('Aplicar mudança');
-    const wt = await t.enable(s.id);
-    await t.finished((await t.send(s.id, 'mude')).body.runId);
-    const before = head(repo);
-    expect((await t.api(`/api/sessions/${s.id}/worktree/apply`, { method: 'POST', body: {} })).status).toBe(400);
-    const r = await t.api<{ commit: string; branch: string; status: WorktreeStatus }>(
-      `/api/sessions/${s.id}/worktree/apply`,
-      { method: 'POST', body: { confirm: true } },
-    );
-    expect(r.status, JSON.stringify(r.body)).toBe(200);
-    expect(r.body.branch).toBe('main');
-    expect(head(repo)).toBe(r.body.commit);
-    expect(gitIn(repo, 'rev-list', '--parents', '-n', '1', 'HEAD').trim().split(' ')).toHaveLength(3);
-    expect(gitIn(repo, 'rev-parse', 'HEAD^1').trim()).toBe(before);
-    expect(gitIn(repo, 'log', '-1', '--format=%s', 'HEAD^2').trim()).toBe('Adelic: Aplicar mudança');
-    // Without a configured identity (repository or global), the Adelic one is used.
-    const configuredName = (() => {
-      try {
-        return gitIn(repo, 'config', 'user.name').trim();
-      } catch {
-        return '';
-      }
-    })();
-    expect(gitIn(repo, 'log', '-1', '--format=%an', 'HEAD^2').trim()).toBe(configuredName || 'Adelic');
-    expect(gitIn(repo, 'config', '--local', '--list')).not.toContain('user.');
-    expect(readFileSync(join(repo, 'README.md'), 'utf8')).toContain('alterada pelo agente');
-    expect(status(repo)).toBe('');
-    expect(gitIn(repo, 'branch', '--show-current').trim()).toBe('main');
-    expect(r.body.status).toMatchObject({ merged: true, branchMerged: true, dirty: false });
-    expect(r.body.status.applyBlocked).toBe('As alterações já estão no projeto');
-    // Forced deletion of a merged session branch remains available only by explicit choice.
-    const gone = await t.api<{ branchDeleted: boolean; session: Session }>(`/api/sessions/${s.id}/worktree`, {
-      method: 'DELETE',
-      body: { deleteBranch: true },
-    });
-    expect(gone.body.branchDeleted).toBe(true);
-    expect(gone.body.session.worktree).toBeUndefined();
-    expect(existsSync(wt.path)).toBe(false);
-    expect(gitIn(repo, 'branch', '--list', wt.branch).trim()).toBe('');
-    expect(gitIn(repo, 'worktree', 'list', '--porcelain')).not.toContain(wt.path);
-  });
+  it(
+    'applies with a commit in the worktree and a --no-ff merge commit in the main checkout',
+    async () => {
+      const repo = makeRepo();
+      const t = setup(repo);
+      const s = t.session('Aplicar mudança');
+      const wt = await t.enable(s.id);
+      await t.finished((await t.send(s.id, 'mude')).body.runId);
+      const before = head(repo);
+      expect((await t.api(`/api/sessions/${s.id}/worktree/apply`, { method: 'POST', body: {} })).status).toBe(400);
+      const r = await t.api<{ commit: string; branch: string; status: WorktreeStatus }>(
+        `/api/sessions/${s.id}/worktree/apply`,
+        { method: 'POST', body: { confirm: true } },
+      );
+      expect(r.status, JSON.stringify(r.body)).toBe(200);
+      expect(r.body.branch).toBe('main');
+      expect(head(repo)).toBe(r.body.commit);
+      expect(gitIn(repo, 'rev-list', '--parents', '-n', '1', 'HEAD').trim().split(' ')).toHaveLength(3);
+      expect(gitIn(repo, 'rev-parse', 'HEAD^1').trim()).toBe(before);
+      expect(gitIn(repo, 'log', '-1', '--format=%s', 'HEAD^2').trim()).toBe('Adelic: Aplicar mudança');
+      // Without a configured identity (repository or global), the Adelic one is used.
+      const configuredName = (() => {
+        try {
+          return gitIn(repo, 'config', 'user.name').trim();
+        } catch {
+          return '';
+        }
+      })();
+      expect(gitIn(repo, 'log', '-1', '--format=%an', 'HEAD^2').trim()).toBe(configuredName || 'Adelic');
+      expect(gitIn(repo, 'config', '--local', '--list')).not.toContain('user.');
+      expect(readFileSync(join(repo, 'README.md'), 'utf8')).toContain('alterada pelo agente');
+      expect(status(repo)).toBe('');
+      expect(gitIn(repo, 'branch', '--show-current').trim()).toBe('main');
+      expect(r.body.status).toMatchObject({ merged: true, branchMerged: true, dirty: false });
+      expect(r.body.status.applyBlocked).toBe('As alterações já estão no projeto');
+      // Forced deletion of a merged session branch remains available only by explicit choice.
+      const gone = await t.api<{ branchDeleted: boolean; session: Session }>(`/api/sessions/${s.id}/worktree`, {
+        method: 'DELETE',
+        body: { deleteBranch: true },
+      });
+      expect(gone.body.branchDeleted).toBe(true);
+      expect(gone.body.session.worktree).toBeUndefined();
+      expect(existsSync(wt.path)).toBe(false);
+      expect(gitIn(repo, 'branch', '--list', wt.branch).trim()).toBe('');
+      expect(gitIn(repo, 'worktree', 'list', '--porcelain')).not.toContain(wt.path);
+    },
+    REAL_GIT_WORKFLOW_TIMEOUT_MS,
+  );
 
   it('uses the repository identity when configured', async () => {
     const repo = makeRepo();
@@ -1690,39 +1697,48 @@ describe('worktree per conversation', () => {
     expect(existsSync(marker)).toBe(false);
   });
 
-  it('discards with or without deleting the unmerged branch', async () => {
-    const repo = makeRepo();
-    const t = setup(repo);
-    const keep = t.session('Manter branch');
-    const kept = await t.enable(keep.id);
-    await t.finished((await t.send(keep.id, 'mude')).body.runId);
-    gitIn(kept.path, 'add', '-A');
-    gitIn(kept.path, ...ID, 'commit', '-qm', 'trabalho');
-    expect(
-      (await t.api(`/api/sessions/${keep.id}/worktree`, { method: 'DELETE', body: { deleteBranch: 'x' } })).status,
-    ).toBe(400);
-    const r1 = await t.api<{ branchDeleted: boolean; removed: boolean }>(`/api/sessions/${keep.id}/worktree`, {
-      method: 'DELETE',
-      body: { deleteBranch: false },
-    });
-    expect(r1.body).toMatchObject({ removed: true, branchDeleted: false });
-    expect(existsSync(kept.path)).toBe(false);
-    expect(gitIn(repo, 'branch', '--list', kept.branch).trim()).toContain(kept.branch);
-    expect(t.store.getSession(keep.id)!.worktree).toBeUndefined();
-    expect(() => gitIn(repo, 'rev-parse', '--verify', kept.ownershipProofRef!)).toThrow();
+  it(
+    'discards with or without deleting the unmerged branch',
+    async () => {
+      const repo = makeRepo();
+      const t = setup(repo);
+      const keep = t.session('Manter branch');
+      const kept = await t.enable(keep.id);
+      await t.finished((await t.send(keep.id, 'mude')).body.runId);
+      gitIn(kept.path, 'add', '-A');
+      gitIn(kept.path, ...ID, 'commit', '-qm', 'trabalho');
+      expect(
+        (await t.api(`/api/sessions/${keep.id}/worktree`, { method: 'DELETE', body: { deleteBranch: 'x' } })).status,
+      ).toBe(400);
+      const r1 = await t.api<{ branchDeleted: boolean; removed: boolean }>(`/api/sessions/${keep.id}/worktree`, {
+        method: 'DELETE',
+        body: { deleteBranch: false },
+      });
+      expect(r1.body).toMatchObject({ removed: true, branchDeleted: false });
+      expect(existsSync(kept.path)).toBe(false);
+      expect(gitIn(repo, 'branch', '--list', kept.branch).trim()).toContain(kept.branch);
+      expect(t.store.getSession(keep.id)!.worktree).toBeUndefined();
+      expect(() => gitIn(repo, 'rev-parse', '--verify', kept.ownershipProofRef!)).toThrow();
 
-    const drop = t.session('Apagar branch');
-    const dropped = await t.enable(drop.id);
-    await t.finished((await t.send(drop.id, 'mude')).body.runId);
-    const r2 = await t.api<{ branchDeleted: boolean }>(`/api/sessions/${drop.id}/worktree`, {
-      method: 'DELETE',
-      body: { deleteBranch: true },
-    });
-    expect(r2.body.branchDeleted).toBe(true);
-    expect(gitIn(repo, 'branch', '--list', dropped.branch).trim()).toBe('');
-    expect(status(repo)).toBe('');
-    expect(gitIn(repo, 'branch', '--show-current').trim()).toBe('main');
-  });
+      const drop = t.session('Apagar branch');
+      const dropped = await t.enable(drop.id);
+      await t.finished((await t.send(drop.id, 'mude')).body.runId);
+      expect(t.store.getSession(drop.id)?.activeRunId).toBeUndefined();
+      expect(t.orchestrator.isActive(drop.id)).toBe(false);
+      const r2 = await t.api<{ branchDeleted: boolean }>(`/api/sessions/${drop.id}/worktree`, {
+        method: 'DELETE',
+        body: { deleteBranch: true },
+      });
+      expect(r2.status, JSON.stringify(r2.body)).toBe(200);
+      expect(r2.body.branchDeleted).toBe(true);
+      expect(existsSync(dropped.path)).toBe(false);
+      expect(t.store.getSession(drop.id)?.worktree).toBeUndefined();
+      expect(gitIn(repo, 'branch', '--list', dropped.branch).trim()).toBe('');
+      expect(status(repo)).toBe('');
+      expect(gitIn(repo, 'branch', '--show-current').trim()).toBe('main');
+    },
+    REAL_GIT_WORKFLOW_TIMEOUT_MS,
+  );
 
   it('keeps committed session branches by default in both the HTTP and orchestrator APIs', async () => {
     const repo = makeRepo();
@@ -1857,9 +1873,9 @@ describe('worktree per conversation', () => {
       cleanupPending: true,
     });
     const run = await restarted.start(reloadedStore.getSession(session.id)!, 'run in project');
-    for (let attempt = 0; attempt < 100 && reloadedStore.getRun(run.runId)?.status === 'running'; attempt++)
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    expect(reloadedStore.getRun(run.runId)?.status).toBe('completed');
+    expect(await waitForRunIdle(reloadedStore, (sessionId) => restarted.isActive(sessionId), run.runId)).toMatchObject({
+      status: 'completed',
+    });
     expect(t.inputs.at(-1)?.cwd).toBe(repo);
 
     gitIn(repo, 'worktree', 'remove', '--force', protector);
@@ -2070,9 +2086,9 @@ describe('worktree per conversation', () => {
 
     // A retained cleanup handle is not a live workspace; post-restart runs use the project root.
     const resumed = await restarted.start(reloadedStore.getSession(session.id)!, 'run in project');
-    for (let attempt = 0; attempt < 100 && reloadedStore.getRun(resumed.runId)?.status === 'running'; attempt++)
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    expect(reloadedStore.getRun(resumed.runId)?.status).toBe('completed');
+    expect(
+      await waitForRunIdle(reloadedStore, (sessionId) => restarted.isActive(sessionId), resumed.runId),
+    ).toMatchObject({ status: 'completed' });
     expect(t.inputs.at(-1)?.cwd).toBe(repo);
 
     gitIn(repo, 'worktree', 'remove', '--force', protector);

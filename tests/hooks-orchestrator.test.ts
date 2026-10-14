@@ -1,6 +1,6 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createServer, type Server } from 'node:http';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createBackend } from '../server/index.js';
@@ -174,6 +174,7 @@ function setup(
     api(`/api/approvals/${encodeURIComponent(approvalId)}`, { method: 'POST', body: { decision, sessionId } });
   return {
     store,
+    dataDir,
     orchestrator,
     api,
     session,
@@ -329,7 +330,109 @@ describe.skipIf(!hasBwrap)('after-edit checks', () => {
   });
 });
 
+describe('Run evidence refresh', () => {
+  it('serializes overlapping refreshes and preserves the terminal snapshot', async () => {
+    const ctx = setup(makeRepo());
+    const s = ctx.session();
+    const { runId } = await ctx.orchestrator.start(s, '[nada]');
+    await ctx.finished(runId);
+
+    const run = ctx.store.getRun(runId)!;
+    run.status = 'running';
+    ctx.store.putRun(run);
+    const internals = ctx.orchestrator as unknown as {
+      refreshRunEvidence(id: string): Promise<void>;
+    };
+    let releaseFirst!: () => void;
+    let enteredFirst!: () => void;
+    const firstPutStarted = new Promise<void>((resolve) => (enteredFirst = resolve));
+    const firstPut = new Promise<void>((resolve) => (releaseFirst = resolve));
+    const originalPut = ctx.orchestrator.runEvidence.put.bind(ctx.orchestrator.runEvidence);
+    let putCount = 0;
+    vi.spyOn(ctx.orchestrator.runEvidence, 'put').mockImplementation(async (record) => {
+      if (++putCount === 1) {
+        enteredFirst();
+        await firstPut;
+      }
+      return originalPut(record);
+    });
+
+    const earlier = internals.refreshRunEvidence(runId);
+    await firstPutStarted;
+    const terminal = ctx.store.getRun(runId)!;
+    terminal.status = 'completed';
+    ctx.store.putRun(terminal);
+    ctx.store.addEvent({
+      id: '11111111-1111-4111-8111-111111111111',
+      runId,
+      sessionId: s.id,
+      type: 'check',
+      text: 'Verificação falhou',
+      createdAt: new Date().toISOString(),
+      check: { name: 'typecheck', status: 'failed', exitCode: 1, durationMs: 1, output: 'erro' },
+    });
+    const later = internals.refreshRunEvidence(runId);
+    releaseFirst();
+    await Promise.all([earlier, later]);
+
+    const evidence = await ctx.orchestrator.runEvidence.get(runId);
+    expect(evidence?.outcome.status).toBe('completed');
+    expect(evidence?.checks).toMatchObject([{ name: 'typecheck', status: 'failed', exitCode: 1 }]);
+  });
+
+  it('catches persistence failure when the evidence ancestor is a symlink', async () => {
+    const ctx = setup(makeRepo());
+    const s = ctx.session();
+    const { runId } = await ctx.orchestrator.start(s, '[nada]');
+    await ctx.finished(runId);
+    const outside = mkdtempSync(join(tmpdir(), 'adelic-evidence-outside-'));
+    cleanup.push(() => rmSync(outside, { recursive: true, force: true }));
+    rmSync(join(ctx.dataDir, 'run-evidence'), { recursive: true, force: true });
+    symlinkSync(outside, join(ctx.dataDir, 'run-evidence'));
+
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const internals = ctx.orchestrator as unknown as {
+      scheduleRunEvidenceRefresh(id: string): void;
+    };
+    internals.scheduleRunEvidenceRefresh(runId);
+    await until(() => warn.mock.calls.length > 0);
+    expect(warn.mock.calls[0]?.[0]).toContain('Run evidence unavailable');
+    expect(existsSync(join(outside, runId + '.json'))).toBe(false);
+  });
+});
+
 describe('automatic fix', () => {
+  it('rechecks autoFix immediately before starting a delayed repair', async () => {
+    const repo = makeRepo();
+    let releaseCheck!: (result: CheckResult) => void;
+    let checkStarted!: () => void;
+    const started = new Promise<void>((resolve) => (checkStarted = resolve));
+    const runner: typeof runCheck = async (check) => {
+      checkStarted();
+      return await new Promise<CheckResult>((resolve) => (releaseCheck = resolve)).then((result) => ({
+        ...result,
+        name: check.name,
+      }));
+    };
+    const { orchestrator, session, finished, store, setHooks, checks, settled } = setup(repo, { runner });
+    await setHooks({
+      afterEdit: [{ name: 'testes', command: 'npm test', timeoutSec: 60, enabled: true }],
+      autoFix: true,
+    });
+    const s = session();
+    const { runId } = await orchestrator.start(s, 'altere');
+    await finished(runId);
+    await started;
+    await until(() => checks(s.id, runId).some((event) => event.check.status === 'running'));
+    await setHooks({ autoFix: false });
+    releaseCheck({ name: 'testes', status: 'failed', exitCode: 1, durationMs: 5, output: 'falha' });
+    await settled(s.id, 1);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(store.getRun(runId)?.status).toBe('completed');
+    expect(store.listRuns(s.id)).toHaveLength(1);
+    expect(store.listRuns(s.id).some((run) => run.hookFix?.sourceRunId === runId)).toBe(false);
+  });
+
   it('starts one follow-up run with the bounded failure output, never a second one', async () => {
     const repo = makeRepo();
     let calls = 0;

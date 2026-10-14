@@ -692,6 +692,14 @@ rl.on('line', (line) => {
     }
     if (process.env.FAKE_SCENARIO === 'crash-after-start') { setTimeout(() => process.exit(0), 20); return; }
     if (message.params.input[0].text.includes('wait for cancellation')) return;
+    if (process.env.FAKE_SCENARIO === 'protocol-retry-phase') {
+      send({ jsonrpc: '2.0', method: 'item/agentMessage/delta', params: { threadId: 'thread-1', delta: 'working progress' } });
+      send({ jsonrpc: '2.0', method: 'item/completed', params: { threadId: 'thread-1', item: { id: 'msg-progress', type: 'agentMessage', text: 'working progress', phase: 'commentary' } } });
+      send({ jsonrpc: '2.0', method: 'error', params: { threadId: 'thread-1', error: { message: 'temporary reconnect' }, willRetry: true } });
+      send({ jsonrpc: '2.0', method: 'item/completed', params: { threadId: 'thread-1', item: { id: 'msg-final', type: 'agentMessage', text: 'final answer', phase: 'final_answer' } } });
+      send({ jsonrpc: '2.0', method: 'turn/completed', params: { threadId: 'thread-1', turn: { id: turnId, status: 'completed' } } });
+      return;
+    }
     send({ jsonrpc: '2.0', method: 'item/agentMessage/delta', params: { threadId: 'thread-1', delta: 'fake streamed answer' } });
     send({ jsonrpc: '2.0', method: 'turn/completed', params: { threadId: 'thread-1', turn: { id: turnId, status: 'completed' } } });
   } else if (message.method === 'turn/steer') {
@@ -778,6 +786,29 @@ rl.on('line', (line) => {
     });
     expect(events).toEqual(['fake streamed answer']);
     await provider.shutdown();
+  });
+
+  it('keeps streamed progress separate from the phase-marked answer and honors native willRetry', async () => {
+    const prior = process.env.FAKE_SCENARIO;
+    process.env.FAKE_SCENARIO = 'protocol-retry-phase';
+    const provider = fixtureCodex(await fakeServer());
+    const events: { type: string; text?: string }[] = [];
+    try {
+      const result = await provider.run(
+        runInput('answer after retry'),
+        (event) => {
+          if (event.type === 'delta' || event.type === 'status') events.push(event);
+        },
+        new AbortController().signal,
+      );
+      expect(result.text).toBe('final answer');
+      expect(events).toContainEqual({ type: 'delta', text: 'working progress' });
+      expect(events).toContainEqual({ type: 'status', text: 'Codex informou que tentará novamente.' });
+    } finally {
+      await provider.shutdown();
+      if (prior === undefined) delete process.env.FAKE_SCENARIO;
+      else process.env.FAKE_SCENARIO = prior;
+    }
   });
 
   it('auto-approves the Codex-only neutral non-login shell wrapper but keeps login wrappers pending', async () => {

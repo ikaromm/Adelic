@@ -52,6 +52,63 @@ export function runsRoutes({ store, orchestrator }: BackendContext) {
     if (!run) return error(res, 404, 'common.runNotFound');
     res.json(run.artifacts ?? { status: 'unknown', files: [] });
   });
+  app.get('/api/runs/:id/evidence', async (req, res) => {
+    if (requestKind(req) !== 'local') return error(res, 403, LOCAL_ONLY);
+    const run = store.getRun(req.params.id);
+    if (!run) return error(res, 404, 'common.runNotFound');
+    const evidence = await orchestrator.runEvidence.get(run.id).catch(() => undefined);
+    if (!evidence) return error(res, 404, 'common.runNotFound');
+    const eventId = typeof req.query.checkEventId === 'string' ? req.query.checkEventId : undefined;
+    res.setHeader('Cache-Control', 'no-store');
+    const offset = Math.max(0, Math.floor(Number(req.query.offset) || 0));
+    const limit = Math.min(12_000, Math.max(1, Math.floor(Number(req.query.limit) || 12_000)));
+    if (req.query.review === 'true') {
+      const full = evidence.fullReview ?? '';
+      const review = full.slice(offset, offset + limit);
+      return res.json({
+        review,
+        totalChars: full.length,
+        nextOffset: offset + review.length < full.length ? offset + review.length : null,
+      });
+    }
+    if (!eventId) {
+      return res.json({
+        runId: evidence.runId,
+        sessionId: evidence.sessionId,
+        capturedAt: evidence.capturedAt,
+        source: evidence.source,
+        environment: evidence.environment,
+        artifacts: evidence.artifacts,
+        outcome: evidence.outcome,
+        review: evidence.review,
+        checks: evidence.checks.map(
+          ({ eventId, name, status, exitCode, command, truncated, detail, operationalLog, source, environment }) => ({
+            eventId,
+            name,
+            status,
+            exitCode,
+            command,
+            truncated,
+            detail,
+            operationalLog,
+            source,
+            environment,
+          }),
+        ),
+      });
+    }
+    const check = evidence.checks.find((item) => item.eventId === eventId);
+    if (!check) return error(res, 404, 'git.fileNotListed');
+    const full = await orchestrator.runEvidence.getCheckLog(run.id, eventId).catch(() => undefined);
+    const output = full?.slice(offset, offset + limit) ?? (offset === 0 ? (check.output ?? '').slice(-limit) : '');
+    return res.json({
+      ...check,
+      output,
+      totalChars: full?.length ?? (check.output ?? '').length,
+      nextOffset: full && offset + output.length < full.length ? offset + output.length : null,
+      completeLogAvailable: Boolean(full && check.operationalLog?.status === 'available'),
+    });
+  });
   app.get('/api/runs/:id/artifacts/file', async (req, res) => {
     if (requestKind(req) !== 'local') return error(res, 403, LOCAL_ONLY);
     const run = store.getRun(req.params.id);

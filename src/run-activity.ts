@@ -1,6 +1,15 @@
 import type { CheckResult } from '../shared/hooks';
-import type { DelegatedTask, FileChange, RunEvent, RunStatus } from '../shared/contracts';
+import type { DelegatedTask, FileChange, Run, RunEvent, RunStatus } from '../shared/contracts';
 import { t } from './i18n';
+
+/** Factual run outcome only; pre-telemetry runs remain explicitly unknown. */
+export function runOutcomeState(run?: Pick<Run, 'delivery'>) {
+  return {
+    response: run?.delivery?.response ?? 'unknown',
+    integration: run?.delivery?.integration ?? 'unknown',
+    objective: run?.delivery?.objective ?? 'unknown',
+  } as const;
+}
 
 export interface RunActivity {
   tasks: DelegatedTask[];
@@ -110,6 +119,54 @@ export function actionNeedsDisclosure(event: RunEvent): boolean {
   return event.toolName === 'commandExecution' || event.text.length > 160;
 }
 
+const MCP_DIAGNOSTIC = /^Servidor: (.*?) · Ferramenta: (.*?) · Estado: (.*?) · Erro: ([\s\S]*)$/;
+const MCP_DIAGNOSTIC_LIMIT = 160;
+
+/**
+ * Localize the bounded diagnostic envelope emitted by the Codex adapter. Legacy or malformed
+ * events stay visible as explicitly unknown, without echoing unstructured tool payloads.
+ */
+export function toolActionDescription(event: RunEvent): string {
+  if (event.toolName !== 'mcpToolCall') return event.text;
+  const match = MCP_DIAGNOSTIC.exec(event.text);
+  const [, rawServer, rawTool, rawStatus, rawError] = match ?? [];
+  const server = diagnosticValue(rawServer ?? '', 'activity.mcp.serverUnknown');
+  const tool = diagnosticValue(rawTool ?? '', 'activity.mcp.toolUnknown');
+  const state = diagnosticValue(rawStatus ?? '', 'activity.mcp.stateUnknown');
+  const error = diagnosticValue(rawError ?? '', 'activity.mcp.errorUnreported');
+  return t('activity.mcp.diagnostic', { server, tool, state, error });
+}
+
+/** Historical MCP statuses may have been defaulted to completed by the producer. */
+export function toolActionStatus(event: RunEvent): string {
+  if (event.toolName !== 'mcpToolCall' || MCP_DIAGNOSTIC.test(event.text)) return event.status ?? 'unknown';
+  if (isActionInProgress(event.status) || event.status === 'failed' || event.status === 'cancelled')
+    return event.status ?? 'unknown';
+  return 'unknown';
+}
+
+function diagnosticValue(
+  value: string,
+  missingKey:
+    | 'activity.mcp.serverUnknown'
+    | 'activity.mcp.toolUnknown'
+    | 'activity.mcp.stateUnknown'
+    | 'activity.mcp.errorUnreported',
+): string {
+  const normalized = boundedDiagnostic(value, MCP_DIAGNOSTIC_LIMIT);
+  if (!normalized || normalized === 'não informado' || normalized === 'não informada') return t(missingKey);
+  if (normalized === 'não reportado') return t('activity.mcp.errorUnreported');
+  return normalized;
+}
+
+function boundedDiagnostic(value: string, maxLength: number): string {
+  const safe = value
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return safe.length > maxLength ? `${safe.slice(0, maxLength - 1)}…` : safe;
+}
+
 /** One-line preview of an action; shell commands lose the `bash -lc '…'` wrapper added by runtimes. */
 export function commandPreview(text: string, maxLength = 240): string {
   const trimmed = text.trim();
@@ -135,6 +192,7 @@ export function statusLabel(status?: string): string {
   if (status === 'completed') return t('activity.status.completed');
   if (status === 'failed') return t('activity.status.failed');
   if (status === 'cancelled') return t('activity.status.cancelled');
+  if (status === 'unknown') return t('activity.status.unknown');
   return status;
 }
 

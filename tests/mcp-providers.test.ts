@@ -5,10 +5,13 @@ import { spawn } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 import { CodexProvider, codexMcpConfig } from '../server/providers/codex';
+import { RunEvidenceStore } from '../server/run-evidence';
+import { delegatedEvidenceInputIdentity } from '../server/orchestrator';
 import { KiroProvider, kiroForeignMcp, kiroMcpServers } from '../server/providers/kiro';
 import { bubblewrap, mcpCommandBindings } from '../server/providers/sandbox';
-import type { Approval, ProviderEvent, RunInput } from '../shared/contracts';
+import type { Approval, ProviderEvent, RunEvent, RunInput } from '../shared/contracts';
 import type { RunMcpServer } from '../shared/mcp';
+import { toolActionDescription, toolActionStatus } from '../src/run-activity';
 
 const dirs: string[] = [];
 afterEach(async () => {
@@ -30,6 +33,7 @@ interface Logged {
   id?: number;
   params: Loose;
   result: Loose;
+  evidenceDispatch?: { status: number | null; stdout: string; stderr: string };
 }
 // An existing executable: providers refuse a missing MCP command before starting.
 const docs: RunMcpServer = {
@@ -67,6 +71,7 @@ async function fakeCodex(dir: string) {
     `#!/usr/bin/env node
 import readline from 'node:readline';
 import fs from 'node:fs';
+import { spawnSync } from 'node:child_process';
 const log=${JSON.stringify(log)};
 fs.appendFileSync(log, JSON.stringify({ argv: process.argv.slice(2) }) + '\\n');
 const send=(m)=>process.stdout.write(JSON.stringify(m)+'\\n');
@@ -85,7 +90,14 @@ readline.createInterface({input:process.stdin}).on('line',(line)=>{
   }
   else if(m.method==='turn/start'){
     send({jsonrpc:'2.0',id:m.id,result:{turn:{id:'u1'}}});
-    if(process.env.FAKE_ELICIT){ send({jsonrpc:'2.0',id:900,method:'mcpServer/elicitation/request',params:{threadId:'t1',turnId:'u1',serverName:process.env.FAKE_ELICIT,mode:'form',_meta:null,message:'Run tool search?',requestedSchema:{type:'object',properties:{}}}}); return; }
+    if(process.env.FAKE_CALL_EVIDENCE){
+      const c=configured['adelic-run-evidence'];
+      const wire=[{jsonrpc:'2.0',id:1,method:'initialize',params:{}},{jsonrpc:'2.0',id:2,method:'tools/call',params:{name:'get_run_evidence',arguments:{}}}].map(x=>JSON.stringify(x)).join('\\n')+'\\n';
+      const result=spawnSync(c.command,c.args,{encoding:'utf8',input:wire,env:{...process.env,...c.env}});
+      fs.appendFileSync(log,JSON.stringify({evidenceDispatch:{status:result.status,stdout:result.stdout,stderr:result.stderr}})+'\\n');
+    }
+    if(process.env.FAKE_ELICIT){ send({jsonrpc:'2.0',id:900,method:'mcpServer/elicitation/request',params:{threadId:process.env.FAKE_ELICIT_THREAD||'t1',turnId:'u1',serverName:process.env.FAKE_ELICIT_SERVER||process.env.FAKE_ELICIT,mode:process.env.FAKE_ELICIT_MODE||'form',_meta:null,message:'Allow the server to run its tool?',requestedSchema:{type:'object',properties:{}}}}); return; }
+    if(process.env.FAKE_MCP_ITEM){ const item=JSON.parse(process.env.FAKE_MCP_ITEM); send({jsonrpc:'2.0',method:'item/started',params:{threadId:'t1',item}}); send({jsonrpc:'2.0',method:'item/completed',params:{threadId:'t1',item}}); }
     send({jsonrpc:'2.0',method:'turn/completed',params:{threadId:'t1',turn:{id:'u1',status:'completed'}}});
   }
 });
@@ -173,6 +185,121 @@ describe('Codex MCP configuration', () => {
     expect(events).toContainEqual({ type: 'status', text: 'Servidores MCP do projeto nesta execução: docs, other' });
   });
 
+  it('passes only the run evidence MCP to the isolated remote profile with configured automatic approval', async () => {
+    const dir = await tempDir();
+    const fake = await fakeCodex(dir);
+    const runEvidence = new RunEvidenceStore(dir);
+    const runId = '123e4567-e89b-12d3-a456-426614174000';
+    await runEvidence.put({
+      runId,
+      sessionId: 'session-empty',
+      capturedAt: new Date().toISOString(),
+      source: { state: 'unchanged' },
+      environment: [],
+      artifacts: { status: 'available', files: [] },
+      checks: [],
+      outcome: { status: 'completed' },
+    });
+    const evidence = runEvidence.mcpServer(runId);
+    const remote = {
+      label: 'Local isolado',
+      root: '/workspace',
+      executionKind: 'isolated-local' as const,
+      call: async () => ({ ok: true }),
+    };
+    const codex = provider(fake.file);
+    try {
+      await expect(
+        codex.run(
+          input(dir, { runId, evidenceRunId: runId, approvalMode: 'automatic', remote, mcpServers: [docs, evidence] }),
+          () => undefined,
+          new AbortController().signal,
+        ),
+      ).resolves.toMatchObject({ stopReason: 'completed' });
+    } finally {
+      await codex.shutdown();
+    }
+    const start = (await fake.read()).find((item) => item.method === 'thread/start')!;
+    expect(Object.keys(start.params.config.mcp_servers)).toEqual(['adelic-run-evidence']);
+    expect(start.params.config.mcp_servers['adelic-run-evidence']).toMatchObject({
+      command: process.execPath,
+      args: expect.arrayContaining([expect.stringContaining('get_run_evidence')]),
+      env: {
+        ADELIC_RUN_EVIDENCE_FILE: evidence.env.ADELIC_RUN_EVIDENCE_FILE,
+        ADELIC_RUN_EVIDENCE_LOG_DIR: evidence.env.ADELIC_RUN_EVIDENCE_LOG_DIR,
+      },
+      enabled_tools: ['get_run_evidence'],
+      default_tools_approval_mode: 'auto',
+    });
+    expect(start.params.sandbox).toBe('read-only');
+  });
+
+  it('dispatches an allowed evidence read through the isolated read-only automatic provider transport', async () => {
+    const dir = await tempDir();
+    const fake = await fakeCodex(dir);
+    const runEvidence = new RunEvidenceStore(dir);
+    const runId = '123e4567-e89b-12d3-a456-426614174001';
+    await runEvidence.put({
+      runId,
+      sessionId: 'session-dispatch',
+      capturedAt: new Date().toISOString(),
+      source: { state: 'changed', marker: 'usable-evidence-response' },
+      environment: [{ marker: 'observed-environment' }],
+      artifacts: { status: 'available', files: [{ path: 'src/real.ts', status: 'modified' }] },
+      checks: [],
+      outcome: { status: 'completed' },
+    });
+    const evidence = runEvidence.mcpServer(runId);
+    const remote = {
+      label: 'Local isolado',
+      root: '/workspace',
+      executionKind: 'isolated-local' as const,
+      call: async () => ({ ok: true }),
+    };
+    await withEnv({ FAKE_HOST_MCP: '{}', FAKE_CALL_EVIDENCE: '1' }, async () => {
+      const codex = provider(fake.file);
+      try {
+        await expect(
+          codex.run(
+            input(dir, {
+              runId,
+              evidenceRunId: runId,
+              approvalMode: 'automatic',
+              remote,
+              mcpServers: [docs, evidence],
+            }),
+            () => undefined,
+            new AbortController().signal,
+          ),
+        ).resolves.toMatchObject({ stopReason: 'completed' });
+      } finally {
+        await codex.shutdown();
+      }
+    });
+
+    const log = await fake.read();
+    const start = log.find((item) => item.method === 'thread/start')!;
+    expect(Object.keys(start.params.config.mcp_servers)).toEqual(['adelic-run-evidence']);
+    expect(start.params.config.mcp_servers['adelic-run-evidence']).toMatchObject({
+      enabled_tools: ['get_run_evidence'],
+      default_tools_approval_mode: 'auto',
+    });
+    expect(start.params.sandbox).toBe('read-only');
+    const dispatch = log.find((item) => item.evidenceDispatch)?.evidenceDispatch;
+    expect(dispatch).toBeDefined();
+    if (!dispatch) throw new Error('evidence dispatch not captured');
+    expect(dispatch.status).toBe(0);
+    const response = JSON.parse(dispatch.stdout.trim().split('\n').at(-1)!).result;
+    expect(response).toMatchObject({ isError: false });
+    const usable = JSON.parse(response.content[0].text);
+    expect(usable).toMatchObject({
+      runId,
+      source: { marker: 'usable-evidence-response' },
+      artifacts: { files: [{ path: 'src/real.ts', status: 'modified' }] },
+      outcome: { status: 'completed' },
+    });
+  });
+
   it('keeps failing closed on any enabled host MCP server when the project enables none', async () => {
     const dir = await tempDir();
     const fake = await fakeCodex(dir);
@@ -218,6 +345,11 @@ describe('Codex MCP configuration', () => {
       /não aprovado/,
     ],
     [
+      'the builtin codex_apps server Adelic did not approve',
+      JSON.stringify([{ name: 'codex_apps', runtimeStatus: 'connected', pluginId: null, tools: {} }]),
+      /não aprovado/,
+    ],
+    [
       'a plugin-provided server under an approved name',
       JSON.stringify([{ name: 'docs', runtimeStatus: 'connected', pluginId: 'p1', tools: {} }]),
       /plugin/,
@@ -257,7 +389,11 @@ describe('Codex MCP configuration', () => {
       async () => {
         const codex = provider(fake.file);
         try {
-          await codex.run(input(dir, { mcpServers: [docs] }), (e) => events.push(e), new AbortController().signal);
+          await codex.run(
+            input(dir, { mcpServers: [docs], approvalMode: 'automatic' }),
+            (e) => events.push(e),
+            new AbortController().signal,
+          );
         } finally {
           await codex.shutdown();
         }
@@ -295,6 +431,556 @@ describe('Codex MCP configuration', () => {
     expect(start.params.config).not.toHaveProperty('mcp_servers');
   });
 
+  it('authorizes only the active integrated evidence elicitation according to the run approval mode', async () => {
+    const remote = {
+      label: 'Local isolado',
+      root: '/workspace',
+      executionKind: 'isolated-local' as const,
+      call: async () => ({ ok: true }),
+    };
+    for (const [mode, decision, expectedAction] of [
+      ['automatic', undefined, 'accept'],
+      ['manual', 'approve', 'accept'],
+      ['manual', 'deny', 'decline'],
+    ] as const) {
+      const dir = await tempDir();
+      const fake = await fakeCodex(dir);
+      const evidenceStore = new RunEvidenceStore(dir);
+      await evidenceStore.put({
+        runId: '123e4567-e89b-12d3-a456-426614174010',
+        sessionId: 'session-elicitation',
+        capturedAt: new Date().toISOString(),
+        source: { state: 'unchanged' },
+        environment: [],
+        artifacts: { status: 'available', files: [] },
+        checks: [],
+        outcome: { status: 'completed' },
+      });
+      const evidence = evidenceStore.mcpServer('123e4567-e89b-12d3-a456-426614174010');
+      const approvals: Approval[] = [];
+      await withEnv({ FAKE_HOST_MCP: '{}', FAKE_ELICIT: 'adelic-run-evidence' }, async () => {
+        const codex = provider(fake.file);
+        try {
+          const running = codex.run(
+            input(dir, {
+              runId: '123e4567-e89b-12d3-a456-426614174010:223e4567-e89b-12d3-a456-426614174010',
+              evidenceRunId: '123e4567-e89b-12d3-a456-426614174010',
+              remote,
+              mcpServers: [evidence],
+              approvalMode: mode,
+            }),
+            (event) => {
+              if (event.type === 'approval') approvals.push(event.approval);
+            },
+            new AbortController().signal,
+          );
+          if (mode === 'manual') {
+            for (let i = 0; i < 200 && !approvals.length; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+            expect(approvals[0]).toMatchObject({
+              status: 'pending',
+              title: 'Permitir servidor MCP adelic-run-evidence',
+            });
+            await codex.approve(approvals[0]!.id, decision!);
+          }
+          await running;
+          await codex.shutdown();
+        } finally {
+          await codex.shutdown();
+        }
+      });
+      const response = (await fake.read()).find((item) => item.id === 900 && !item.method);
+      expect(response?.result).toEqual({
+        action: expectedAction,
+        content: expectedAction === 'accept' ? {} : null,
+        _meta: null,
+      });
+      if (mode === 'automatic') expect(approvals).toContainEqual(expect.objectContaining({ status: 'approved' }));
+    }
+  });
+
+  it('authorizes producer-generated reviewer and synthesis identities against the root evidence store', async () => {
+    const remote = {
+      label: 'Local isolado',
+      root: '/workspace',
+      executionKind: 'isolated-local' as const,
+      call: async () => ({ ok: true }),
+    };
+    for (const [role, rootRunId, taskId] of [
+      ['reviewer', '123e4567-e89b-12d3-a456-426614174020', '223e4567-e89b-12d3-a456-426614174020'],
+      ['synthesis', '123e4567-e89b-12d3-a456-426614174021', '223e4567-e89b-12d3-a456-426614174021'],
+    ] as const) {
+      const dir = await tempDir();
+      const fake = await fakeCodex(dir);
+      const evidenceStore = new RunEvidenceStore(dir);
+      await evidenceStore.put({
+        runId: rootRunId,
+        sessionId: `session-${role}`,
+        capturedAt: new Date().toISOString(),
+        source: { state: 'unchanged' },
+        environment: [],
+        artifacts: { status: 'available', files: [] },
+        checks: [],
+        outcome: { status: 'completed' },
+      });
+      const identity = delegatedEvidenceInputIdentity(rootRunId, taskId);
+      expect(identity).toEqual({ runId: `${rootRunId}:${taskId}`, evidenceRunId: rootRunId });
+      const evidence = evidenceStore.mcpServer(rootRunId);
+      await withEnv({ FAKE_HOST_MCP: '{}', FAKE_ELICIT: 'adelic-run-evidence' }, async () => {
+        const codex = provider(fake.file);
+        try {
+          await expect(
+            codex.run(
+              input(dir, {
+                ...identity,
+                remote,
+                mcpServers: [evidence],
+                approvalMode: 'automatic',
+              }),
+              () => undefined,
+              new AbortController().signal,
+            ),
+          ).resolves.toMatchObject({ stopReason: 'completed' });
+        } finally {
+          await codex.shutdown();
+        }
+      });
+      const response = (await fake.read()).find((item) => item.id === 900 && !item.method);
+      expect(response?.result).toEqual({ action: 'accept', content: {}, _meta: null });
+      expect(path.basename(evidence.env.ADELIC_RUN_EVIDENCE_FILE!)).toBe(`${rootRunId}.json`);
+      expect(path.basename(evidence.env.ADELIC_RUN_EVIDENCE_LOG_DIR!)).toBe(rootRunId);
+    }
+  });
+
+  it('authorizes automatic producer-generated reviewer and synthesis evidence with and without check logs', async () => {
+    const remote = {
+      label: 'Local isolado',
+      root: '/workspace',
+      executionKind: 'isolated-local' as const,
+      call: async () => ({ ok: true }),
+    };
+    for (const [role, rootRunId, taskId] of [
+      ['reviewer', '123e4567-e89b-12d3-a456-426614174040', '223e4567-e89b-12d3-a456-426614174040'],
+      ['synthesis', '123e4567-e89b-12d3-a456-426614174041', '223e4567-e89b-12d3-a456-426614174041'],
+    ] as const) {
+      for (const withCheckLog of [false, true]) {
+        const dir = await tempDir();
+        const fake = await fakeCodex(dir);
+        const evidenceStore = new RunEvidenceStore(dir);
+        const eventId = '323e4567-e89b-12d3-a456-426614174040';
+        let operationalLog: { status: 'available' | 'truncated' | 'unavailable'; bytes?: number } | undefined;
+        if (withCheckLog) {
+          const log = await evidenceStore.beginCheckLog(rootRunId, eventId);
+          log.write(Buffer.from('typecheck succeeded\\n'));
+          operationalLog = await log.finish();
+        }
+        await evidenceStore.put({
+          runId: rootRunId,
+          sessionId: `session-${role}`,
+          capturedAt: new Date().toISOString(),
+          source: { state: 'unchanged' },
+          environment: [],
+          artifacts: { status: 'available', files: [] },
+          checks: withCheckLog
+            ? [
+                {
+                  eventId,
+                  name: 'typecheck',
+                  status: 'passed',
+                  exitCode: 0,
+                  command: 'npm run typecheck',
+                  operationalLog,
+                  source: { kind: 'fixture' },
+                  environment: [],
+                },
+              ]
+            : [],
+          outcome: { status: 'completed' },
+        });
+        const identity = delegatedEvidenceInputIdentity(rootRunId, taskId);
+        const evidence = evidenceStore.mcpServer(rootRunId);
+        await withEnv({ FAKE_HOST_MCP: '{}', FAKE_CALL_EVIDENCE: '1' }, async () => {
+          const codex = provider(fake.file);
+          try {
+            await expect(
+              codex.run(
+                input(dir, {
+                  ...identity,
+                  remote,
+                  mcpServers: [evidence],
+                  approvalMode: 'automatic',
+                }),
+                () => undefined,
+                new AbortController().signal,
+              ),
+            ).resolves.toMatchObject({ stopReason: 'completed' });
+          } finally {
+            await codex.shutdown();
+          }
+        });
+
+        const log = await fake.read();
+        const methods = log.filter((item) => item.method).map((item) => item.method);
+        expect(methods).toEqual(
+          expect.arrayContaining(['initialize', 'thread/start', 'mcpServerStatus/list', 'turn/start']),
+        );
+        expect(log.find((item) => item.method === 'thread/start')?.params.config.mcp_servers).toHaveProperty(
+          'adelic-run-evidence',
+        );
+        const dispatch = log.find((item) => item.evidenceDispatch)?.evidenceDispatch;
+        expect(dispatch?.status).toBe(0);
+        const response = JSON.parse(dispatch!.stdout.trim().split(/\r?\n/).at(-1)!).result;
+        expect(response.isError).toBe(false);
+        const result = JSON.parse(response.content[0].text);
+        expect(result.runId).toBe(rootRunId);
+        if (withCheckLog) {
+          expect(result.checks).toEqual([expect.objectContaining({ eventId, name: 'typecheck', status: 'passed' })]);
+          const checkArgs = JSON.stringify({
+            jsonrpc: '2.0',
+            id: 3,
+            method: 'tools/call',
+            params: { name: 'get_run_evidence', arguments: { checkEventId: eventId } },
+          });
+          const evidenceTool = evidence.command;
+          const evidenceToolArgs = evidence.args;
+          const checkRead = await new Promise<{ stdout: string; status: number | null }>((resolve, reject) => {
+            const child = spawn(evidenceTool, evidenceToolArgs, {
+              env: { ...process.env, ...evidence.env },
+              stdio: ['pipe', 'pipe', 'ignore'],
+            });
+            let stdout = '';
+            child.stdout.setEncoding('utf8').on('data', (chunk: string) => (stdout += chunk));
+            child.once('error', reject);
+            child.once('close', (status) => resolve({ stdout, status }));
+            child.stdin.end(
+              [
+                JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} }),
+                JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'notifications/initialized' }),
+                checkArgs,
+              ].join('\n') + '\n',
+            );
+          });
+          expect(checkRead.status).toBe(0);
+          expect(JSON.parse(checkRead.stdout.trim().split(/\r?\n/).at(-1)!).result.content[0].text).toContain(
+            'typecheck succeeded',
+          );
+        } else {
+          expect(result.checks).toEqual([]);
+        }
+        expect(methods).not.toContain('mcpServer/elicitation/request');
+      }
+    }
+  });
+
+  it.each(['manual', 'auto-safe'] as const)(
+    'sends apps disabled on the native deep-tools thread in %s mode',
+    async (approvalMode) => {
+      const dir = await tempDir();
+      const fake = await fakeCodex(dir);
+      await withEnv({ FAKE_HOST_MCP: '{}' }, async () => {
+        const codex = provider(fake.file);
+        try {
+          await expect(
+            codex.run(input(dir, { approvalMode }), () => undefined, new AbortController().signal),
+          ).resolves.toMatchObject({ stopReason: 'completed' });
+        } finally {
+          await codex.shutdown();
+        }
+      });
+      const log = await fake.read();
+      const start = log.find((item) => item.method === 'thread/start')!;
+      expect(start.params.config.features).toMatchObject({
+        apps: false,
+        guardian_approval: false,
+        shell_snapshot: false,
+      });
+      expect(start.params.config.features).not.toHaveProperty('codex_apps');
+      expect(log.map((item) => item.method)).toContain('turn/start');
+    },
+  );
+
+  it('authorizes producer-generated evidence for native local reviewer and synthesis approval modes', async () => {
+    for (const [role, mode, rootRunId, taskId] of [
+      ['reviewer', 'manual', '123e4567-e89b-12d3-a456-426614174030', '223e4567-e89b-12d3-a456-426614174030'],
+      ['synthesis', 'auto-safe', '123e4567-e89b-12d3-a456-426614174031', '223e4567-e89b-12d3-a456-426614174031'],
+    ] as const) {
+      const dir = await tempDir();
+      const fake = await fakeCodex(dir);
+      const evidenceStore = new RunEvidenceStore(dir);
+      await evidenceStore.put({
+        runId: rootRunId,
+        sessionId: `session-${role}`,
+        capturedAt: new Date().toISOString(),
+        source: { state: 'unchanged' },
+        environment: [],
+        artifacts: { status: 'available', files: [] },
+        checks: [],
+        outcome: { status: 'completed' },
+      });
+      const identity = delegatedEvidenceInputIdentity(rootRunId, taskId);
+      const approvals: Approval[] = [];
+      await withEnv({ FAKE_HOST_MCP: '{}', FAKE_ELICIT: 'adelic-run-evidence' }, async () => {
+        const codex = provider(fake.file);
+        try {
+          const running = codex.run(
+            input(dir, {
+              ...identity,
+              mcpServers: [evidenceStore.mcpServer(rootRunId)],
+              approvalMode: mode,
+            }),
+            (event) => {
+              if (event.type === 'approval') approvals.push(event.approval);
+            },
+            new AbortController().signal,
+          );
+          for (let i = 0; i < 200 && !approvals.length; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+          expect(approvals[0]).toMatchObject({ status: 'pending', title: 'Permitir servidor MCP adelic-run-evidence' });
+          await codex.approve(approvals[0]!.id, 'approve');
+          await expect(running).resolves.toMatchObject({ stopReason: 'completed' });
+        } finally {
+          await codex.shutdown();
+        }
+      });
+      const log = await fake.read();
+      expect(log.some((item) => item.method === 'initialize')).toBe(true);
+      expect(log.some((item) => item.method === 'thread/start')).toBe(true);
+      expect(log.find((item) => item.method === 'thread/start')?.params.config.mcp_servers).toHaveProperty(
+        'adelic-run-evidence',
+      );
+      expect(log.find((item) => item.id === 900 && !item.method)?.result).toEqual({
+        action: 'accept',
+        content: {},
+        _meta: null,
+      });
+    }
+  });
+
+  it.each([
+    ['unapproved server', { FAKE_ELICIT_SERVER: 'foreign' }],
+    ['URL elicitation', { FAKE_ELICIT_MODE: 'url' }],
+    ['inactive thread', { FAKE_ELICIT_THREAD: 'not-the-active-thread' }],
+  ])('declines remote elicitation for %s with a valid evidence owner', async (_label, overrides) => {
+    const dir = await tempDir();
+    const fake = await fakeCodex(dir);
+    const evidenceStore = new RunEvidenceStore(dir);
+    const runId = '123e4567-e89b-12d3-a456-426614174011';
+    const taskId = '223e4567-e89b-12d3-a456-426614174011';
+    await evidenceStore.put({
+      runId,
+      sessionId: 'session-negative',
+      capturedAt: new Date().toISOString(),
+      source: { state: 'unchanged' },
+      environment: [],
+      artifacts: { status: 'available', files: [] },
+      checks: [],
+      outcome: { status: 'completed' },
+    });
+    const evidence = evidenceStore.mcpServer(runId);
+    const remote = {
+      label: 'Local isolado',
+      root: '/workspace',
+      executionKind: 'isolated-local' as const,
+      call: async () => ({ ok: true }),
+    };
+    await withEnv({ FAKE_HOST_MCP: '{}', FAKE_ELICIT: 'adelic-run-evidence', ...overrides }, async () => {
+      const codex = provider(fake.file);
+      try {
+        await codex.run(
+          input(dir, {
+            runId: `${runId}:${taskId}`,
+            evidenceRunId: runId,
+            remote,
+            mcpServers: [evidence],
+          }),
+          () => undefined,
+          new AbortController().signal,
+        );
+      } finally {
+        await codex.shutdown();
+      }
+    });
+    expect((await fake.read()).find((item) => item.id === 900 && !item.method)?.result).toEqual({
+      action: 'decline',
+      content: null,
+      _meta: null,
+    });
+  });
+
+  it('rejects evidence from a remote SSH runtime before starting Codex', async () => {
+    const dir = await tempDir();
+    const fake = await fakeCodex(dir);
+    const evidenceStore = new RunEvidenceStore(dir);
+    const runId = '123e4567-e89b-12d3-a456-426614174032';
+    await evidenceStore.put({
+      runId,
+      sessionId: 'session-ssh-negative',
+      capturedAt: new Date().toISOString(),
+      source: { state: 'unchanged' },
+      environment: [],
+      artifacts: { status: 'available', files: [] },
+      checks: [],
+      outcome: { status: 'completed' },
+    });
+    const codex = provider(fake.file);
+    try {
+      await expect(
+        codex.run(
+          input(dir, {
+            runId,
+            evidenceRunId: runId,
+            remote: { label: 'SSH', root: '/workspace', executionKind: 'ssh', call: async () => ({ ok: true }) },
+            mcpServers: [evidenceStore.mcpServer(runId)],
+          }),
+          () => undefined,
+          new AbortController().signal,
+        ),
+      ).rejects.toThrow(/inválido ou incompatível/);
+    } finally {
+      await codex.shutdown();
+    }
+    expect((await fake.read()).some((item) => item.method === 'initialize')).toBe(false);
+  });
+
+  it('rejects a foreign evidence capability before starting Codex', async () => {
+    const dir = await tempDir();
+    const fake = await fakeCodex(dir);
+    const evidenceStore = new RunEvidenceStore(dir);
+    const runId = '123e4567-e89b-12d3-a456-426614174013';
+    const foreignRunId = '123e4567-e89b-12d3-a456-426614174014';
+    const taskId = '223e4567-e89b-12d3-a456-426614174013';
+    for (const owner of [runId, foreignRunId]) {
+      await evidenceStore.put({
+        runId: owner,
+        sessionId: `session-${owner}`,
+        capturedAt: new Date().toISOString(),
+        source: { state: 'unchanged' },
+        environment: [],
+        artifacts: { status: 'available', files: [] },
+        checks: [],
+        outcome: { status: 'completed' },
+      });
+    }
+    const remote = {
+      label: 'Local isolado',
+      root: '/workspace',
+      executionKind: 'isolated-local' as const,
+      call: async () => ({ ok: true }),
+    };
+    const foreignEvidence = evidenceStore.mcpServer(foreignRunId);
+    const codex = provider(fake.file);
+    try {
+      await expect(
+        codex.run(
+          input(dir, {
+            runId: `${runId}:${taskId}`,
+            evidenceRunId: runId,
+            remote,
+            mcpServers: [foreignEvidence],
+          }),
+          () => undefined,
+          new AbortController().signal,
+        ),
+      ).rejects.toThrow(/inválido ou incompatível/);
+    } finally {
+      await codex.shutdown();
+    }
+    const log = await fake.read();
+    expect(log.some((item) => item.method === 'thread/start')).toBe(false);
+    expect(log.some((item) => item.evidenceDispatch)).toBe(false);
+  });
+
+  it('rejects an incompatible evidence owner before starting Codex', async () => {
+    const dir = await tempDir();
+    const fake = await fakeCodex(dir);
+    const evidenceStore = new RunEvidenceStore(dir);
+    const ownerRunId = '123e4567-e89b-12d3-a456-426614174015';
+    const otherRunId = '123e4567-e89b-12d3-a456-426614174016';
+    await evidenceStore.put({
+      runId: ownerRunId,
+      sessionId: 'session-owner',
+      capturedAt: new Date().toISOString(),
+      source: { state: 'unchanged' },
+      environment: [],
+      artifacts: { status: 'available', files: [] },
+      checks: [],
+      outcome: { status: 'completed' },
+    });
+    const remote = {
+      label: 'Local isolado',
+      root: '/workspace',
+      executionKind: 'isolated-local' as const,
+      call: async () => ({ ok: true }),
+    };
+    const codex = provider(fake.file);
+    try {
+      await expect(
+        codex.run(
+          input(dir, {
+            runId: otherRunId,
+            evidenceRunId: ownerRunId,
+            remote,
+            mcpServers: [evidenceStore.mcpServer(ownerRunId)],
+          }),
+          () => undefined,
+          new AbortController().signal,
+        ),
+      ).rejects.toThrow(/inválido ou incompatível/);
+    } finally {
+      await codex.shutdown();
+    }
+    const log = await fake.read();
+    expect(log.some((item) => item.method === 'thread/start')).toBe(false);
+    expect(log.some((item) => item.evidenceDispatch)).toBe(false);
+  });
+
+  it('rejects an incompatible evidence owner in automatic mode before configuring the reader', async () => {
+    const dir = await tempDir();
+    const fake = await fakeCodex(dir);
+    const evidenceStore = new RunEvidenceStore(dir);
+    const ownerRunId = '123e4567-e89b-12d3-a456-426614174017';
+    const taskId = '223e4567-e89b-12d3-a456-426614174017';
+    await evidenceStore.put({
+      runId: ownerRunId,
+      sessionId: 'session-automatic-negative',
+      capturedAt: new Date().toISOString(),
+      source: { state: 'unchanged' },
+      environment: [],
+      artifacts: { status: 'available', files: [] },
+      checks: [],
+      outcome: { status: 'completed' },
+    });
+    const remote = {
+      label: 'Local isolado',
+      root: '/workspace',
+      executionKind: 'isolated-local' as const,
+      call: async () => ({ ok: true }),
+    };
+    await withEnv({ FAKE_HOST_MCP: '{}' }, async () => {
+      const codex = provider(fake.file);
+      try {
+        await expect(
+          codex.run(
+            input(dir, {
+              runId: `123e4567-e89b-12d3-a456-426614174018:${taskId}`,
+              evidenceRunId: ownerRunId,
+              remote,
+              mcpServers: [evidenceStore.mcpServer(ownerRunId)],
+              approvalMode: 'automatic',
+            }),
+            () => undefined,
+            new AbortController().signal,
+          ),
+        ).rejects.toThrow(/inválido ou incompatível/);
+      } finally {
+        await codex.shutdown();
+      }
+    });
+    const log = await fake.read();
+    expect(log.some((item) => item.method === 'thread/start')).toBe(false);
+    expect(log.some((item) => item.evidenceDispatch)).toBe(false);
+    expect(log.some((item) => item.id === 900)).toBe(false);
+    expect(log.some((item) => item.method === 'turn/start')).toBe(false);
+  });
+
   it('turns MCP tool approvals into manual approvals and declines unknown servers', async () => {
     for (const [server, decision, expected] of [
       ['docs', 'approve', 'accept'],
@@ -328,6 +1014,118 @@ describe('Codex MCP configuration', () => {
       expect(answer.result.action).toBe(expected);
       if (!decision) expect(approvals).toEqual([]);
     }
+  });
+  it('surfaces only bounded runtime-reported MCP diagnostics and does not infer success', async () => {
+    const dir = await tempDir();
+    const fake = await fakeCodex(dir);
+    const events: ProviderEvent[] = [];
+    const runtimeItem = {
+      id: 'call-1',
+      type: 'mcpToolCall',
+      server: 'docs',
+      tool: 'search',
+      status: 'failed',
+      error: {
+        message: `transport reset; token=${SECRET} https://user:${SECRET}@example.test {"token":"fixture-secret-123","password":"fixture-pass-456"} password="two word secret" ${'x'.repeat(300)}`,
+      },
+      arguments: { private: SECRET },
+      result: { private: SECRET },
+    };
+    await withEnv({ FAKE_HOST_MCP: '{}', FAKE_MCP_ITEM: JSON.stringify(runtimeItem) }, async () => {
+      const codex = provider(fake.file);
+      try {
+        await codex.run(
+          input(dir, { mcpServers: [docs] }),
+          (event) => events.push(event),
+          new AbortController().signal,
+        );
+      } finally {
+        await codex.shutdown();
+      }
+    });
+    const completed = events.filter((event) => event.type === 'tool').at(-1);
+    expect(completed).toMatchObject({ type: 'tool', name: 'mcpToolCall', status: 'failed' });
+    if (completed?.type !== 'tool') throw new Error('MCP tool event missing');
+    expect(completed.description).toContain('Servidor: docs');
+    expect(completed.description).toContain('Ferramenta: search');
+    expect(completed.description).toContain('Estado: failed');
+    expect(completed.description).toContain('Erro: transport reset; token=[redigido]');
+    expect(completed.description.length).toBeLessThanOrEqual(4 * 160 + 80);
+    expect(completed.description).not.toContain(SECRET);
+    expect(completed.description).not.toContain('fixture-secret-123');
+    expect(completed.description).not.toContain('fixture-pass-456');
+    expect(completed.description).not.toContain('two word secret');
+    expect(completed.description).not.toContain('private');
+
+    // Traverse the same runtime-derived ProviderEvent through the UI presentation adapter.
+    // The fixture sends item/started + item/completed notifications with the Codex app-server
+    // item shape; this guards against regressing to a generic mcpToolCall label in the UI.
+    const presented = toolActionDescription({
+      id: 'mcp-runtime-call',
+      runId: 'run-1',
+      sessionId: 'session-1',
+      type: 'tool',
+      toolName: completed.name,
+      status: completed.status,
+      text: completed.description,
+      createdAt: new Date(0).toISOString(),
+    } satisfies RunEvent);
+    expect(presented).toContain('Servidor: docs');
+    expect(presented).toContain('Ferramenta: search');
+    expect(presented).toContain('Estado reportado: failed');
+    expect(presented).toContain('Erro reportado: transport reset; token=[redigido]');
+    expect(presented).not.toContain(SECRET);
+    expect(
+      toolActionStatus({
+        id: 'mcp-runtime-call',
+        runId: 'run-1',
+        sessionId: 'session-1',
+        type: 'tool',
+        toolName: completed.name,
+        status: completed.status,
+        text: completed.description,
+        createdAt: new Date(0).toISOString(),
+      } satisfies RunEvent),
+    ).toBe('failed');
+
+    const unknownDir = await tempDir();
+    const unknownFake = await fakeCodex(unknownDir);
+    const unknownEvents: ProviderEvent[] = [];
+    await withEnv(
+      { FAKE_HOST_MCP: '{}', FAKE_MCP_ITEM: JSON.stringify({ id: 'call-2', type: 'mcpToolCall' }) },
+      async () => {
+        const codex = provider(unknownFake.file);
+        try {
+          await codex.run(
+            input(unknownDir, { mcpServers: [docs] }),
+            (event) => unknownEvents.push(event),
+            new AbortController().signal,
+          );
+        } finally {
+          await codex.shutdown();
+        }
+      },
+    );
+    const unknown = unknownEvents.filter((event) => event.type === 'tool').at(-1);
+    expect(unknown).toMatchObject({ type: 'tool', status: 'unknown' });
+    if (unknown?.type !== 'tool') throw new Error('MCP tool event missing');
+    expect(unknown.description).toContain('Servidor: não informado');
+    expect(unknown.description).toContain('Ferramenta: não informada');
+    expect(unknown.description).toContain('Estado: não informado');
+    expect(unknown.description).toContain('Erro: não reportado');
+    const unknownPresentation = {
+      id: 'mcp-runtime-unknown',
+      runId: 'run-1',
+      sessionId: 'session-1',
+      type: 'tool' as const,
+      toolName: unknown.name,
+      status: unknown.status,
+      text: unknown.description,
+      createdAt: new Date(0).toISOString(),
+    } satisfies RunEvent;
+    expect(toolActionDescription(unknownPresentation)).toContain('Estado reportado: não informado');
+    expect(toolActionDescription(unknownPresentation)).toContain('Erro reportado: não reportado');
+    expect(toolActionStatus(unknownPresentation)).toBe('unknown');
   });
 });
 

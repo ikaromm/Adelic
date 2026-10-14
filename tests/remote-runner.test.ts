@@ -341,6 +341,49 @@ if __name__ == "__main__":
         ok: true,
         result: { results: [{ line: 1, text: 'hello' }] },
       });
+      expect(
+        await harness.send({
+          id: 'search-file-path',
+          method: 'call',
+          tool: 'search',
+          args: { query: 'hello', path: 'nested.txt' },
+        }),
+      ).toMatchObject({
+        ok: false,
+        errorCategory: 'invalid_request',
+        error: "path is not a directory; search accepts directories only, use the file's parent directory",
+      });
+      expect(
+        await harness.send({
+          id: 'search-unknown-field',
+          method: 'call',
+          tool: 'search',
+          args: { query: 'hello', file: 'nested.txt' },
+        }),
+      ).toMatchObject({
+        ok: false,
+        errorCategory: 'invalid_request',
+        error: "unsupported argument field 'file'; check this tool's supported fields",
+      });
+      expect(
+        await harness.send({ id: 'read-directory', method: 'call', tool: 'read_file', args: { path: '.' } }),
+      ).toMatchObject({
+        ok: false,
+        errorCategory: 'invalid_request',
+        error: 'path is a directory; read_file requires a file',
+      });
+      expect(
+        await harness.send({
+          id: 'replace-directory',
+          method: 'call',
+          tool: 'replace_text',
+          args: { path: '.', oldText: 'x', newText: 'y' },
+        }),
+      ).toMatchObject({
+        ok: false,
+        errorCategory: 'invalid_request',
+        error: 'path is a directory; replace_text requires a file',
+      });
       await execFileAsync('git', ['init', '-q', harness.root]);
       expect(
         await harness.send({ id: 'git-1', method: 'call', tool: 'git', args: { operation: 'status' } }),

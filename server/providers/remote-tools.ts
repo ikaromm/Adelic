@@ -107,7 +107,8 @@ export const REMOTE_TOOL_SPECS = [
   {
     name: 'adelic_remote_search',
     remoteName: 'search',
-    description: 'Search text in the configured project root.',
+    description:
+      'Search text recursively in a directory under the configured project root. The optional path must be a directory; for a file, pass its parent directory and narrow results by path.',
     inputSchema: {
       type: 'object',
       properties: { query: { type: 'string', maxLength: 4096 }, path: { type: 'string', maxLength: 4096 } },
@@ -405,6 +406,16 @@ export function remoteToolError(error: unknown) {
     return 'Pasta pai não encontrada; crie ou selecione uma pasta existente antes de editar.';
   if (category === 'not_found') return 'Não encontrado; confira o caminho e use stat/list antes de tentar novamente.';
   if (category === 'permission') return 'Permissão negada; confira acesso ao caminho antes de repetir.';
+  if (
+    category === 'invalid_request' &&
+    (safeDiagnostic === 'search path is not a directory' ||
+      safeDiagnostic === "path is not a directory; search accepts directories only, use the file's parent directory")
+  )
+    return 'Campo path inválido: search percorre diretórios, não arquivos. Informe a pasta que contém o arquivo; confira a causa pelo tipo do caminho e tente novamente.';
+  if (category === 'invalid_request' && safeDiagnostic === 'path is a directory; read_file requires a file')
+    return 'Campo path aponta para uma pasta, mas read_file exige arquivo; use list/search para a pasta ou informe um arquivo dentro dela.';
+  if (category === 'invalid_request' && safeDiagnostic === 'path is a directory; replace_text requires a file')
+    return 'Campo path aponta para uma pasta, mas replace_text edita arquivos; informe o caminho completo do arquivo desejado.';
   if (category === 'invalid_request' && safeDiagnostic === 'file exceeds read limit')
     return 'Arquivo acima do limite de leitura; use read_file com offset/limit e continue até truncated=false.';
   if (category === 'invalid_request' && safeDiagnostic === 'offset exceeds file size')
@@ -431,6 +442,10 @@ export function remoteToolError(error: unknown) {
     return 'Recusado pela política somente leitura do executor; a operação não é permitida neste modo. Não tente repeti-la nem alterar argumentos para contornar a política.';
   if (status === 409)
     return 'Operação recusada por política do executor (HTTP 409); não repita a chamada nem tente corrigir argumentos para contornar a recusa.';
+  if (category === 'invalid_request' && safeDiagnostic.startsWith('unsupported argument field '))
+    return `${safeDiagnostic}; revise o campo indicado no contrato dessa ferramenta e repita com apenas os campos aceitos.`;
+  if (category === 'invalid_request' && safeDiagnostic.startsWith('missing required field '))
+    return `${safeDiagnostic}; informe o campo obrigatório no contrato dessa ferramenta.`;
   if (category === 'invalid_request') return 'Argumentos inválidos; corrija os argumentos e tente novamente.';
   if (category === 'conflict' && safeDiagnostic === 'oldText must match exactly once')
     return 'Trecho de substituição ausente ou duplicado; releia o estado atual e escolha um trecho único.';

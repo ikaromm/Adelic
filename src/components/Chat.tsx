@@ -40,7 +40,10 @@ import {
   commandPreview,
   commandTitle,
   runStatusLabel,
+  runOutcomeState,
   statusLabel,
+  toolActionDescription,
+  toolActionStatus,
 } from '../run-activity';
 import { useNow } from '../useNow';
 import { catalogs, useI18n } from '../i18n';
@@ -269,12 +272,14 @@ export function RunActivityPanel({
     </>
   );
   if (!activityIsVisible(activity) && !outcome)
-    return run?.checkpoint?.files?.length || run?.artifacts || activity.checks.length ? (
+    return run ? (
       <section
         id={`run-activity-${runId}`}
         className={`run-activity ${run?.status ?? 'completed'}`}
         aria-label={t('chat.activity.label')}
       >
+        <RunOutcomeFacts run={run} />
+        <RunAttemptUsage run={run} />
         {changes}
       </section>
     ) : null;
@@ -294,10 +299,23 @@ export function RunActivityPanel({
       : elapsed
         ? t('chat.activity.outcomeAfter', { outcome: outcome ?? '', elapsed })
         : outcome;
-  const totalTokens =
-    run && (run.inputTokens != null || run.outputTokens != null)
-      ? fmt.tokens((run.inputTokens ?? 0) + (run.outputTokens ?? 0))
-      : undefined;
+  const usageSummary =
+    run?.inputTokens != null && run.outputTokens != null
+      ? t('chat.activity.tokens', {
+          tokens: fmt.tokens(run.inputTokens + run.outputTokens) ?? String(run.inputTokens + run.outputTokens),
+        })
+      : run && (run.inputTokens != null || run.outputTokens != null)
+        ? t('chat.activity.tokensPartial', {
+            input:
+              run.inputTokens == null
+                ? t('chat.activity.unknownUsage')
+                : (fmt.tokens(run.inputTokens) ?? String(run.inputTokens)),
+            output:
+              run.outputTokens == null
+                ? t('chat.activity.unknownUsage')
+                : (fmt.tokens(run.outputTokens) ?? String(run.outputTokens)),
+          })
+        : undefined;
   const lastRetry = activity.retries.at(-1);
   // Automatic compaction runs before the answer starts (docs/specs/compaction.md). The status event
   // comes from the server, possibly already in English.
@@ -316,7 +334,7 @@ export function RunActivityPanel({
           ? t('chat.activity.runningTool', {
               tool: commandTitle(activeAction?.toolName),
               detail: activeAction
-                ? commandPreview(activeAction.text, 120) || t('chat.activity.toolDetailsUnavailable')
+                ? commandPreview(toolActionDescription(activeAction), 200) || t('chat.activity.toolDetailsUnavailable')
                 : progress.detail,
             })
           : progress?.phase === 'connection'
@@ -330,7 +348,9 @@ export function RunActivityPanel({
                   : activeAction
                     ? t('chat.activity.runningTool', {
                         tool: commandTitle(activeAction.toolName),
-                        detail: commandPreview(activeAction.text, 120) || t('chat.activity.toolDetailsUnavailable'),
+                        detail:
+                          commandPreview(toolActionDescription(activeAction), 200) ||
+                          t('chat.activity.toolDetailsUnavailable'),
                       })
                     : streamUpdatedAt
                       ? t('chat.activity.generating')
@@ -347,7 +367,7 @@ export function RunActivityPanel({
     activity.blocked.length ? t('chat.activity.blocked', { count: activity.blocked.length }) : '',
     activity.tasks.length ? t('chat.activity.tasks', { count: activity.tasks.length }) : '',
     activity.actions.length ? t('chat.activity.actions', { count: activity.actions.length }) : '',
-    !running && totalTokens ? t('chat.activity.tokens', { tokens: totalTokens }) : '',
+    !running ? (usageSummary ?? '') : '',
     !running && run?.cachedInputTokens != null
       ? t('delivery.cachedTokens', { tokens: fmt.tokens(run.cachedInputTokens) ?? String(run.cachedInputTokens) })
       : '',
@@ -441,6 +461,34 @@ export function RunActivityPanel({
                         </ul>
                       </details>
                     ) : null}
+                    <dl className="activity-meta task-outcome-facts">
+                      <div>
+                        <dt>{t('chat.task.processStatus')}</dt>
+                        <dd>{t(`chat.task.process.${task.status}`)}</dd>
+                      </div>
+                      <div>
+                        <dt>{t('chat.task.integrationStatus')}</dt>
+                        <dd>
+                          {task.integration
+                            ? t(`chat.task.integration.${task.integration.status}`)
+                            : t('chat.task.statusUnknown')}
+                        </dd>
+                      </div>
+                      {task.integration && (
+                        <div>
+                          <dt>{t('chat.task.cleanupStatus')}</dt>
+                          <dd>{t(`chat.task.cleanup.${task.integration.cleanup}`)}</dd>
+                        </div>
+                      )}
+                      <div>
+                        <dt>{t('chat.task.deliveryStatus')}</dt>
+                        <dd>
+                          {task.delivery
+                            ? t(`chat.task.delivery.${task.delivery.status}`)
+                            : t('chat.task.statusUnknown')}
+                        </dd>
+                      </div>
+                    </dl>
                     {task.delivery && (
                       <div className={`task-delivery ${task.delivery.status}`}>
                         <strong>{t(`chat.task.delivery.${task.delivery.status}`)}</strong>
@@ -517,20 +565,20 @@ export function RunActivityPanel({
                     <summary>
                       <Code2 size={13} aria-hidden="true" />
                       <span className="visually-hidden">{commandTitle(event.toolName)}: </span>
-                      <code className="command-preview">{commandPreview(event.text)}</code>
-                      <span className={`activity-action-status ${event.status || ''}`}>
-                        {statusLabel(event.status)}
+                      <code className="command-preview">{commandPreview(toolActionDescription(event))}</code>
+                      <span className={`activity-action-status ${toolActionStatus(event)}`}>
+                        {statusLabel(toolActionStatus(event))}
                       </span>
                       <time>{timeLabel(event.createdAt)}</time>
                     </summary>
-                    <pre>{event.text}</pre>
+                    <pre>{toolActionDescription(event)}</pre>
                   </details>
                 ) : (
                   <div className="activity-action" key={event.id}>
                     <Code2 size={13} aria-hidden="true" />
-                    <span>{event.text}</span>
-                    <small className={`activity-action-status ${event.status || ''}`}>
-                      {statusLabel(event.status)}
+                    <span>{toolActionDescription(event)}</span>
+                    <small className={`activity-action-status ${toolActionStatus(event)}`}>
+                      {statusLabel(toolActionStatus(event))}
                     </small>
                   </div>
                 ),
@@ -572,8 +620,62 @@ export function RunActivityPanel({
           )}
         </div>
       )}
+      {run && <RunOutcomeFacts run={run} />}
+      {run && <RunAttemptUsage run={run} />}
       {changes}
     </section>
+  );
+}
+
+function RunOutcomeFacts({ run }: { run: Run }) {
+  const { t } = useI18n();
+  const state = runOutcomeState(run);
+  return (
+    <dl className="activity-meta run-outcome-facts">
+      <div>
+        <dt>{t('chat.run.responseStatus')}</dt>
+        <dd>{t(`chat.run.response.${state.response}`)}</dd>
+      </div>
+      <div>
+        <dt>{t('chat.run.integrationStatus')}</dt>
+        <dd>{t(`chat.run.integration.${state.integration}`)}</dd>
+      </div>
+      <div>
+        <dt>{t('chat.run.objectiveStatus')}</dt>
+        <dd>{t(`chat.run.objective.${state.objective}`)}</dd>
+      </div>
+    </dl>
+  );
+}
+
+function RunAttemptUsage({ run }: { run: Run }) {
+  const { t, fmt } = useI18n();
+  const attempts = run.providerAttempts;
+  if (!attempts?.length) return null;
+  const known = (value: number | null, formatted: string | undefined) =>
+    value == null ? t('chat.activity.unknownUsage') : (formatted ?? String(value));
+  return (
+    <details className="run-provider-attempts">
+      <summary>{t('chat.attemptUsage.summary', { count: attempts.length })}</summary>
+      <p>{t('chat.attemptUsage.includedInTotal')}</p>
+      <ul>
+        {attempts.map((attempt) => (
+          <li key={attempt.attemptId}>
+            <strong>{attempt.taskId ? t('chat.attemptUsage.task', { id: attempt.taskId }) : attempt.attemptId}</strong>
+            <span>
+              {t('chat.attemptUsage.duration', {
+                duration: fmt.duration(attempt.durationMs) ?? t('chat.activity.unknownUsage'),
+              })}
+              {' · '}
+              {t('chat.activity.tokensPartial', {
+                input: known(attempt.inputTokens, fmt.tokens(attempt.inputTokens ?? undefined)),
+                output: known(attempt.outputTokens, fmt.tokens(attempt.outputTokens ?? undefined)),
+              })}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </details>
   );
 }
 

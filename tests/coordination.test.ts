@@ -234,6 +234,8 @@ describe('delegated task contracts', () => {
       false,
     );
     expect(canSkipCoordinationPlanner('Now implement it.')).toBe(true);
+    expect(canSkipCoordinationPlanner('Continue: close the blockers and fix formatting.')).toBe(true);
+    expect(canSkipCoordinationPlanner('Fechar os bloqueadores e corrigir a formatação.')).toBe(true);
     expect(canSkipCoordinationPlanner('Design a new architecture for the project')).toBe(false);
     expect(canSkipCoordinationPlanner('Now change the Architecture Across Multiple Modules in the project.')).toBe(
       false,
@@ -343,6 +345,34 @@ describe('delegated task contracts', () => {
     expect(result.text).not.toContain('Long progress and background commentary');
   });
 
+  it('keeps useful unstructured review content and the exact raw source after context reduction', () => {
+    const review = [
+      'Defect: the first implementation path drops the retry result.',
+      'Location: server/orchestrator.ts:3731',
+      'The provider returned a valid finding without Markdown severity headings.',
+      'Background details. '.repeat(180),
+      'Additional source tail marker: RETAINED_RAW_TAIL',
+    ].join('\n');
+    expect(review.length).toBeGreaterThan(2400);
+
+    const result = summarizeReview(review, 1600);
+    expect(result.incomplete).toBe(true); // context was reduced, not provider response status
+    expect(result.findings).toBe(0); // no approval/finding inference from keywords
+    expect(result.text).toContain('Defect:');
+    expect(result.text).toContain('server/orchestrator.ts:3731');
+    expect(result.text).toContain('contexto reduzido');
+    expect(result.text).toContain('RETAINED_RAW_TAIL');
+  });
+
+  it('keeps compact free-form review formats verbatim when they fit', () => {
+    const review = 'Defeito — integração perde estado.\nLocalização: src/feature.ts:27\nImpacto: entrega parcial.';
+    expect(summarizeReview(review, 500)).toEqual({
+      text: review,
+      incomplete: false,
+      findings: 0,
+    });
+  });
+
   it('recognizes and preserves a high-severity heading with its location within budget', () => {
     const review = [
       '**Severidade: alta — Repetição de trabalho já entregue**',
@@ -390,7 +420,7 @@ describe('delegated task contracts', () => {
     const limited = summarizeReview(review, 350);
     expect(limited.findings).toBe(3);
     expect(limited.incomplete).toBe(true);
-    expect(limited.text).toContain('REVISÃO INCOMPLETA');
+    expect(limited.text).toContain('RESUMO REDUZIDO');
     for (const expected of ['[P1] Retry data loss', '[P1] Git retry duplicates work', '[P2] Recovery events hidden'])
       expect(limited.text).toContain(expected);
   });
@@ -450,7 +480,7 @@ describe('delegated task contracts', () => {
     expect(result.text).toContain('P2');
     expect(result.text).toContain('server/orchestrator.ts');
     expect(result.text).toContain('server/store.ts');
-    expect(result.text).toContain('REVISÃO INCOMPLETA');
+    expect(result.text).toContain('RESUMO REDUZIDO');
   });
 
   it('marks a too-small review budget incomplete instead of implying approval', () => {
@@ -469,10 +499,10 @@ describe('delegated task contracts', () => {
     const result = summarizeReview(review, 350);
     expect(result.findings).toBe(3);
     expect(result.incomplete).toBe(true);
-    expect(result.text).toContain('REVISÃO INCOMPLETA');
+    expect(result.text).toContain('RESUMO REDUZIDO');
     expect(result.text).toContain('P1');
     expect(result.text).toContain('P2');
-    expect(result.text).toContain('achados ou detalhes omitidos');
+    expect(result.text).toContain('saída completa em tarefa de revisão');
     for (const path of ['server/orchestrator.ts', 'server/worktrees.ts', 'server/http/tasks.ts'])
       expect(result.text).toContain(path);
     expect(summarizeReview(review, 0)).toMatchObject({ text: '', incomplete: true });

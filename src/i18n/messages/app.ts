@@ -47,6 +47,7 @@ export default defineMessages(
     'app.earlierMessages': 'Mensagens anteriores ao resumo ({count})',
     'app.agentFallback': 'Agente',
     'app.writing': 'escrevendo',
+    'app.streamingProgress': 'progresso · resposta final separada',
     // Approvals
     'app.approval.title': 'Aprovação necessária',
     'app.approval.command': 'Comando · confirme esta ação para continuar',
@@ -130,6 +131,7 @@ export default defineMessages(
     'app.earlierMessages': 'Messages before the summary ({count})',
     'app.agentFallback': 'Agent',
     'app.writing': 'writing',
+    'app.streamingProgress': 'progress · final answer separate',
     'app.approval.title': 'Approval needed',
     'app.approval.command': 'Command · confirm this action to continue',
     'app.approval.file': 'File · confirm this action to continue',

@@ -1,5 +1,5 @@
 import type { Approval, DelegatedTask, Run, SessionDetail } from '../../shared/contracts';
-import { commandPreview, commandTitle, activityForRun } from '../run-activity';
+import { commandPreview, commandTitle, activityForRun, toolActionDescription } from '../run-activity';
 import { useNow } from '../useNow';
 import { useI18n } from '../i18n';
 
@@ -61,7 +61,7 @@ export function deriveRunProgress({
     phase = 'connection';
   } else if (activeTool) {
     phase = 'tool';
-    detail = `${commandTitle(activeTool.toolName)}: ${commandPreview(activeTool.text, 96)}`;
+    detail = `${commandTitle(activeTool.toolName)}: ${commandPreview(toolActionDescription(activeTool), 200)}`;
   } else if (retryIsCurrent) {
     phase = 'retry';
   } else if (streamUpdatedAt && streamUpdatedAt >= latestEventAt) {

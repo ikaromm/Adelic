@@ -145,11 +145,12 @@ describe('review summary safety', () => {
       'Location: src/components/TaskRecovery.tsx:91',
     ].join('\n');
 
-    const result = summarizeReview(review, 180);
+    const result = summarizeReview(review, 180, '/api/tasks/review-task');
     expect(result.text.length).toBeLessThanOrEqual(180);
     expect(result.incomplete).toBe(true);
-    expect(result.text).toContain('REVISÃO INCOMPLETA');
-    expect(result.text).toContain('não concluir aprovação');
+    expect(result.text).toContain('RESUMO REDUZIDO');
+    expect(result.text).toContain('achados/detalhes omitidos');
+    expect(result.text).toContain('saída completa em /api/tasks/review-task');
   });
 });
 

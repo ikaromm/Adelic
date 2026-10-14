@@ -67,7 +67,9 @@ interface ActiveTurn {
   mcpNames: string[];
   remoteTools: Map<string, { spec: RemoteToolSpec; args: Record<string, unknown> }>;
   usage: CodexTokenCounts;
+  /** Streamed text may include commentary; final_answer item is authoritative when present. */
   text: string;
+  finalText?: string;
   resolve: (result: RunResult) => void;
   reject: (error: Error) => void;
   signal: AbortSignal;
@@ -104,10 +106,10 @@ type CodexWrapper = (
 /**
  * `thread/start` `config.mcp_servers` for the approved servers (verified against codex-cli
  * 0.160: the thread gets them, `config/read` does not). Literal values travel in the JSON-RPC
- * body over stdin, never in argv; pass-through names use `env_vars`. Every tool asks for
- * approval (`default_tools_approval_mode: 'prompt'`); an allowlist becomes `enabled_tools`.
+ * body over stdin, never in argv; pass-through names use `env_vars`. The configured approval
+ * mode selects MCP prompt/auto policy; an allowlist becomes `enabled_tools`.
  */
-export function codexMcpConfig(servers: RunMcpServer[]) {
+export function codexMcpConfig(servers: RunMcpServer[], approvalMode: RunInput['approvalMode'] = 'manual') {
   return Object.fromEntries(
     servers.map((server) => [
       server.name,
@@ -119,7 +121,7 @@ export function codexMcpConfig(servers: RunMcpServer[]) {
         ...(server.tools ? { enabled_tools: server.tools } : {}),
         enabled: true,
         required: false,
-        default_tools_approval_mode: 'prompt',
+        default_tools_approval_mode: approvalMode === 'automatic' ? 'auto' : 'prompt',
         startup_timeout_sec: 20,
       },
     ]),
@@ -257,7 +259,102 @@ async function approvedPermissions(
   return requested;
 }
 
+const MCP_DIAGNOSTIC_MAX = 160;
+function safeMcpDiagnostic(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const sanitized = value
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ')
+    .replace(/\bBearer\s+\S+/gi, 'Bearer [redigido]')
+    .replace(
+      /(["']?\b(?:api[_-]?key|token|password|secret)["']?\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^,;}\]\r\n]+)/gi,
+      '$1[redigido]',
+    )
+    .replace(/(\b[a-z][a-z0-9+.-]*:\/\/)[^/@\s:]+:[^/@\s]+@/gi, '$1[redigido]@')
+    .replace(/\bsk-[A-Za-z0-9_-]{12,}\b/g, '[redigido]')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!sanitized) return undefined;
+  return sanitized.length > MCP_DIAGNOSTIC_MAX ? `${sanitized.slice(0, MCP_DIAGNOSTIC_MAX - 1)}…` : sanitized;
+}
+function errorText(value: unknown): string | undefined {
+  if (typeof value === 'string') return value;
+  if (isRecord(value) && typeof value.message === 'string') return value.message;
+  return undefined;
+}
+
 const MCP_DECLINE = { action: 'decline', content: null, _meta: null };
+
+/** The sole MCP capability exposed in the remote profile: a fixed, read-only reader for this run. */
+function isRunEvidenceServer(server: RunMcpServer, runId: string, evidenceRunId?: string): boolean {
+  const envKeys = Object.keys(server.env).sort();
+  const evidenceFile = server.env.ADELIC_RUN_EVIDENCE_FILE ?? '';
+  const evidenceLogDirectory = server.env.ADELIC_RUN_EVIDENCE_LOG_DIR ?? '';
+  const validOwner = Boolean(
+    evidenceRunId && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(evidenceRunId),
+  );
+  const belongsToOwner =
+    validOwner &&
+    (runId === evidenceRunId ||
+      new RegExp(
+        `^${evidenceRunId}:[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`,
+        'i',
+      ).test(runId));
+  return (
+    belongsToOwner &&
+    server.name === 'adelic-run-evidence' &&
+    server.command === process.execPath &&
+    server.args.length === 2 &&
+    server.args[0] === '-e' &&
+    server.args[1]!.includes("serverInfo:{name:'adelic-run-evidence'") &&
+    server.args[1]!.includes("name:'get_run_evidence'") &&
+    server.passEnv.length === 0 &&
+    server.tools?.length === 1 &&
+    server.tools[0] === 'get_run_evidence' &&
+    envKeys.length === 2 &&
+    envKeys[0] === 'ADELIC_RUN_EVIDENCE_FILE' &&
+    envKeys[1] === 'ADELIC_RUN_EVIDENCE_LOG_DIR' &&
+    path.isAbsolute(evidenceFile) &&
+    path.isAbsolute(evidenceLogDirectory) &&
+    path.dirname(evidenceFile) === path.dirname(evidenceLogDirectory) &&
+    path.basename(path.dirname(evidenceFile)) === 'run-evidence' &&
+    path.basename(evidenceFile) === `${evidenceRunId}.json` &&
+    path.basename(evidenceLogDirectory) === evidenceRunId
+  );
+}
+
+async function validateRunEvidenceCapability(input: RunInput, servers: RunMcpServer[]) {
+  const candidates = servers.filter((server) => server.name === 'adelic-run-evidence');
+  if (!candidates.length) return;
+  const server = candidates[0]!;
+  if (
+    candidates.length !== 1 ||
+    !input.plan.tools ||
+    (input.remote !== undefined && input.remote.executionKind !== 'isolated-local') ||
+    input.sandbox !== 'read-only' ||
+    !isRunEvidenceServer(server, input.runId, input.evidenceRunId)
+  )
+    throw new Error('Servidor de evidências inválido ou incompatível com o proprietário da execução.');
+
+  const evidenceFile = server.env.ADELIC_RUN_EVIDENCE_FILE!;
+  const evidenceLogDirectory = server.env.ADELIC_RUN_EVIDENCE_LOG_DIR!;
+  try {
+    const [evidenceFileReal, logDirectoryReal] = await Promise.all([
+      realpath(evidenceFile),
+      realpath(evidenceLogDirectory),
+    ]);
+    const [evidenceInfo, logDirectoryInfo] = await Promise.all([stat(evidenceFileReal), stat(logDirectoryReal)]);
+    if (
+      evidenceFileReal !== path.resolve(evidenceFile) ||
+      logDirectoryReal !== path.resolve(evidenceLogDirectory) ||
+      !evidenceInfo.isFile() ||
+      !logDirectoryInfo.isDirectory() ||
+      (process.getuid && (evidenceInfo.uid !== process.getuid() || logDirectoryInfo.uid !== process.getuid()))
+    )
+      throw new Error();
+  } catch {
+    throw new Error('Arquivos do servidor de evidências não pertencem à execução autorizada.');
+  }
+}
 
 export function codexRuntimeEnvironment(sandbox: Sandbox, source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const runtimeEnv = Object.fromEntries(
@@ -608,12 +705,47 @@ export class CodexProvider {
     if (this.shuttingDown) throw new Error('Codex provider is shutting down');
     if (!this.binary) throw new Error(providerBinaryMissingDetail('codex'));
     const sandbox = server.key.split('\0')[1] as Sandbox;
+    const evidenceServer = server.mcp.find((item) => item.name === 'adelic-run-evidence');
+    const evidenceFile = evidenceServer?.env.ADELIC_RUN_EVIDENCE_FILE;
+    const evidenceLogDirectory = evidenceServer?.env.ADELIC_RUN_EVIDENCE_LOG_DIR;
+    const evidenceBindings: ReadonlyFileBinding[] = [];
+    if (evidenceServer) {
+      if (
+        evidenceServer.command !== process.execPath ||
+        evidenceServer.args[0] !== '-e' ||
+        !evidenceServer.args[1]?.includes("serverInfo:{name:'adelic-run-evidence'") ||
+        evidenceServer.tools?.length !== 1 ||
+        evidenceServer.tools[0] !== 'get_run_evidence' ||
+        evidenceServer.passEnv.length !== 0 ||
+        !evidenceFile ||
+        !evidenceLogDirectory ||
+        !path.isAbsolute(evidenceFile) ||
+        !path.isAbsolute(evidenceLogDirectory)
+      )
+        throw new Error('Servidor de evidências inválido; execução bloqueada.');
+      const [evidenceFileReal, logDirectoryReal] = await Promise.all([
+        realpath(evidenceFile),
+        realpath(evidenceLogDirectory),
+      ]);
+      if (
+        evidenceFileReal !== path.resolve(evidenceFile) ||
+        logDirectoryReal !== path.resolve(evidenceLogDirectory) ||
+        !(await stat(evidenceFileReal)).isFile() ||
+        !(await stat(logDirectoryReal)).isDirectory()
+      )
+        throw new Error('Arquivos do servidor de evidências não são regulares; execução bloqueada.');
+      evidenceBindings.push(
+        { source: evidenceFileReal, target: evidenceFile, directory: false },
+        { source: logDirectoryReal, target: evidenceLogDirectory, directory: true },
+      );
+    }
     const readonlyAuth = [
       // MCP commands are spawned by the app-server inside this sandbox: make them visible.
       ...(await mcpCommandBindings(
         server.mcp.map((item) => item.command),
         server.cwd,
       )),
+      ...evidenceBindings,
       ...(await this.authBinding(server.scratch, server.cwd, sandbox)),
     ];
     if (signal.aborted) throw abortError(signal);
@@ -642,7 +774,7 @@ export class CodexProvider {
         if (turn.server === server && !turn.signal.aborted)
           this.finishTurn(
             turn,
-            { text: turn.text, nativeSessionId: turn.threadId, stopReason: 'completed' },
+            { text: turn.finalText ?? turn.text, nativeSessionId: turn.threadId, stopReason: 'completed' },
             new Error('Codex app-server encerrou antes de concluir o turno.'),
           );
       }
@@ -762,14 +894,38 @@ export class CodexProvider {
         }
       } else if (message.method === 'item/started' || message.method === 'item/completed') {
         const item = parseParams(ItemParams, message.params)?.item;
-        if (item && TOOL_ITEM_TYPES.has(item.type))
+        if (message.method === 'item/completed' && item?.type === 'agentMessage') {
+          // Codex 0.160 identifies the answer by phase, not item/delta array position.
+          // Missing/null phase stays unknown; never guess by extracting JSON or ordering.
+          if (item.phase === 'final_answer' && typeof item.text === 'string') turn.finalText = item.text;
+        }
+        if (item && TOOL_ITEM_TYPES.has(item.type)) {
+          const mcpToolCall = item.type === 'mcpToolCall';
+          const mcpServer = mcpToolCall ? safeMcpDiagnostic(item.server) : undefined;
+          const mcpTool = mcpToolCall ? safeMcpDiagnostic(item.tool) : undefined;
+          const mcpError = mcpToolCall ? safeMcpDiagnostic(errorText(item.error)) : undefined;
+          const description = mcpToolCall
+            ? [
+                `Servidor: ${mcpServer ?? 'não informado'}`,
+                `Ferramenta: ${mcpTool ?? 'não informada'}`,
+                `Estado: ${safeMcpDiagnostic(item.status) ?? 'não informado'}`,
+                `Erro: ${mcpError ?? 'não reportado'}`,
+              ].join(' · ')
+            : (item.command ?? item.title ?? item.type);
           turn.emit({
             type: 'tool',
             name: item.type,
-            description: item.command ?? item.title ?? item.type,
-            status: message.method === 'item/started' ? 'running' : (item.status ?? 'completed'),
+            description,
+            // A notification without an explicit MCP status is not evidence of success.
+            status:
+              message.method === 'item/started'
+                ? 'running'
+                : mcpToolCall
+                  ? (safeMcpDiagnostic(item.status) ?? 'unknown')
+                  : (item.status ?? 'completed'),
             ...(item.id !== undefined ? { toolCallId: item.id } : {}),
           });
+        }
       } else if (message.method === 'thread/tokenUsage/updated') {
         // Token counts only: Codex does not report cost, which stays unknown (never zero).
         const params = parseParams(TokenUsageParams, message.params);
@@ -786,20 +942,26 @@ export class CodexProvider {
         if (status === 'failed')
           this.finishTurn(
             turn,
-            { text: turn.text, nativeSessionId: turn.threadId, stopReason: 'completed' },
+            { text: turn.finalText ?? turn.text, nativeSessionId: turn.threadId, stopReason: 'completed' },
             new Error('Codex marcou a execução como falha.'),
           );
         else
           this.finishTurn(turn, {
-            text: turn.text,
+            text: turn.finalText ?? turn.text,
             nativeSessionId: turn.threadId,
             stopReason: status === 'interrupted' ? 'cancelled' : 'completed',
           });
       } else if (message.method === 'error') {
         const params = parseParams(ErrorParams, message.params);
+        if (params?.willRetry === true) {
+          // Codex owns this transient retry. Keep the turn, listeners and deadline active;
+          // a later turn/completed or terminal error determines the actual outcome.
+          turn.emit({ type: 'status', text: 'Codex informou que tentará novamente.' });
+          return;
+        }
         this.finishTurn(
           turn,
-          { text: turn.text, nativeSessionId: turn.threadId, stopReason: 'completed' },
+          { text: turn.finalText ?? turn.text, nativeSessionId: turn.threadId, stopReason: 'completed' },
           new Error(errorMessage(params?.error?.message ?? params?.message ?? 'Erro do Codex.')),
         );
       }
@@ -884,8 +1046,61 @@ export class CodexProvider {
       return;
     }
     if (server.profile === 'remote-tools') {
-      if (message.method === 'mcpServer/elicitation/request') rpc.respond(message.id, MCP_DECLINE);
-      else if (message.method === 'item/permissions/requestApproval')
+      if (message.method === 'mcpServer/elicitation/request') {
+        const threadId = typeof params.threadId === 'string' ? params.threadId : '';
+        const turn = this.byThread.get(`${server.key}\n${threadId}`);
+        const evidence = server.mcp.find((item) => item.name === 'adelic-run-evidence');
+        const authorized =
+          message.id !== undefined &&
+          params.mode === 'form' &&
+          params.serverName === 'adelic-run-evidence' &&
+          Boolean(turn) &&
+          this.turns.get(turn!.input.runId) === turn &&
+          turn!.server === server &&
+          turn!.threadId === threadId &&
+          turn!.input.plan.tools &&
+          turn!.input.sandbox === 'read-only' &&
+          turn!.input.remote?.executionKind === 'isolated-local' &&
+          turn!.mcpNames.length === 1 &&
+          turn!.mcpNames[0] === 'adelic-run-evidence' &&
+          server.mcp.length === 1 &&
+          Boolean(evidence && isRunEvidenceServer(evidence, turn!.input.runId, turn!.input.evidenceRunId));
+        if (!authorized || !turn) {
+          rpc.respond(message.id, MCP_DECLINE);
+          return;
+        }
+        const approvalId = `${turn.input.runId}:${String(message.id)}`;
+        if (turn.input.approvalMode === 'automatic') {
+          rpc.respond(message.id, { action: 'accept', content: {}, _meta: null });
+          emitApproval(
+            turn.input,
+            turn.emit,
+            approvalId,
+            'Servidor de evidências autorizado automaticamente',
+            'Leitura limitada às evidências desta execução no executor local isolado.',
+            'tool',
+            'approved',
+          );
+          return;
+        }
+        const pending: PendingApproval = {
+          runId: turn.input.runId,
+          sessionId: turn.input.sessionId,
+          server,
+          requestId: message.id,
+          method: message.method,
+          params,
+        };
+        this.approvals.set(approvalId, pending);
+        emitApproval(
+          turn.input,
+          turn.emit,
+          approvalId,
+          'Permitir servidor MCP adelic-run-evidence',
+          'Leitura limitada às evidências desta execução no executor local isolado.',
+          'tool',
+        );
+      } else if (message.method === 'item/permissions/requestApproval')
         rpc.respond(message.id, { permissions: {}, scope: 'turn' });
       else if (message.method.endsWith('/requestApproval')) rpc.respond(message.id, { decision: 'decline' });
       else rpc.respondError(message.id, -32601, 'Unsupported request in remote profile');
@@ -1127,10 +1342,18 @@ export class CodexProvider {
       const localSandbox = profile === 'remote-tools' ? 'read-only' : input.sandbox;
       if (signal.aborted) throw abortError(signal);
       if (toolsAllowed && !input.remote) await scanCodexRules({ cwd: input.cwd });
-      // Opt-in MCP: only runs with tools receive the project's approved servers.
-      const mcp = toolsAllowed && !input.remote ? (input.mcpServers ?? []) : [];
+      // Remote execution never inherits project MCP servers. The per-run evidence reader is
+      // the sole exception: its fixed tool reads this run's bounded evidence, and its command
+      // runs inside the same read-only app-server sandbox with only file-path env bindings.
+      const mcp = toolsAllowed
+        ? input.remote
+          ? (input.mcpServers ?? []).filter((item) => item.name === 'adelic-run-evidence')
+          : (input.mcpServers ?? [])
+        : [];
       if (new Set(mcp.map((item) => item.name)).size !== mcp.length)
         throw new Error('Execução Codex bloqueada: servidores MCP repetidos.');
+      await validateRunEvidenceCapability(input, mcp);
+      if (signal.aborted) throw abortError(signal);
       const server = (ownedServer = await this.ensureServer(
         input.cwd,
         localSandbox,
@@ -1173,7 +1396,7 @@ export class CodexProvider {
             : {}),
           config: {
             allow_login_shell: false,
-            ...(mcp.length ? { mcp_servers: codexMcpConfig(mcp) } : {}),
+            ...(mcp.length ? { mcp_servers: codexMcpConfig(mcp, input.approvalMode) } : {}),
             shell_environment_policy: {
               set: {
                 TMPDIR: server.scratch,
@@ -1186,7 +1409,7 @@ export class CodexProvider {
             ...(profile === 'deep-tools'
               ? {
                   ...(input.plan.effort ? { model_reasoning_effort: input.plan.effort } : {}),
-                  features: { guardian_approval: false, shell_snapshot: false },
+                  features: { guardian_approval: false, shell_snapshot: false, apps: false },
                 }
               : {
                   ...(input.plan.effort ? { model_reasoning_effort: input.plan.effort } : {}),
@@ -1284,7 +1507,11 @@ export class CodexProvider {
             // turn only changes protocol/UI state; kill and reap this run's private
             // process group before reporting cancellation or removing its scratch.
             void this.cleanupServer(server).then(() =>
-              this.finishTurn(turn, { text: turn.text, nativeSessionId: threadId, stopReason: 'cancelled' }),
+              this.finishTurn(turn, {
+                text: turn.finalText ?? turn.text,
+                nativeSessionId: threadId,
+                stopReason: 'cancelled',
+              }),
             );
           },
         };
@@ -1321,7 +1548,11 @@ export class CodexProvider {
           })
           .catch((error) => {
             if (!signal.aborted)
-              this.finishTurn(turn, { text: turn.text, stopReason: 'completed' }, new Error(errorMessage(error)));
+              this.finishTurn(
+                turn,
+                { text: turn.finalText ?? turn.text, stopReason: 'completed' },
+                new Error(errorMessage(error)),
+              );
           });
       });
     } finally {

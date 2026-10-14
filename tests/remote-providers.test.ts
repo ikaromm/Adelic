@@ -59,6 +59,34 @@ describe('remote provider tools', () => {
     expect(oversized.recovery).toContain('nextOffset');
   });
 
+  it('documents directory-only search and explains file/directory and schema errors', () => {
+    const search = REMOTE_TOOL_SPECS.find((tool) => tool.remoteName === 'search')!;
+    expect(search.description).toMatch(/path must be a directory/i);
+    expect(
+      remoteToolError(Object.assign(new Error('search path is not a directory'), { category: 'invalid_request' })),
+    ).toMatch(/path.*diretórios.*não arquivos/i);
+    expect(
+      remoteToolError(
+        Object.assign(
+          new Error("path is not a directory; search accepts directories only, use the file's parent directory"),
+          { category: 'invalid_request' },
+        ),
+      ),
+    ).toMatch(/path.*diretórios.*não arquivos/i);
+    expect(
+      remoteToolError(
+        Object.assign(new Error('path is a directory; read_file requires a file'), { category: 'invalid_request' }),
+      ),
+    ).toMatch(/read_file exige arquivo/i);
+    expect(
+      remoteToolError(
+        Object.assign(new Error("unsupported argument field 'file'; check this tool's supported fields"), {
+          category: 'invalid_request',
+        }),
+      ),
+    ).toMatch(/field 'file'.*campos aceitos/i);
+  });
+
   it('paginates through the local factory, Codex provider and model transport across fresh runners', async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), 'adelic-local-provider-pages-'));
     dirs.push(directory);

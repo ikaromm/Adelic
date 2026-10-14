@@ -33,21 +33,33 @@ function providerInfo(): ProviderInfo {
   };
 }
 
-function setup(mode: Session['mode'] = 'auto', orchestrationEnabled = true) {
+function setup(mode: Session['mode'] = 'auto', orchestrationEnabled = true, review = false, remote = false) {
   const directory = mkdtempSync(join(tmpdir(), 'adelic-continuity-'));
   const projectRoot = join(directory, 'project');
   mkdirSync(projectRoot);
   const store = new Store(directory);
   const now = new Date().toISOString();
+  if (remote)
+    store.putRemoteHost({
+      id: 'host',
+      name: 'Fixture host',
+      target: 'fixture.invalid',
+      port: 22,
+      fingerprint: 'SHA256:fixture',
+      hostKey: 'fixture-key',
+      runnerPath: '/opt/adelic/runner',
+      createdAt: now,
+    });
   store.putProject({
     id: 'project',
     name: 'Project',
     path: projectRoot,
+    ...(remote ? { remote: { hostId: 'host', path: '/srv/project' }, approvalMode: 'automatic' as const } : {}),
     createdAt: now,
     memoryWorkspace: 'workspace',
     memoryProject: 'project',
     graphify: { enabled: false },
-    orchestration: { enabled: orchestrationEnabled, maxWorkers: 1, review: false },
+    orchestration: { enabled: orchestrationEnabled, maxWorkers: 1, review },
   });
   const session: Session = {
     id: 'session',
@@ -216,6 +228,24 @@ describe('Orchestrator continuation context', () => {
     expect(effectiveInputs.some((input) => input.prompt.includes('Produza somente JSON válido'))).toBe(false);
   });
 
+  it('delivers the resolved goal and refinement to the actual executor and configured reviewer', async () => {
+    const env = setup('auto', true, true);
+    await completeRun(env, 'Implement retention policy of seven days in retention.ts.');
+    const continuation = 'Continue: close blockers and fix formatting in retention.ts.';
+    const runId = await completeRun(env, continuation);
+    const inputs = env.inputs.filter((input) => input.runId.startsWith(`${runId}:`));
+    const worker = inputs.find((input) => input.prompt.includes('Você é um executor delegado'));
+    const reviewer = inputs.find((input) => input.prompt.includes('Faça revisão independente'));
+
+    expect(inputs.some((input) => input.prompt.includes('Produza somente JSON válido'))).toBe(false);
+    expect(worker?.prompt).toContain('Implement retention policy of seven days in retention.ts.');
+    expect(worker?.prompt).toContain(continuation);
+    expect(worker?.prompt).toContain('A coordenação e a divisão de tarefas já foram feitas');
+    expect(reviewer?.prompt).toContain('Implement retention policy of seven days in retention.ts.');
+    expect(reviewer?.prompt).toContain(continuation);
+    expect(reviewer?.plan.tools).toBe(true);
+  });
+
   it.each([
     { name: 'isolated TCP question', prompt: 'What is TCP?' },
     { name: 'current branch inspection', prompt: 'What is my current git branch?' },
@@ -244,4 +274,34 @@ describe('Orchestrator continuation context', () => {
       expect(effectiveInputs[0].prompt).not.toContain('Responda ao pedido completo');
     }
   });
+
+  it.each([
+    { name: 'local with persisted evidence', remote: false, failPersistence: false, available: true },
+    { name: 'local without persisted evidence', remote: false, failPersistence: true, available: false },
+    { name: 'remote despite persisted evidence', remote: true, failPersistence: false, available: false },
+  ])(
+    '$name keeps the reviewer prompt aligned with effective MCP configuration',
+    async ({ remote, failPersistence, available }) => {
+      const env = setup('auto', true, true, remote);
+      if (failPersistence) {
+        (env.orchestrator.runEvidence as unknown as { put: () => Promise<string | undefined> }).put = async () =>
+          undefined;
+      }
+      const runId = await completeRun(env, 'Implement retention policy across several modules.');
+      const inputs = env.inputs.filter((input) => input.runId.startsWith(`${runId}:`));
+      const reviewer = inputs.find((input) => input.prompt.includes('Faça revisão independente'));
+      expect(reviewer).toBeDefined();
+      expect(reviewer!.prompt).toContain(
+        available
+          ? 'A ferramenta get_run_evidence está disponível'
+          : 'A ferramenta get_run_evidence não está disponível',
+      );
+      expect(reviewer!.mcpServers?.some((server) => server.name === 'adelic-run-evidence') ?? false).toBe(available);
+      expect(reviewer!.plan.tools).toBe(true);
+      if (remote) {
+        expect(reviewer!.remote?.executionKind).toBe('ssh');
+        expect(reviewer!.mcpServers).toBeUndefined();
+      }
+    },
+  );
 });

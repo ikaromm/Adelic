@@ -58,8 +58,13 @@ def within_root(raw):
 def validate_keys(args, allowed, required):
     if not isinstance(args, dict):
         raise ValueError("args must be an object")
-    if set(args) - set(allowed) or set(required) - set(args):
-        raise ValueError("tool arguments do not match the supported schema")
+    unknown = sorted(set(args) - set(allowed))
+    if unknown:
+        field = str(unknown[0])[:80]
+        raise ValueError("unsupported argument field '" + field + "'; check this tool's supported fields")
+    missing = sorted(set(required) - set(args))
+    if missing:
+        raise ValueError("missing required field '" + missing[0] + "'")
 
 def cwd_for(args):
     path = within_root(args.get("cwd", str(ROOT)))
@@ -70,6 +75,8 @@ def cwd_for(args):
 def read_file(args):
     validate_keys(args, ("path", "offset", "limit", "revision"), ("path",))
     path = within_root(args.get("path"))
+    if path.is_dir():
+        raise ValueError("path is a directory; read_file requires a file")
     if not path.is_file():
         raise ValueError("file does not exist")
     offset = args.get("offset", 0)
@@ -188,6 +195,8 @@ def _replace_text(args):
     new_bytes = new_text.encode("utf-8")
     if len(old_bytes) > MAX_TEXT or len(new_bytes) > MAX_TEXT:
         raise ValueError("replacement text exceeds limit")
+    if path.is_dir():
+        raise ValueError("path is a directory; replace_text requires a file")
     if not path.is_file():
         raise ValueError("file does not exist")
     expected_revision = args.get("expectedRevision")
@@ -305,7 +314,7 @@ def search(args):
         raise ValueError("query is too long")
     root = within_root(args.get("path", "."))
     if not root.is_dir():
-        raise ValueError("search path is not a directory")
+        raise ValueError("path is not a directory; search accepts directories only, use the file's parent directory")
     limit = args.get("limit", 100)
     if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1 or limit > 1000:
         raise ValueError("limit must be between 1 and 1000")
@@ -575,7 +584,7 @@ def process_request(request):
             category, message = "not_found", "file does not exist"
         elif isinstance(exc, PermissionError):
             category, message = "permission", "permission denied"
-        elif detail in ("file exceeds read limit", "offset exceeds file size", "offset is not a UTF-8 boundary", "read limit must be between 1 and 49152 bytes", "read limit is too small for a UTF-8 character", "unable to read UTF-8 boundary"):
+        elif detail in ("file exceeds read limit", "offset exceeds file size", "offset is not a UTF-8 boundary", "read limit must be between 1 and 49152 bytes", "read limit is too small for a UTF-8 character", "unable to read UTF-8 boundary", "path is a directory; read_file requires a file", "path is a directory; replace_text requires a file", "path is not a directory; search accepts directories only, use the file's parent directory"):
             category, message = "invalid_request", detail
         elif detail == "file exceeds edit limit":
             category, message = "invalid_request", "file exceeds edit limit"
@@ -591,6 +600,18 @@ def process_request(request):
             category, message = "conflict", "destination already exists"
         elif isinstance(exc, RuntimeError) and str(exc) == "command cancelled":
             category, message = "executor", "command cancelled"
+        elif detail.startswith("unsupported argument field '") and detail.endswith("'; check this tool's supported fields"):
+            field = detail[len("unsupported argument field '"):-len("'; check this tool's supported fields")]
+            if len(field) <= 64 and field.replace("_", "").isalnum():
+                category, message = "invalid_request", detail
+            else:
+                category, message = "invalid_request", "invalid tool request or file"
+        elif detail.startswith("missing required field '") and detail.endswith("'"):
+            field = detail[len("missing required field '"):-1]
+            if len(field) <= 64 and field.replace("_", "").isalnum():
+                category, message = "invalid_request", detail
+            else:
+                category, message = "invalid_request", "invalid tool request or file"
         elif isinstance(exc, ValueError):
             category, message = "invalid_request", "invalid tool request or file"
         else:
@@ -607,6 +628,8 @@ def process_request(request):
             "unable to read UTF-8 boundary",
             "oldText must be a non-empty string", "newText must be a string",
             "replacement text exceeds limit", "edited file exceeds limit", "path is not a directory",
+            "path is a directory; read_file requires a file", "path is a directory; replace_text requires a file",
+            "path is not a directory; search accepts directories only, use the file's parent directory",
             "limit must be between 1 and 20000", "recursive must be a boolean",
             "query must be a non-empty string", "query is too long", "search path is not a directory",
             "limit must be between 1 and 1000", "command must be a non-empty string under 32768 characters",

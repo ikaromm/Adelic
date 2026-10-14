@@ -38,6 +38,12 @@ test('delivery summarizes observed evidence and keeps check output collapsed unt
 
   const delivery = page.getByRole('region', { name: 'Entrega da execução' });
   await expect(delivery).toBeVisible();
+  const runFacts = page.locator('.run-outcome-facts').last();
+  await expect(runFacts).toContainText('Concluída');
+  await expect(runFacts).toContainText('Não registrada');
+  await expect(runFacts).toContainText('Não confirmado');
+  await expect(page.locator('.streaming-label')).toHaveCount(0);
+  await expect(page.locator('.markdown-content', { hasText: 'Arquivos alterados.' }).last()).toBeVisible();
   await expect(delivery).toContainText('arquivos observados');
   await expect(delivery).toContainText('check output');
   await expect(delivery).toContainText('echo output-observavel');
@@ -99,6 +105,7 @@ test('progress remains visible while reading earlier messages and disappears on 
   await input.press('Enter');
   const banner = page.locator('.run-progress-banner');
   await expect(banner).toBeVisible();
+  await expect(page.locator('.streaming-label')).toContainText('progresso · resposta final separada');
   await expect(banner.getByRole('button', { name: 'Ver atividade' })).toBeVisible();
   expect(await page.locator('.conversation').evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(
     true,

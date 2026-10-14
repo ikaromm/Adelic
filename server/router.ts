@@ -1,7 +1,7 @@
 import type { Message, Mode, RoutePlan } from '../shared/contracts.js';
 
 const actionPattern =
-  /\b(leia|read|abra|open|inspecione|inspect|analise|analyze|revise|review|corrija|fix|implemente|implement|crie|create|edite|edit|rode|run|execute|teste|test|compile|build|deploy|fa[cç]a|make|write|escreva|investigue|investigate|diagnostique|diagnose|explique|explain|resuma|resumir|summari[sz]e)\b/i;
+  /\b(leia|read|abra|open|inspecione|inspect|analise|analyze|revise|review|corr(?:ig\w*|ij\w*)|fix\w*|implement\w*|implemente?\w*|crie?\w*|create\w*|edite?\w*|edit\w*|rode|run|execute|teste?\w*|test\w*|compile\w*|build|deploy|format\w*|fa[cç]a|make|write|escreva|investigue|investigate|diagnostique|diagnose|explique|explain|resuma|resumir|summari[sz]e)\b/i;
 const filePattern =
   /\b(readme|arquivo|file|projeto|project|c[oó]digo|code|repo|reposit[oó]rio|app|aplicativo|pasta|directory|p[aá]gina|page|branch|logs?|bug|erro|error|falha|m[oó]dulos?|modules?|build|deploy|pr)\b/i;
 const fileExtensionPattern =
@@ -11,9 +11,9 @@ const pluralFilePattern = /\b(arquivos?|files?|projetos?|projects?)\b/i;
 const researchPattern =
   /\b(pesquise|search|procure|look up|busque|browse|navegue)\b|\b(cot[aç][aã]o|pre[cç]o|price|clima|weather|not[ií]cia|news)\b.{0,60}\b(atual|hoje|today|latest|current|recent)\b|\b(atual|hoje|today|latest|current|recent)\b.{0,60}\b(cot[aç][aã]o|pre[cç]o|price|clima|weather|not[ií]cia|news)\b/i;
 const implementationPattern =
-  /\b(implemente|implement|crie|create|corrija|fix|edite|edit|altere|change|refatore|refactor|adicione|add|keep|mantenha)\b.{0,120}\b(api|endpoint|fun[cç][aã]o|function|componente|component|schema|migration|migra[cç][aã]o|banco de dados|database|script|servidor|server|frontend|backend|filter|filtro|persistent|persistente|persist)\b/i;
+  /\b(implemente|implement|crie|create|corr(?:ig\w*|ij\w*)|fix|edite|edit|altere|change|refatore|refactor|adicione|add|keep|mantenha)\b.{0,120}\b(api|endpoint|fun[cç][aã]o|function|componente|component|schema|migration|migra[cç][aã]o|banco de dados|database|script|servidor|server|frontend|backend|filter|filtro|persistent|persistente|persist)\b/i;
 const technicalChangePattern =
-  /\b(implement|create|change|alter|refactor|migrate|add|build|design|redesign|implemente|crie|altere|refatore|migre|adicione|construa|projete|corrija|fix)\b/i;
+  /\b(implement\w*|create\w*|change\w*|alter\w*|refactor\w*|migrate\w*|add\w*|build\w*|design\w*|redesign\w*|implemente?\w*|crie?\w*|altere?\w*|refatore?\w*|migre?\w*|adicione?\w*|construa?\w*|projete?\w*|corr(?:ig\w*|ij\w*)|fech\w*|format\w*|fix\w*|close\w*)\b/i;
 const explanationPattern =
   /\b(explain|describe|what|why|how|difference|meaning|explique|descreva|o que|por que|como|diferen[cç]a|significado)\b/i;
 const broadTechnicalWorkPattern =
@@ -69,7 +69,7 @@ export function routeMessage(content: string, mode: Mode, history: Message[] = [
     return {
       level: 'deep',
       reason: 'Modo Completo selecionado pelo operador',
-      tools: needsTools(text),
+      tools: needsTools(text) || continuesTechnicalWork(text, history),
       memory: memoryEnabled && memoryRequestPattern.test(text),
       effort: 'high',
       contextBudget: 24000,
@@ -125,6 +125,16 @@ export function routeMessage(content: string, mode: Mode, history: Message[] = [
       contextBudget: 24000,
     };
   }
+  if (continuesTechnicalWork(text, history) && !explanationPattern.test(text)) {
+    return {
+      level: 'deep',
+      reason: 'Continuação de trabalho técnico solicitado na conversa',
+      tools: true,
+      memory: false,
+      effort: 'high',
+      contextBudget: 24000,
+    };
+  }
   // Long conceptual prompts can stay on the cheap route; length alone never promotes.
   return {
     level: 'fast',
@@ -134,6 +144,16 @@ export function routeMessage(content: string, mode: Mode, history: Message[] = [
     effort: 'low',
     contextBudget: 6000,
   };
+}
+
+function continuesTechnicalWork(text: string, history: Message[]) {
+  const continuation =
+    /\b(continue\w*|continuar\w*|finish\w*|fech\w*|close\w*|corrig\w*|fix\w*|formate?\w*|format\w*)\b/i.test(text);
+  if (!continuation) return false;
+  const latestUser = [...history].reverse().find((message) => message.role === 'user');
+  if (!latestUser) return false;
+  // Do not revive an unrelated old coding request after a newer conceptual exchange.
+  return needsTools(latestUser.content);
 }
 
 function needsTools(text: string) {

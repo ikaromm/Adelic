@@ -2228,7 +2228,7 @@ export default function App() {
                           <strong>{provider?.name || t('app.agentFallback')}</strong>
                           <span className="streaming-label">
                             <i aria-hidden="true" />
-                            {t('app.writing')}
+                            {t('app.streamingProgress')}
                           </span>
                         </div>
                         <Markdown>{stream.content}</Markdown>

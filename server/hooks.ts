@@ -15,6 +15,13 @@ import {
 import { bubblewrap } from './providers/sandbox.js';
 import { terminateChildProcess } from './providers/process.js';
 import { sandboxInitPid } from './terminal.js';
+import {
+  compareCheckSource,
+  fingerprintCheckEnvironment,
+  observeCheckEnvironmentAfter,
+  observeCheckSource,
+  watchCheckSource,
+} from './check-source.js';
 
 /** Environment passed to a check: no tokens or Adelic settings, only what tools commonly need. */
 export function checkEnvironment(source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
@@ -75,7 +82,13 @@ export interface CheckRunOptions {
   signal: AbortSignal;
   /** Called with the output so far (bounded), at most every `progressMs`. */
   onProgress?: (output: string) => void;
+  /** Streams complete command output to the private evidence log writer. */
+  onOutputChunk?: (chunk: Buffer) => void;
   progressMs?: number;
+  /** Evidence for the exact sanitized environment object handed to spawn. */
+  onEnvironmentObserved?: (evidence: import('../shared/contracts.js').CheckEnvironmentEvidence) => void;
+  /** Absolute Run deadline; shared by every check and retry in the batch. */
+  deadlineAt?: string;
   /** Test hook; production uses the real bubblewrap boundary. */
   wrap?: typeof bubblewrap;
 }
@@ -100,14 +113,19 @@ export async function runCheck(check: AfterEditCheck, cwd: string, options: Chec
     return { ...base, status: 'error', detail: error instanceof Error ? error.message : String(error) };
   }
   if (options.signal.aborted) return { ...base, status: 'cancelled', detail: abortReason(options.signal) };
+  const deadlineRemaining = options.deadlineAt ? Date.parse(options.deadlineAt) - Date.now() : Infinity;
+  if (deadlineRemaining <= 0) return { ...base, status: 'timeout', detail: 'Prazo global da execução esgotado.' };
+  const timeoutMs = Math.min(check.timeoutSec * 1000, deadlineRemaining);
   const tail = new Tail(CHECK_OUTPUT_MAX);
   // bubblewrap's `--new-session` moves the sandboxed tree out of the launcher's process group,
   // so killing the group does not reach it: `--info-fd 3` reports the sandbox's init PID, and
   // killing that init ends the whole PID namespace (same approach as server/terminal.ts).
   const infoFd = !options.wrap;
+  const env = checkEnvironment();
+  options.onEnvironmentObserved?.(fingerprintCheckEnvironment(env, options.sandbox));
   const child = spawn(wrapped.command, infoFd ? ['--info-fd', '3', ...wrapped.args] : wrapped.args, {
     cwd,
-    env: checkEnvironment(),
+    env,
     stdio: infoFd ? ['ignore', 'pipe', 'pipe', 'pipe'] : ['ignore', 'pipe', 'pipe'],
     detached: process.platform !== 'win32',
     windowsHide: true,
@@ -122,6 +140,7 @@ export async function runCheck(check: AfterEditCheck, cwd: string, options: Chec
     options.onProgress?.(tail.text());
   };
   const onData = (chunk: Buffer) => {
+    options.onOutputChunk?.(chunk);
     tail.push(chunk);
     if (!options.onProgress || progressTimer) return;
     const wait = Math.max(0, lastProgress + progressMs - Date.now());
@@ -132,6 +151,8 @@ export async function runCheck(check: AfterEditCheck, cwd: string, options: Chec
   let stop: 'timeout' | 'cancelled' | undefined;
   let terminating: Promise<void> | undefined;
   const kill = (why: 'timeout' | 'cancelled') => {
+    // A process that has already exited must not be retroactively classified as timed out.
+    if (child.exitCode !== null || child.signalCode !== null) return;
     stop ??= why;
     terminating ??= (async () => {
       const pid = await sandboxPid;
@@ -146,9 +167,11 @@ export async function runCheck(check: AfterEditCheck, cwd: string, options: Chec
       await terminateChildProcess(child);
     })();
   };
-  const timer = setTimeout(() => kill('timeout'), check.timeoutSec * 1000);
+  const timer = setTimeout(() => kill('timeout'), timeoutMs);
   const onAbort = () => kill('cancelled');
   options.signal.addEventListener('abort', onAbort, { once: true });
+  // Close the race between the pre-spawn abort check and listener registration.
+  if (options.signal.aborted) onAbort();
   const exit = await new Promise<{ code: number | null; error?: Error }>((resolve) => {
     child.once('error', (error) => resolve({ code: null, error }));
     child.once('close', (code) => resolve({ code }));
@@ -200,6 +223,13 @@ export interface HookChecksDeps {
   /** Starts the single automatic fix run; a rejection is noted on the checked run. */
   startFix(sessionId: string, sourceRunId: string, failures: CheckResult[], budget?: ExecutionBudget): Promise<void>;
   runner?: typeof runCheck;
+  beginCheckLog?(
+    runId: string,
+    eventId: string,
+  ): Promise<{
+    write(chunk: Buffer): void;
+    finish(): Promise<{ status: 'available' | 'truncated' | 'unavailable'; bytes?: number }>;
+  }>;
   /** How often a running check's output is saved (default 2 s). */
   progressMs?: number;
 }
@@ -236,9 +266,13 @@ export class HookChecks {
     run: { id: string; sessionId: string; budget?: ExecutionBudget },
     checks: AfterEditCheck[],
     fix: boolean,
+    options: { signal?: AbortSignal } = {},
   ): Promise<void> {
     if (this.batches.has(projectId) || !checks.length) return Promise.resolve();
     const controller = new AbortController();
+    const abortFromRun = () => controller.abort(options.signal?.reason ?? 'execução encerrada');
+    if (options.signal?.aborted) abortFromRun();
+    else options.signal?.addEventListener('abort', abortFromRun, { once: true });
     const failures: CheckResult[] = [];
     const done = (async () => {
       for (const check of checks) {
@@ -247,27 +281,54 @@ export class HookChecks {
         if (result.status === 'failed' || result.status === 'timeout') failures.push(result);
       }
     })().finally(() => {
+      options.signal?.removeEventListener('abort', abortFromRun);
       if (this.batches.get(projectId)?.controller === controller) this.batches.delete(projectId);
     });
     this.batches.set(projectId, { controller, done });
     // The fix run starts after the batch is gone, so its own start never waits for it.
     return done.then(async () => {
       if (!fix || !failures.length || controller.signal.aborted) return;
-      try {
-        await this.deps.startFix(run.sessionId, run.id, failures, run.budget);
-      } catch (error) {
-        this.note(run, `Correção automática não iniciada: ${error instanceof Error ? error.message : String(error)}`);
-      }
+      await this.requestFix(run, failures);
     });
+  }
+  /** Starts exactly one corrective run for failures already recorded against this Run. */
+  async requestFix(run: { id: string; sessionId: string; budget?: ExecutionBudget }, failures: CheckResult[]) {
+    if (!failures.length) return;
+    try {
+      await this.deps.startFix(run.sessionId, run.id, failures, run.budget);
+    } catch (error) {
+      this.note(run, `Correção automática não iniciada: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
   /** "Testar" in Settings: one check now, outside any run. */
   async test(projectId: string, cwd: string, sandbox: Sandbox, check: AfterEditCheck): Promise<CheckResult> {
     const controller = new AbortController();
-    const promise = (this.deps.runner ?? runCheck)(check, cwd, { sandbox, signal: controller.signal });
+    const sourceWatch = watchCheckSource(cwd);
+    const runner = this.deps.runner ?? runCheck;
+    const sourceBefore = observeCheckSource(cwd, 'settings-test');
+    if (runner !== runCheck || sourceWatch.state !== 'observed') {
+      sourceBefore.state = 'unknown';
+      delete sourceBefore.revision;
+    }
+    let environmentAtSpawn: import('../shared/contracts.js').CheckEnvironmentEvidence = { state: 'unknown' };
+    const promise = runner(check, cwd, {
+      sandbox,
+      signal: controller.signal,
+      onEnvironmentObserved: (evidence) => (environmentAtSpawn = evidence),
+    });
     this.batches.set(projectId, { controller, done: promise.then(() => undefined) });
     try {
-      return await promise;
+      const result = await promise;
+      const source = compareCheckSource(sourceBefore, cwd, 'settings-test');
+      if (runner !== runCheck || sourceWatch.state !== 'observed') source.state = 'unknown';
+      else if (sourceWatch.changed()) source.state = 'changed';
+      return {
+        ...result,
+        source,
+        environment: observeCheckEnvironmentAfter(environmentAtSpawn, sandbox),
+      };
     } finally {
+      sourceWatch.close();
       if (this.batches.get(projectId)?.controller === controller) this.batches.delete(projectId);
     }
   }
@@ -275,7 +336,7 @@ export class HookChecks {
     check: AfterEditCheck,
     cwd: string,
     sandbox: Sandbox,
-    run: { id: string; sessionId: string },
+    run: { id: string; sessionId: string; budget?: ExecutionBudget },
     signal: AbortSignal,
   ): Promise<CheckResult> {
     const event: RunEvent = {
@@ -291,15 +352,64 @@ export class HookChecks {
       // `text` stays checkHeadline() (pt-BR); the key lets the UI show it in its locale.
       this.deps.saveEvent({ ...event, text: checkHeadline(check), textKey: key, textVars: vars, check });
     };
-    save({ name: check.name, status: 'running' });
-    const result = await (this.deps.runner ?? runCheck)(check, cwd, {
-      sandbox,
-      signal,
-      progressMs: this.deps.progressMs,
-      onProgress: (output) => save({ name: check.name, status: 'running', output }),
-    });
-    save(result);
-    return result;
+    const sourceWatch = watchCheckSource(cwd);
+    const runner = this.deps.runner ?? runCheck;
+    const sourceBefore = observeCheckSource(cwd, run.id);
+    if (runner !== runCheck || sourceWatch.state !== 'observed') {
+      sourceBefore.state = 'unknown';
+      delete sourceBefore.revision;
+    }
+    let environmentAtSpawn: import('../shared/contracts.js').CheckEnvironmentEvidence = { state: 'unknown' };
+    save({ name: check.name, status: 'running', source: sourceBefore, environment: environmentAtSpawn });
+    let result: CheckResult;
+    let logWriter:
+      | {
+          write(chunk: Buffer): void;
+          finish(): Promise<{ status: 'available' | 'truncated' | 'unavailable'; bytes?: number }>;
+        }
+      | undefined;
+    if (runner === runCheck && this.deps.beginCheckLog) {
+      try {
+        logWriter = await this.deps.beginCheckLog(run.id, event.id);
+      } catch {
+        logWriter = undefined;
+      }
+    }
+    let operationalLog: CheckResult['operationalLog'] = { status: 'unavailable' };
+    try {
+      result = await runner(check, cwd, {
+        sandbox,
+        signal,
+        deadlineAt: run.budget
+          ? new Date(Date.parse(run.budget.deadlineAt) - run.budget.finalizationReserveMs).toISOString()
+          : undefined,
+        progressMs: this.deps.progressMs,
+        onEnvironmentObserved: (evidence) => (environmentAtSpawn = evidence),
+        onOutputChunk: (chunk) => logWriter?.write(chunk),
+        onProgress: (output) =>
+          save({ name: check.name, status: 'running', output, source: sourceBefore, environment: environmentAtSpawn }),
+      });
+    } finally {
+      if (logWriter) {
+        try {
+          operationalLog = await logWriter.finish();
+        } catch {
+          operationalLog = { status: 'unavailable' };
+        }
+      }
+      sourceWatch.close();
+    }
+    const source = compareCheckSource(sourceBefore, cwd, run.id);
+    if (runner !== runCheck || sourceWatch.state !== 'observed') source.state = 'unknown';
+    else if (sourceWatch.changed()) source.state = 'changed';
+    const observed: CheckResult = {
+      ...result!,
+      source,
+      environment: observeCheckEnvironmentAfter(environmentAtSpawn, sandbox),
+      operationalLog,
+    };
+    save(observed);
+    return observed;
   }
   private note(run: { id: string; sessionId: string }, text: string) {
     this.deps.saveEvent({

@@ -178,6 +178,8 @@ export interface DelegatedTask {
   error?: string;
   /** Tool activity captured from provider events; not worker-authored. */
   toolCalls?: { callId?: string; name: string; status: string; recordedAt: string }[];
+  /** Usage from actual provider invocations; Run totals already aggregate child usage. */
+  providerAttempts?: ProviderAttemptUsage[];
   delivery?: TaskDeliveryResult;
   /** Provider/process status above is not rewritten by integration or cleanup outcomes. */
   integration?: TaskIntegration;
@@ -393,6 +395,45 @@ export interface RunArtifactsSnapshot {
   truncated?: boolean;
   capturedAt?: string;
 }
+/** Provider-reported usage for one actual invocation/attempt; unknown values stay null. */
+export interface ProviderAttemptUsage {
+  attemptId: string;
+  taskId?: string;
+  startedAt?: string;
+  completedAt?: string;
+  durationMs?: number;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  cachedInputTokens: number | null;
+  reasoningOutputTokens: number | null;
+  costUsd: number | null;
+}
+/** Source identity for checks; absent identity means the code tested is unknown. */
+export interface CheckSource {
+  runId: string;
+  root?: string;
+  /** Exact filesystem fingerprint only when the bounded tree observation completed. */
+  revision?: { kind: 'source_tree'; value: string };
+  /** verified only when before/after observations match; changed/unknown never imply stability. */
+  state: 'verified' | 'changed' | 'unknown';
+  /** Explicit exclusions/limits are part of the meaning of this identity. */
+  scope: 'filesystem-except-.git-and-node_modules';
+}
+export interface CheckEnvironmentEvidence {
+  state: 'observed' | 'changed' | 'unknown';
+  /** Digest only; raw environment values (which may identify users/paths) are never persisted. */
+  digest?: string;
+  runtime?: string;
+  platform?: string;
+  arch?: string;
+}
+/** Process termination, integration, and goal assessment are independent facts. */
+export interface RunDeliveryState {
+  response: 'completed' | 'cancelled' | 'failed' | 'interrupted' | 'unknown';
+  integration: 'not_required' | 'applied' | 'blocked' | 'unknown';
+  objective: 'met' | 'partial' | 'not_met' | 'unknown';
+  recordedAt: string;
+}
 export interface Run {
   id: string;
   sessionId: string;
@@ -412,6 +453,12 @@ export interface Run {
   /** Subset of outputTokens used for reasoning, when reported; never add again. */
   reasoningOutputTokens?: number;
   costUsd?: number;
+  /** Per-provider-attempt measurements; Run totals already aggregate child usage. */
+  providerAttempts?: ProviderAttemptUsage[];
+  /** Checks are only attributable to source when the runner recorded its identity. */
+  checkSource?: CheckSource | null;
+  /** Typed factual outcome; absent in legacy runs means unknown. */
+  delivery?: RunDeliveryState;
   error?: string;
   /** Automatic retries that happened before the final outcome (0 or absent: none). */
   retries?: number;
@@ -788,6 +835,11 @@ export interface MemoryPage {
 export type StreamEvent =
   | { type: 'message'; message: Message }
   | {
+      /**
+       * Ephemeral streamed text, separate from the persisted assistant `message` event and
+       * `SessionDetail.messages`. Keep the delta as progress; do not infer a final answer or
+       * delegated-task attribution from its content or position when optional metadata is absent.
+       */
       type: 'delta';
       sessionId: string;
       runId: string;
@@ -813,6 +865,8 @@ export type StreamEvent =
 // Server-side provider contract. Each adapter owns its subprocess and pending approvals.
 export interface RunInput {
   runId: string;
+  /** Root Run whose persisted evidence this provider invocation may read (delegated phases only). */
+  evidenceRunId?: string;
   sessionId: string;
   nativeSessionId?: string;
   providerId: ProviderId;
@@ -858,7 +912,15 @@ export interface RunInput {
 export type ProviderEvent =
   | { type: 'delta'; text: string }
   | { type: 'status'; text: string }
-  | { type: 'tool'; name: string; description: string; status: string; toolCallId?: string }
+  | {
+      type: 'tool';
+      name: string;
+      /** MCP tool diagnostics go here as bounded, sanitized runtime-reported metadata only. */
+      description: string;
+      /** Missing runtime state stays unknown; providers must not infer completion. */
+      status: string;
+      toolCallId?: string;
+    }
   | { type: 'approval'; approval: Approval }
   | { type: 'session'; nativeSessionId: string }
   | {

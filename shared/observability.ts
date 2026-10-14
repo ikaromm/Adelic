@@ -99,6 +99,10 @@ export interface ObservationContext {
   projectId?: string | null;
   parentId?: string | null;
   providerId?: string;
+  attemptId?: string;
+  taskId?: string;
+  agentId?: string;
+  phase?: string;
 }
 
 export interface ObservationInput extends ObservationContext {

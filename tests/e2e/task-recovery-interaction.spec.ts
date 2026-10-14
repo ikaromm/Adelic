@@ -79,35 +79,23 @@ test('recovery controls follow refreshed terminal evidence without remounting', 
     await activity.locator('summary').first().click();
 
     const delivered = activity.locator(`[aria-label="Recuperação da tarefa: Irmã já entregue (${seeded.siblingId})"]`);
+    const deliveredTask = activity.locator('.activity-task').filter({ hasText: 'Irmã já entregue' });
     await expect(delivered.getByTestId('task-recovery-retry')).toHaveCount(0);
+    await expect(deliveredTask.locator('.task-outcome-facts')).toContainText('Processo');
+    await expect(deliveredTask.locator('.task-outcome-facts')).toContainText('Concluído');
+    await expect(deliveredTask.locator('.task-outcome-facts')).toContainText('Aplicada ao projeto');
+    await expect(deliveredTask.locator('.task-outcome-facts')).toContainText('Implementada (evidência observada)');
 
     const noChanges = activity.locator(
       `[aria-label="Recuperação da tarefa: Tarefa sem alterações (${seeded.noChangesId})"]`,
     );
+    const noChangesTask = activity.locator('.activity-task').filter({ hasText: 'Tarefa sem alterações' });
     const retry = noChanges.getByTestId('task-recovery-retry');
     await expect(retry).toBeEnabled();
-    // The E2E scripted provider cannot persist a complete artifact manifest. Keep the actual
-    // executor run in this test, then model a terminal, complete no-change detail response at
-    // the API boundary so the mounted component's positive retry transition is exercised.
-    let knownEmptyRefresh = false;
-    await page.route(`**/api/sessions/${sessionId}`, async (route) => {
-      const response = await route.fetch();
-      const detail = (await response.json()) as {
-        tasks?: Array<{
-          id: string;
-          retryRunStatus?: string;
-          retryRunDelivered?: boolean;
-          retryHistoryState?: 'none' | 'empty' | 'delivered' | 'unknown';
-        }>;
-      };
-      const retriedTask = detail.tasks?.find((task) => task.id === seeded.noChangesId);
-      if (retriedTask?.retryRunStatus === 'completed') {
-        retriedTask.retryRunDelivered = false;
-        retriedTask.retryHistoryState = 'empty';
-        knownEmptyRefresh = true;
-      }
-      await route.fulfill({ response, json: detail });
-    });
+    await expect(noChangesTask.locator('.task-outcome-facts')).toContainText('Concluído');
+    await expect(noChangesTask.locator('.task-outcome-facts')).toContainText('Não registrada');
+    await expect(noChangesTask.locator('.task-outcome-facts')).toContainText('Não implementada');
+    await expect(noChangesTask.locator('.task-outcome-facts')).not.toContainText('Aplicada ao projeto');
     page.on('dialog', (dialog) => dialog.accept());
     await retry.click();
 
@@ -117,19 +105,19 @@ test('recovery controls follow refreshed terminal evidence without remounting', 
           const task = (await (await request.get(`/api/tasks/${seeded.noChangesId}`)).json()) as {
             retryRunStatus?: string;
             retryRunDelivered?: boolean;
+            retryHistoryState?: 'none' | 'empty' | 'delivered' | 'unknown';
           };
-          return { status: task.retryRunStatus, delivered: task.retryRunDelivered };
+          return {
+            status: task.retryRunStatus,
+            delivered: task.retryRunDelivered,
+            history: task.retryHistoryState,
+          };
         },
         { timeout: 15_000 },
       )
-      .toMatchObject({ status: 'completed' });
-    const refreshedTask = (await (await request.get(`/api/tasks/${seeded.noChangesId}`)).json()) as {
-      retryRunDelivered?: boolean;
-    };
-    // The actual backend remains conservative (unknown); the detail response above represents
-    // the complete terminal no-change evidence that permits another retry.
-    expect(refreshedTask.retryRunDelivered).toBeUndefined();
-    await expect.poll(() => knownEmptyRefresh).toBe(true);
+      .toEqual({ status: 'completed', delivered: false, history: 'empty' });
+    // The real backend proves the retry run had no changes; the mounted control must consume
+    // that factual empty state rather than an API-mocked response or an unknown-to-empty coercion.
     // Same TaskRecovery identity, no reload: terminal false evidence removes the done/busy lock.
     await expect(retry).toBeEnabled();
     const inspect = noChanges.getByTestId('task-recovery-inspect');

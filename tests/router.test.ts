@@ -114,6 +114,49 @@ describe('adaptive router', () => {
     });
     expect(routeMessage('Add a small button to the UI.', 'auto').level).toBe('fast');
   });
+  it('routes inflected technical continuations with tools in auto and full modes', () => {
+    const history = [
+      {
+        id: '1',
+        sessionId: 's',
+        role: 'user' as const,
+        content: 'Implemente melhorias de recuperação em server/orchestrator.ts.',
+        createdAt: '',
+      },
+    ];
+    const prompt = 'Continue: fechar os bloqueadores e corrigir a formatação.';
+    expect(routeMessage(prompt, 'auto', history)).toMatchObject({ level: 'deep', tools: true });
+    expect(routeMessage(prompt, 'deep', history)).toMatchObject({ level: 'deep', tools: true });
+    expect(
+      routeMessage(prompt, 'auto', [
+        ...history,
+        { id: '2', sessionId: 's', role: 'user', content: 'What does routing mean?', createdAt: '' },
+      ]).level,
+    ).toBe('fast');
+    expect(routeMessage('Corrigir server/router.ts', 'deep')).toMatchObject({ level: 'deep', tools: true });
+    expect(routeMessage('Como funciona um roteador?', 'deep')).toMatchObject({ level: 'deep', tools: false });
+  });
+
+  it('routes inflected Portuguese edit imperatives in auto and full modes without promoting questions', () => {
+    for (const prompt of [
+      'Corrija src/App.tsx',
+      'Corrigir src/App.tsx',
+      'Corrige src/App.tsx',
+      'Formate src/App.tsx',
+      'Formatar src/App.tsx',
+      'corrija o bug no projeto',
+      'Formate os arquivos do projeto',
+    ]) {
+      expect(routeMessage(prompt, 'auto')).toMatchObject({ level: 'deep', tools: true });
+      expect(routeMessage(prompt, 'deep')).toMatchObject({ level: 'deep', tools: true });
+    }
+
+    for (const prompt of ['Como se conjuga corrigir?', 'O que significa formatar?']) {
+      expect(routeMessage(prompt, 'auto')).toMatchObject({ level: 'fast' });
+      expect(routeMessage(prompt, 'deep')).toMatchObject({ level: 'deep', tools: false });
+    }
+  });
+
   it('delegates concrete software changes while keeping API definitions simple', () => {
     for (const prompt of [
       'Implemente uma rota de API',

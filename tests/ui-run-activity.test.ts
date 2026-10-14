@@ -11,6 +11,9 @@ import {
   statusLabel,
   taskOutcome,
   taskPhases,
+  runOutcomeState,
+  toolActionDescription,
+  toolActionStatus,
 } from '../src/run-activity';
 
 const task = (id: string, runId: string): DelegatedTask => ({
@@ -120,6 +123,90 @@ describe('conversation activity grouping', () => {
   });
 });
 
+describe('MCP tool diagnostics in the UI', () => {
+  it('shows only bounded, reported server/tool/state/error facts and preserves unknown values', () => {
+    const runtimeFailure = {
+      ...event(
+        'mcp-call1',
+        'r',
+        'tool',
+        'failed',
+        'Servidor: github · Ferramenta: search_repositories · Estado: failed · Erro: HTTP 403: token=sk-12345678901234567890',
+      ),
+      toolName: 'mcpToolCall',
+    };
+    const formatted = toolActionDescription(runtimeFailure);
+    expect(formatted).toContain('Servidor: github');
+    expect(formatted).toContain('Ferramenta: search_repositories');
+    expect(formatted).toContain('Estado reportado: failed');
+    expect(formatted).toContain('Erro reportado: HTTP 403: token=sk-12345678901234567890');
+    expect(formatted).not.toContain('arguments');
+    expect(statusLabel('unknown')).toBe('Não informado');
+
+    const noDiagnostics = {
+      ...event(
+        'mcp-call2',
+        'r',
+        'tool',
+        'unknown',
+        'Servidor: não informado · Ferramenta: não informada · Estado: não informado · Erro: não reportado',
+      ),
+      toolName: 'mcpToolCall',
+    };
+    expect(toolActionDescription(noDiagnostics)).toBe(
+      'Servidor: não informado · Ferramenta: não informada · Estado reportado: não informado · Erro reportado: não reportado',
+    );
+    expect(statusLabel(noDiagnostics.status)).toBe('Não informado');
+  });
+
+  it('preserves factual historical lifecycle states through the activity UI status flow', () => {
+    const persisted = [
+      { id: 'mcp-run1', status: 'running' },
+      { id: 'mcp-fail2', status: 'failed' },
+      { id: 'mcp-cancel3', status: 'cancelled' },
+      { id: 'mcp-done4', status: 'completed' },
+      { id: 'mcp-unknown5', status: 'unknown' },
+      { id: 'mcp-absent6', status: undefined },
+    ].map(({ id, status }) => ({
+      ...event(id, 'r', 'tool', status, id),
+      toolName: 'mcpToolCall',
+    }));
+    const visibleActions = activityForRun('r', [], persisted).actions;
+
+    // RunActivityPanel uses these same helpers for its activity-action-status class and label.
+    expect(
+      visibleActions.map((action) => ({
+        persisted: action.status ?? 'absent',
+        status: toolActionStatus(action),
+        label: statusLabel(toolActionStatus(action)),
+      })),
+    ).toEqual([
+      { persisted: 'running', status: 'running', label: 'Em andamento' },
+      { persisted: 'failed', status: 'failed', label: 'Falhou' },
+      { persisted: 'cancelled', status: 'cancelled', label: 'Cancelada' },
+      { persisted: 'completed', status: 'unknown', label: 'Não informado' },
+      { persisted: 'unknown', status: 'unknown', label: 'Não informado' },
+      { persisted: 'absent', status: 'unknown', label: 'Não informado' },
+    ]);
+  });
+
+  it('keeps historical descriptions readable and bounds malformed diagnostic text', () => {
+    const legacy = { ...event('mcp-old1', 'r', 'tool', 'completed', 'mcpToolCall'), toolName: 'mcpToolCall' };
+    expect(toolActionDescription(legacy)).toBe(
+      'Servidor: não informado · Ferramenta: não informada · Estado reportado: não informado · Erro reportado: não reportado',
+    );
+    expect(toolActionStatus(legacy)).toBe('unknown');
+    const malformed = { ...legacy, text: 'argumentos e resultados não são diagnósticos' };
+    expect(toolActionDescription(malformed)).toContain('Servidor: não informado');
+    expect(toolActionDescription(malformed)).not.toContain('argumentos e resultados');
+    const longValue = 'Servidor: ' + 's'.repeat(300) + ' · Ferramenta: search · Estado: failed · Erro: denied';
+    const bounded = toolActionDescription({ ...legacy, text: longValue });
+    expect(bounded).toContain('s'.repeat(159) + '…');
+    expect(bounded).not.toContain('s'.repeat(161));
+    expect(toolActionDescription({ ...legacy, toolName: 'commandExecution', text: 'npm test' })).toBe('npm test');
+  });
+});
+
 describe('project checks in the run activity', () => {
   const at = (id: string, extra: Partial<RunEvent>): RunEvent => ({
     id,
@@ -200,5 +287,31 @@ describe('agent phase and task outcomes', () => {
     expect(taskOutcome('partial')).toBe('partial');
     expect(taskOutcome('failed')).toBe('failed');
     expect(tasks[1]?.error).toContain('conflict');
+  });
+});
+
+describe('run outcome facts in the UI', () => {
+  it('renders typed run delivery and keeps absent legacy evidence unknown', () => {
+    expect(runOutcomeState()).toEqual({ response: 'unknown', integration: 'unknown', objective: 'unknown' });
+    expect(
+      runOutcomeState({
+        delivery: {
+          response: 'completed',
+          integration: 'applied',
+          objective: 'partial',
+          recordedAt: '2026-10-01T00:00:00Z',
+        },
+      }),
+    ).toEqual({ response: 'completed', integration: 'applied', objective: 'partial' });
+    expect(
+      runOutcomeState({
+        delivery: {
+          response: 'completed',
+          integration: 'unknown',
+          objective: 'unknown',
+          recordedAt: '2026-10-01T00:00:00Z',
+        },
+      }),
+    ).toEqual({ response: 'completed', integration: 'unknown', objective: 'unknown' });
   });
 });

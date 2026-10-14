@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { parseJsonRpcLine } from '../server/providers/process.js';
 import {
   DeltaParams,
+  ErrorParams,
   ItemParams,
   TokenUsageParams,
   TurnParams,
@@ -43,6 +44,60 @@ describe('Codex notification params', () => {
       'interrupted',
     );
   });
+  it('preserves Codex agentMessage phase as optional or null rather than inferring it', () => {
+    expect(
+      parseParams(ItemParams, {
+        threadId: 't',
+        item: { id: 'a', type: 'agentMessage', text: 'progress', phase: 'commentary' },
+      })?.item,
+    ).toMatchObject({ id: 'a', type: 'agentMessage', text: 'progress', phase: 'commentary' });
+    expect(
+      parseParams(ItemParams, {
+        threadId: 't',
+        item: { id: 'b', type: 'agentMessage', text: 'answer', phase: 'final_answer' },
+      })?.item.phase,
+    ).toBe('final_answer');
+    expect(
+      parseParams(ItemParams, {
+        threadId: 't',
+        item: { id: 'c', type: 'agentMessage', text: 'unknown', phase: null },
+      })?.item.phase,
+    ).toBeNull();
+    expect(
+      parseParams(ItemParams, {
+        threadId: 't',
+        item: { id: 'd', type: 'agentMessage', text: 'legacy' },
+      })?.item,
+    ).not.toHaveProperty('phase');
+    expect(
+      parseParams(ItemParams, {
+        threadId: 't',
+        item: { id: 'e', type: 'agentMessage', text: 'bad', phase: 4 },
+      }),
+    ).toBeUndefined();
+    expect(
+      parseParams(ErrorParams, {
+        threadId: 't',
+        error: { message: 'temporary' },
+        willRetry: true,
+      })?.willRetry,
+    ).toBe(true);
+    expect(
+      parseParams(ErrorParams, {
+        threadId: 't',
+        error: { message: 'terminal' },
+        willRetry: false,
+      })?.willRetry,
+    ).toBe(false);
+    expect(
+      parseParams(ErrorParams, {
+        threadId: 't',
+        error: { message: 'invalid' },
+        willRetry: 'yes',
+      }),
+    ).toBeUndefined();
+  });
+
   it('ignores events missing what they need instead of half-applying them', () => {
     expect(parseParams(DeltaParams, { threadId: 't', delta: 5 })).toBeUndefined();
     expect(parseParams(ItemParams, { threadId: 't', item: { command: 'pwd' } })).toBeUndefined();

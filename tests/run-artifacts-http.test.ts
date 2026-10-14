@@ -36,7 +36,7 @@ async function setup() {
   };
   store.putSession(session);
   const run: Run = {
-    id: 'run-artifacts',
+    id: '2fa9bd61-5bd7-4cfe-a395-1b9f4f1ad82d',
     sessionId: session.id,
     providerId: 'codex',
     status: 'completed',
@@ -57,6 +57,29 @@ async function setup() {
     bind: '127.0.0.2',
     port: 4318,
     token: 'artifact-test-token-with-at-least-32-characters',
+  });
+  await backend.orchestrator.runEvidence.put({
+    runId: run.id,
+    sessionId: session.id,
+    capturedAt: now,
+    source: { state: 'unknown' },
+    environment: [],
+    artifacts: run.artifacts,
+    checks: [
+      {
+        eventId: 'failed-check-event',
+        name: 'tests',
+        status: 'failed',
+        exitCode: 1,
+        command: 'npm test',
+        output: 'private failure log',
+        source: null,
+        environment: null,
+      },
+    ],
+    outcome: { status: 'completed' },
+    review: 'bounded review excerpt',
+    fullReview: 'bounded review excerpt ... HTTP-FINAL-ONLY-MARKER',
   });
   const server = createServer(backend.app);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -80,7 +103,7 @@ async function setup() {
         : { origin: base },
     });
   const file = (path: string) => `/api/runs/${run.id}/artifacts/file?path=${encodeURIComponent(path)}`;
-  return { dir, root, run, store, get, file };
+  return { dir, root, run, store, backend, get, file };
 }
 
 describe('run artifact HTTP access', () => {
@@ -103,6 +126,30 @@ describe('run artifact HTTP access', () => {
     const { get, file, run } = await setup();
     expect((await get(`/api/runs/${run.id}/artifacts`, true)).status).toBe(403);
     expect((await get(file('result.txt'), true)).status).toBe(403);
+  });
+
+  it('serves persisted evidence indexes compactly and raw check logs only on an authorized request', async () => {
+    const { get, run, backend } = await setup();
+    const persisted = await backend.orchestrator.runEvidence.get(run.id);
+    expect(persisted).toMatchObject({ outcome: { status: 'completed' }, checks: [{ status: 'failed', exitCode: 1 }] });
+    const indexResponse = await get(`/api/runs/${run.id}/evidence`);
+    expect(indexResponse.status).toBe(200);
+    expect(indexResponse.headers.get('cache-control')).toBe('no-store');
+    const index = await indexResponse.json();
+
+    expect(index.checks[0]).toMatchObject({ status: 'failed', exitCode: 1 });
+    expect(index.outcome.status).toBe('completed');
+    expect(index.review).toBe('bounded review excerpt');
+    expect(JSON.stringify(index)).not.toContain('HTTP-FINAL-ONLY-MARKER');
+    expect(JSON.stringify(index)).not.toContain('private failure log');
+    const reviewPage = await get(`/api/runs/${run.id}/evidence?review=true&offset=22&limit=50`);
+    expect(await reviewPage.json()).toMatchObject({ review: ' ... HTTP-FINAL-ONLY-MARKER', nextOffset: null });
+
+    const detail = await get(`/api/runs/${run.id}/evidence?checkEventId=failed-check-event`);
+    expect(detail.status).toBe(200);
+    expect(await detail.json()).toMatchObject({ status: 'failed', exitCode: 1, output: 'private failure log' });
+    expect((await get(`/api/runs/${run.id}/evidence?checkEventId=unknown`)).status).toBe(404);
+    expect((await get(`/api/runs/${run.id}/evidence`, true)).status).toBe(403);
   });
 
   it('rejects a listed traversal path and a root redirected after the run', async () => {

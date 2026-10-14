@@ -380,6 +380,43 @@ export const DiscardWorktreeSchema = z.object({
 export const RestoreRunSchema = z.object({
   confirm: required(z.literal(true), vmsg('validation.confirm.restore')),
 });
+
+/** Persisted run telemetry is optional for backwards compatibility; null means unknown. */
+export const ProviderAttemptUsageSchema = z.object({
+  attemptId: z.string().min(1),
+  taskId: z.string().optional(),
+  startedAt: z.string().optional(),
+  completedAt: z.string().optional(),
+  durationMs: z.number().nonnegative().optional(),
+  inputTokens: z.number().nonnegative().nullable(),
+  outputTokens: z.number().nonnegative().nullable(),
+  cachedInputTokens: z.number().nonnegative().nullable(),
+  reasoningOutputTokens: z.number().nonnegative().nullable(),
+  costUsd: z.number().nonnegative().nullable(),
+});
+export const CheckSourceSchema = z.object({
+  runId: z.string().min(1),
+  root: z.string().optional(),
+  state: z.enum(['verified', 'changed', 'unknown']),
+  scope: z.literal('filesystem-except-.git-and-node_modules'),
+  revision: z.object({ kind: z.literal('source_tree'), value: z.string().min(1) }).optional(),
+});
+export const CheckEnvironmentEvidenceSchema = z.object({
+  state: z.enum(['observed', 'changed', 'unknown']),
+  digest: z
+    .string()
+    .regex(/^[0-9a-f]{64}$/)
+    .optional(),
+  runtime: z.string().optional(),
+  platform: z.string().optional(),
+  arch: z.string().optional(),
+});
+export const RunDeliveryStateSchema = z.object({
+  response: z.enum(['completed', 'cancelled', 'failed', 'interrupted', 'unknown']),
+  integration: z.enum(['not_required', 'applied', 'blocked', 'unknown']),
+  objective: z.enum(['met', 'partial', 'not_met', 'unknown']),
+  recordedAt: z.string(),
+});
 /** Plan mode (docs/specs/plan-mode.md). */
 // The global JSON body limit is 128 KB; this keeps a plan with accents well under it.
 export const PLAN_MARKDOWN_MAX = 60_000;

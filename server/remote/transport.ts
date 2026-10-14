@@ -71,13 +71,25 @@ const safeRemoteErrorMessage = (category: RemoteErrorCategory | undefined, raw: 
     'replacement text exceeds limit',
     'edited file exceeds limit',
     'path is not a directory',
+    'search path is not a directory',
+    'path is a directory; read_file requires a file',
+    'path is a directory; replace_text requires a file',
+    "path is not a directory; search accepts directories only, use the file's parent directory",
     'command cancelled',
   ];
   if (safeMessages.includes(raw)) return raw;
   if (category === 'timeout') return 'command timed out';
   if (category === 'not_found') return 'requested path was not found';
   if (category === 'permission') return 'permission denied';
-  if (category === 'invalid_request') return 'invalid tool request or file';
+  if (category === 'invalid_request') {
+    const unknownField = /^unsupported argument field '([A-Za-z0-9_]{1,64})'; check this tool's supported fields$/.exec(
+      raw,
+    );
+    if (unknownField) return `unsupported argument field '${unknownField[1]}'; check this tool's supported fields`;
+    const missingField = /^missing required field '([A-Za-z0-9_]{1,64})'$/.exec(raw);
+    if (missingField) return `missing required field '${missingField[1]}'`;
+    return 'invalid tool request or file';
+  }
   if (category === 'conflict') return 'file changed or replacement is ambiguous';
   return 'remote tool failed';
 };

@@ -237,6 +237,40 @@ describe('HookChecks', () => {
     expect(fixes).toHaveLength(1);
     expect(hooks.running('p')).toBe(false);
   });
+  it('inherits Run cancellation, stops before the next check, and never fixes cancelled work', async () => {
+    const events: RunEvent[] = [];
+    let calls = 0;
+    let fixes = 0;
+    let entered!: () => void;
+    const running = new Promise<void>((resolve) => (entered = resolve));
+    const runController = new AbortController();
+    const hooks = new HookChecks({
+      saveEvent: (event) => events.push(event),
+      startFix: async () => void fixes++,
+      runner: async (item, _cwd, options) => {
+        calls++;
+        entered();
+        await new Promise<void>((resolve) => options.signal.addEventListener('abort', () => resolve(), { once: true }));
+        return { name: item.name, status: 'cancelled', detail: String(options.signal.reason) };
+      },
+    });
+    const batch = hooks.start(
+      'p',
+      '/tmp',
+      'workspace-write',
+      { id: 'run', sessionId: 's' },
+      [check('first'), check('second')],
+      true,
+      { signal: runController.signal },
+    );
+    await running;
+    runController.abort('Run cancelado');
+    await batch;
+    expect(calls).toBe(1);
+    expect(fixes).toBe(0);
+    expect(events.filter((event) => event.check?.status === 'cancelled')).toHaveLength(1);
+    expect(events.at(-1)?.check?.detail).toBe('Run cancelado');
+  });
   it('notes a fix that could not start, and stops at cancellation without fixing', async () => {
     const events: RunEvent[] = [];
     let release!: () => void;
@@ -358,6 +392,14 @@ describe.skipIf(!existsSync('/usr/bin/bwrap'))('checks inside the real bubblewra
     expect(timedOut.status).toBe('timeout');
     expect(Date.now() - before).toBeLessThan(6000);
     expect(timedOut.output).toContain('started');
+
+    const globalDeadline = await runCheck(check('sleep 60'), dir, {
+      sandbox: 'workspace-write',
+      signal: never,
+      deadlineAt: new Date(Date.now() + 400).toISOString(),
+    });
+    expect(globalDeadline.status).toBe('timeout');
+    expect(globalDeadline.durationMs).toBeLessThan(2500);
 
     const controller = new AbortController();
     const marker = `adelic-hook-${process.pid}-${Date.now()}`;

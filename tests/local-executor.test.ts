@@ -497,22 +497,39 @@ describe('isolated local automatic executor', () => {
 
     const writable = await createLocalExecutor(workspace, 'workspace-write');
     const controller = new AbortController();
+    const readyFile = path.join(workspace, 'cancel-ready.txt');
+    const markerFile = path.join(workspace, 'cancel-marker.txt');
+    let pending: Promise<unknown> | undefined;
     try {
-      const pending = writable.call(
-        'exec',
-        { command: '/bin/sh -c "sleep 1; echo escaped > /workspace/cancel-marker.txt"', timeoutMs: 30000 },
-        controller.signal,
-      );
-      setTimeout(() => controller.abort(new Error('cancelled by test')), 100).unref();
+      const leafScript =
+        'const fs=require("node:fs");fs.writeFileSync("/workspace/cancel-ready.txt","ready");setTimeout(()=>fs.writeFileSync("/workspace/cancel-marker.txt","escaped"),750);setInterval(()=>{},1000);';
+      const childScript = `const {spawn}=require("node:child_process");spawn(process.execPath,["-e",${JSON.stringify(leafScript)}],{stdio:"ignore"});setInterval(()=>{},1000);`;
+      const parentScript = `const {spawn}=require("node:child_process");spawn(process.execPath,["-e",${JSON.stringify(childScript)}],{stdio:"ignore"});setInterval(()=>{},1000);`;
+      pending = writable.call('exec', { command: ['node', '-e', parentScript], timeoutMs: 30000 }, controller.signal);
+      // The leaf process creates this handshake only after its ancestors and itself have started.
+      // Cancel only then, so this verifies termination of an already-running process tree.
+      const readyDeadline = Date.now() + 10000;
+      while (true) {
+        try {
+          await readFile(readyFile, 'utf8');
+          break;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+          if (Date.now() >= readyDeadline)
+            throw new Error('cancelled process tree did not signal readiness', { cause: error });
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+      }
+      controller.abort(new Error('cancelled by test'));
       await expect(pending).rejects.toThrow(/cancelled by test/);
-      await new Promise((resolve) => setTimeout(resolve, 1200));
-      await expect(readFile(path.join(workspace, 'cancel-marker.txt'), 'utf8')).rejects.toMatchObject({
-        code: 'ENOENT',
-      });
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      await expect(readFile(markerFile, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
     } finally {
+      controller.abort(new Error('cancelled by test cleanup'));
+      await pending?.catch(() => undefined);
       await writable.close();
     }
-  });
+  }, 60000);
 
   it('verifies Git metadata and private scratch in an automatic checkout', async () => {
     await access('/usr/bin/bwrap');

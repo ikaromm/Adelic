@@ -584,4 +584,179 @@ describe('isolated local automatic executor', () => {
       }),
     ).toBe(initialStatus);
   });
+
+  it('normalizes refused mutation identity and counts legacy edits against their effective revisions', async () => {
+    await access('/usr/bin/bwrap');
+    const parent = await mkdtemp(path.join(os.tmpdir(), 'adelic-local-refusal-identity-'));
+    temporaryDirectories.push(parent);
+    const workspace = path.join(parent, 'workspace');
+    await mkdir(workspace);
+    await writeFile(path.join(workspace, 'source.txt'), 'initial content');
+    const executor = await createLocalExecutor(workspace, 'workspace-write');
+    try {
+      const signal = new AbortController().signal;
+      const page = (await executor.call('read_file', { path: 'source.txt' }, signal)) as { revision: string };
+      const fields: Array<[string, unknown]> = [
+        ['path', 'source.txt'],
+        ['oldText', 'missing private fragment'],
+        ['newText', 'replacement'],
+        ['readRevision', page.revision],
+        ['expectedRevision', undefined],
+      ];
+      // Try the first 33 distinct insertion orders. The legacy readRevision is
+      // normalized to expectedRevision before the request is applied.
+      const orders: (typeof fields)[] = [];
+      const permute = (remaining: typeof fields, prefix: typeof fields = []) => {
+        if (remaining.length === 0) orders.push(prefix);
+        else
+          remaining.forEach((field, index) =>
+            permute(
+              remaining.filter((_, i) => i !== index),
+              [...prefix, field],
+            ),
+          );
+      };
+      permute(fields);
+      expect(new Set(orders.slice(0, 33).map((order) => order.map(([key]) => key).join(','))).size).toBe(33);
+      for (let attempt = 0; attempt < 33; attempt++) {
+        const ordered = orders[attempt]!;
+        const args = Object.fromEntries(ordered) as Record<string, unknown>;
+        const error = await executor.call('replace_text', args, signal).then(
+          () => undefined,
+          (reason: Error & { category?: string }) => reason,
+        );
+        if (attempt < 2) {
+          expect(error).toMatchObject({ category: 'conflict', message: 'oldText must match exactly once' });
+        } else {
+          expect(error).toMatchObject({ category: 'executor' });
+          expect(error?.message).toBe(
+            'Executor local interrompeu a tentativa após 3 recusas idênticas de mutação sem progresso.',
+          );
+          break;
+        }
+      }
+    } finally {
+      await executor.close();
+    }
+
+    const legacy = await createLocalExecutor(workspace, 'workspace-write');
+    try {
+      const signal = new AbortController().signal;
+      for (const content of ['initial content', 'second content', 'third content']) {
+        if (content !== 'initial content') await writeFile(path.join(workspace, 'source.txt'), content);
+        const current = (await legacy.call('read_file', { path: 'source.txt' }, signal)) as { revision: string };
+        expect(current.revision).toBeTruthy();
+        await expect(
+          legacy.call(
+            'replace_text',
+            { path: 'source.txt', oldText: 'missing private fragment', newText: 'replacement' },
+            signal,
+          ),
+        ).rejects.toMatchObject({ category: 'conflict', message: 'oldText must match exactly once' });
+      }
+      await expect(legacy.call('read_file', { path: 'source.txt' }, signal)).resolves.toMatchObject({
+        content: 'third content',
+      });
+    } finally {
+      await legacy.close();
+    }
+  });
+
+  it('stops identical refused mutations after three attempts, preserves progress, and releases resources', async () => {
+    await access('/usr/bin/bwrap');
+    const parent = await mkdtemp(path.join(os.tmpdir(), 'adelic-local-refused-edit-'));
+    temporaryDirectories.push(parent);
+    const workspace = path.join(parent, 'workspace');
+    await mkdir(workspace);
+    const initial = `${'page content '.repeat(9000)}target`;
+    await writeFile(path.join(workspace, 'source.txt'), initial);
+    const executor = await createLocalExecutor(workspace, 'workspace-write');
+    try {
+      const signal = new AbortController().signal;
+      const firstPage = (await executor.call('read_file', { path: 'source.txt', limit: 1024 }, signal)) as {
+        revision: string;
+        nextOffset: number;
+        truncated: boolean;
+      };
+      expect(firstPage.truncated).toBe(true);
+      const secondPage = await executor.call(
+        'read_file',
+        { path: 'source.txt', offset: firstPage.nextOffset, limit: 1024, revision: firstPage.revision },
+        signal,
+      );
+      expect(secondPage).toMatchObject({ offset: firstPage.nextOffset, revision: firstPage.revision });
+
+      const stale = {
+        path: 'source.txt',
+        oldText: 'missing confidential fragment',
+        newText: 'replacement',
+        expectedRevision: firstPage.revision,
+      };
+      for (let attempt = 0; attempt < 2; attempt++) {
+        await expect(executor.call('replace_text', stale, signal)).rejects.toMatchObject({
+          category: 'conflict',
+          message: 'oldText must match exactly once',
+        });
+      }
+
+      // A fresh read and corrected unique context allow a legitimate edit and reset failures.
+      const current = (await executor.call('read_file', { path: 'source.txt' }, signal)) as { revision: string };
+      await expect(
+        executor.call(
+          'replace_text',
+          { path: 'source.txt', oldText: 'target', newText: 'edited', expectedRevision: current.revision },
+          signal,
+        ),
+      ).resolves.toMatchObject({ matches: 1 });
+      expect(await readFile(path.join(workspace, 'source.txt'), 'utf8')).toBe(`${'page content '.repeat(9000)}edited`);
+
+      const afterEdit = (await executor.call('read_file', { path: 'source.txt' }, signal)) as { revision: string };
+      const repeated = {
+        path: 'source.txt',
+        oldText: 'still missing confidential fragment',
+        newText: 'replacement',
+        expectedRevision: afterEdit.revision,
+      };
+      await expect(executor.call('replace_text', repeated, signal)).rejects.toMatchObject({
+        category: 'conflict',
+        message: 'oldText must match exactly once',
+      });
+      // Repeated valid reads are not mutations and do not erase the refusal streak.
+      await executor.call('read_file', { path: 'source.txt', revision: afterEdit.revision }, signal);
+      await expect(executor.call('replace_text', repeated, signal)).rejects.toMatchObject({
+        category: 'conflict',
+        message: 'oldText must match exactly once',
+      });
+      const stopped = await executor.call('replace_text', repeated, signal).then(
+        () => undefined,
+        (error: Error & { category?: string }) => error,
+      );
+      expect(stopped).toMatchObject({
+        category: 'executor',
+        message: 'Executor local interrompeu a tentativa após 3 recusas idênticas de mutação sem progresso.',
+      });
+      expect(stopped?.message).not.toContain('confidential fragment');
+      await expect(executor.call('read_file', { path: 'source.txt' }, signal)).rejects.toBe(stopped);
+
+      // A separate executor can acquire workspace resources and complete work immediately after stop.
+      const recovery = await createLocalExecutor(workspace, 'workspace-write');
+      try {
+        const recoveryPage = (await recovery.call('read_file', { path: 'source.txt' }, signal)) as { revision: string };
+        await expect(
+          recovery.call(
+            'replace_text',
+            { path: 'source.txt', oldText: 'edited', newText: 'recovered', expectedRevision: recoveryPage.revision },
+            signal,
+          ),
+        ).resolves.toMatchObject({ matches: 1 });
+      } finally {
+        await recovery.close();
+      }
+      expect(await readFile(path.join(workspace, 'source.txt'), 'utf8')).toBe(
+        `${'page content '.repeat(9000)}recovered`,
+      );
+    } finally {
+      await executor.close();
+    }
+  });
 });

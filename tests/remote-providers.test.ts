@@ -230,6 +230,88 @@ readline.createInterface({input:process.stdin}).on('line',(line)=>{
       await provider.shutdown();
     }
   });
+  it('fails and interrupts the provider turn after three identical refused mutations', async () => {
+    await access('/usr/bin/bwrap');
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'adelic-local-refusal-turn-'));
+    dirs.push(directory);
+    const workspace = path.join(directory, 'workspace');
+    await mkdir(workspace);
+    await writeFile(path.join(workspace, 'source.txt'), 'current contents');
+    const runtime = await createLocalExecutor(workspace, 'workspace-write');
+    const page = (await runtime.call('read_file', { path: 'source.txt' }, new AbortController().signal)) as {
+      revision: string;
+    };
+    const requestLog = path.join(directory, 'turn-events.jsonl');
+    const fake = path.join(directory, 'codex.mjs');
+    await writeFile(
+      fake,
+      `#!/usr/bin/env node
+import readline from 'node:readline';
+import fs from 'node:fs';
+const log=${JSON.stringify(requestLog)};
+const append=(value)=>fs.appendFileSync(log,JSON.stringify(value)+'\\n');
+const send=(value)=>process.stdout.write(JSON.stringify(value)+'\\n');
+let nextId=701; let calls=0; let interrupted=false;
+const ask=()=>{ calls++; send({jsonrpc:'2.0',id:nextId++,method:'item/tool/call',params:{threadId:'refusal-thread',turnId:'refusal-turn',callId:'refusal-'+calls,tool:'adelic_remote_replace_text',arguments:{path:'source.txt',oldText:'absent secret fragment',newText:'replacement',expectedRevision:${JSON.stringify(page.revision)}}}}); };
+readline.createInterface({input:process.stdin}).on('line',(line)=>{
+ const m=JSON.parse(line);
+ if(m.method==='initialize')send({jsonrpc:'2.0',id:m.id,result:{}});
+ else if(m.method==='config/read')send({jsonrpc:'2.0',id:m.id,result:{config:{mcp_servers:{}}}});
+ else if(m.method==='thread/start')send({jsonrpc:'2.0',id:m.id,result:{thread:{id:'refusal-thread'}}});
+ else if(m.method==='turn/start'){
+  send({jsonrpc:'2.0',id:m.id,result:{turn:{id:'refusal-turn'}}});
+  send({jsonrpc:'2.0',method:'turn/started',params:{threadId:'refusal-thread',turn:{id:'refusal-turn'}}});
+  ask();
+ } else if(m.method==='turn/interrupt'){
+  interrupted=true; append({event:'interrupt'}); send({jsonrpc:'2.0',id:m.id,result:{}});
+ } else if(Number.isInteger(m.id)&&m.id>=701){
+  append({event:'tool-response',success:m.result?.success,error:m.result?.error});
+  if(calls<3) ask();
+  else setTimeout(()=>{ if(!interrupted) ask(); },100);
+ }
+});
+`,
+      { mode: 0o700 },
+    );
+    const provider = new CodexProvider(
+      async () => fake,
+      undefined,
+      undefined,
+      undefined,
+      async (command, args) => ({ command, args }),
+    );
+    const runInput = input(workspace, runtime);
+    runInput.approvalMode = 'automatic';
+    const events: Array<{ type: string; status?: string; description?: string }> = [];
+    const controller = new AbortController();
+    try {
+      await expect(
+        provider.run(
+          runInput,
+          (event) => {
+            if (event.type === 'tool') events.push(event);
+          },
+          controller.signal,
+        ),
+      ).rejects.toThrow(/Tentativa encerrada/);
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      const recorded = (await readFile(requestLog, 'utf8'))
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line));
+      expect(recorded.filter((event) => event.event === 'tool-response')).toHaveLength(3);
+      expect(recorded.some((event) => event.event === 'interrupt')).toBe(true);
+      expect(controller.signal.aborted).toBe(false);
+      expect(
+        events.some((event) => event.status === 'failed' && event.description?.includes('Tentativa encerrada')),
+      ).toBe(true);
+      expect(await readFile(path.join(workspace, 'source.txt'), 'utf8')).toBe('current contents');
+    } finally {
+      await runtime.close();
+      await provider.shutdown();
+    }
+  });
+
   it('dispatches validated argument-vector checks through Codex into an isolated read-only executor', async () => {
     await access('/usr/bin/bwrap');
     const directory = await mkdtemp(path.join(os.tmpdir(), 'adelic-local-readonly-provider-'));
@@ -541,6 +623,14 @@ readline.createInterface({input:process.stdin}).on('line',(line)=>{
     expect(
       remoteToolError(Object.assign(new Error('oldText must match exactly once'), { category: 'conflict' })),
     ).toContain('trecho único');
+    expect(
+      remoteToolError(
+        Object.assign(
+          new Error('Executor local interrompeu a tentativa após 3 recusas idênticas de mutação sem progresso.'),
+          { category: 'executor' },
+        ),
+      ),
+    ).toContain('Tentativa encerrada');
     expect(
       remoteToolError(Object.assign(new Error('opaque raw credential'), { category: 'invalid_request' })),
     ).toContain('Argumentos inválidos');
@@ -1391,6 +1481,78 @@ readline.createInterface({input:process.stdin}).on('line',(line)=>{
     } finally {
       if (priorKiro === undefined) delete process.env.ADELIC_KIRO_BIN;
       else process.env.ADELIC_KIRO_BIN = priorKiro;
+    }
+  });
+
+  it('preserves terminal containment failure when interrupt completion races its response', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'adelic-codex-terminal-interrupt-'));
+    dirs.push(directory);
+    const terminalMessage = 'Executor local interrompeu a tentativa após 3 recusas idênticas de mutação sem progresso.';
+    const expectedFailure =
+      'Tentativa encerrada: três recusas idênticas de mutação sem progresso; corrija a solicitação antes de retomar.';
+    const runtime: RemoteRuntime = {
+      label: 'fixture-host',
+      root: '/remote/project',
+      executionKind: 'ssh',
+      call: async () => {
+        const failure = new Error(terminalMessage);
+        Object.assign(failure, { category: 'executor' });
+        throw failure;
+      },
+    };
+
+    for (const completionBeforeInterruptResponse of [true, false]) {
+      const fake = path.join(directory, completionBeforeInterruptResponse ? 'codex-before.mjs' : 'codex-after.mjs');
+      await writeFile(
+        fake,
+        `#!/usr/bin/env node
+import readline from 'node:readline';
+const send=(m)=>process.stdout.write(JSON.stringify(m)+'\\n');
+const thread='terminal-thread';
+readline.createInterface({input:process.stdin}).on('line',(line)=>{
+ const m=JSON.parse(line);
+ if(m.method==='initialize')send({jsonrpc:'2.0',id:m.id,result:{}});
+ else if(m.method==='config/read')send({jsonrpc:'2.0',id:m.id,result:{config:{mcp_servers:{}}}});
+ else if(m.method==='thread/start')send({jsonrpc:'2.0',id:m.id,result:{thread:{id:thread}}});
+ else if(m.method==='turn/start'){
+  send({jsonrpc:'2.0',id:m.id,result:{turn:{id:'turn-1'}}});
+  send({jsonrpc:'2.0',method:'turn/started',params:{threadId:thread,turn:{id:'turn-1'}}});
+  send({jsonrpc:'2.0',id:701,method:'item/tool/call',params:{threadId:thread,turnId:'turn-1',callId:'terminal-call',tool:'adelic_remote_exec',arguments:{command:'npm test'}}});
+ } else if(m.id===701) {
+  // No further mutation request: the executor terminal error must end this run.
+ } else if(m.method==='turn/interrupt') {
+  const completed={jsonrpc:'2.0',method:'turn/completed',params:{threadId:thread,turn:{id:'turn-1',status:'interrupted'}}};
+  if(${completionBeforeInterruptResponse}) { send(completed); send({jsonrpc:'2.0',id:m.id,result:{}}); }
+  else { send({jsonrpc:'2.0',id:m.id,result:{}}); setTimeout(()=>send(completed),20); }
+ }
+});
+`,
+        { mode: 0o700 },
+      );
+      const provider = new CodexProvider(
+        async () => fake,
+        undefined,
+        undefined,
+        undefined,
+        async (command, args) => ({ command, args }),
+      );
+      const events: { type: string; status?: string; text?: string }[] = [];
+      try {
+        await expect(
+          provider.run(
+            { ...input(directory, runtime), approvalMode: 'automatic' },
+            (event) => {
+              if (event.type === 'tool' || event.type === 'status') events.push(event);
+            },
+            new AbortController().signal,
+          ),
+        ).rejects.toThrow(expectedFailure);
+        expect(events).toContainEqual(expect.objectContaining({ type: 'tool', status: 'failed' }));
+        expect(events).not.toContainEqual(expect.objectContaining({ status: 'cancelled' }));
+        expect(events.some((event) => event.text?.includes('cancel'))).toBe(false);
+      } finally {
+        await provider.shutdown();
+      }
     }
   });
 });

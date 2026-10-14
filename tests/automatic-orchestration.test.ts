@@ -25,6 +25,9 @@ import { gitIn } from './git-fixtures';
 const REAL_GIT_WORKFLOW_TIMEOUT_MS = 15_000;
 // Capturing and integrating multi-megabyte artifacts needs more headroom under coverage.
 const LARGE_ARTIFACT_WORKFLOW_TIMEOUT_MS = 30_000;
+// This real Git/check workflow has two ordered 8s ownership/terminal waits, plus cleanup under coverage.
+const AUTO_FIX_WORKFLOW_TIMEOUT_MS = 20_000;
+const REAL_CHECK_REPAIR_WORKFLOW_TIMEOUT_MS = 30_000;
 const cleanup: (() => Promise<void> | void)[] = [];
 afterEach(async () => {
   for (const run of cleanup.splice(0).reverse()) await run();
@@ -886,27 +889,32 @@ exec "${realGit}" "$@"
 }
 
 describe('automatic orchestration', () => {
-  it('releases a dependent only after its parent changes are integrated', async () => {
-    const test = setup({ integrationDependency: true, artifactChange: true, gitProject: true });
-    let completed!: () => void;
-    const done = new Promise<void>((resolve) => (completed = resolve));
-    const unsubscribe = test.orchestrator.subscribe((event) => {
-      if (event.type === 'run' && event.run.sessionId === test.session.id && event.run.status !== 'running')
-        completed();
-    });
-    try {
-      await test.orchestrator.start(
-        test.session,
-        'Implemente uma melhoria de código em src/implemented.ts e continue após integrar essa tarefa',
-      );
-      await done;
-      expect(test.dependencySawAppliedIntegration(), JSON.stringify(test.store.listSessionTasks(test.session.id))).toBe(
-        true,
-      );
-    } finally {
-      unsubscribe();
-    }
-  });
+  it(
+    'releases a dependent only after its parent changes are integrated',
+    async () => {
+      const test = setup({ integrationDependency: true, artifactChange: true, gitProject: true });
+      let completed!: () => void;
+      const done = new Promise<void>((resolve) => (completed = resolve));
+      const unsubscribe = test.orchestrator.subscribe((event) => {
+        if (event.type === 'run' && event.run.sessionId === test.session.id && event.run.status !== 'running')
+          completed();
+      });
+      try {
+        await test.orchestrator.start(
+          test.session,
+          'Implemente uma melhoria de código em src/implemented.ts e continue após integrar essa tarefa',
+        );
+        await done;
+        expect(
+          test.dependencySawAppliedIntegration(),
+          JSON.stringify(test.store.listSessionTasks(test.session.id)),
+        ).toBe(true);
+      } finally {
+        unsubscribe();
+      }
+    },
+    REAL_GIT_WORKFLOW_TIMEOUT_MS,
+  );
 
   it('serializes only simultaneous conflicting scopes while independent work proceeds', async () => {
     const test = setup({ overlappingTasks: true, parallelTasks: true });
@@ -1735,60 +1743,74 @@ describe('automatic orchestration', () => {
     }
   });
 
-  it('defers configured pre-review auto-fix until the checked Run releases ownership, then does not recurse', async () => {
-    const test = setup({
-      review: true,
-      artifactChange: true,
-      gitProject: true,
-      checkBeforeReview: true,
-      checkFails: true,
-    });
-    test.store.putHooks('project', {
-      afterEdit: [{ name: 'fixture typecheck', command: 'npm test', timeoutSec: 10, enabled: true }],
-      blockedCommands: [],
-      autoFix: true,
-    });
-    let terminal!: () => void;
-    const done = new Promise<void>((resolve) => (terminal = resolve));
-    const unsubscribe = test.orchestrator.subscribe((event) => {
-      if (event.type === 'run' && event.run.sessionId === test.session.id && event.run.status !== 'running') terminal();
-    });
-    try {
-      const started = await test.orchestrator.start(
-        test.session,
-        'Implement coordinated changes across the UI, storage, and API.',
-      );
-      await done;
-      const sourceCheck = test.store
-        .listEvents(test.session.id)
-        .filter((event) => event.runId === started.runId && event.type === 'check' && event.check?.status !== 'running')
-        .at(-1);
-      expect(sourceCheck?.check).toMatchObject({ status: 'failed', exitCode: 1, output: 'falha observada' });
-      const runDeadline = Date.now() + 8000;
-      while (test.store.listRuns(test.session.id).length < 2 && Date.now() < runDeadline)
-        await new Promise((resolve) => setTimeout(resolve, 10));
-      const runsAfterCheck = test.store.listRuns(test.session.id);
-      const fix = runsAfterCheck.find((run) => run.id !== started.runId);
-      expect(fix).toBeDefined();
-      const fixRun = fix!;
-      expect(fixRun.hookFix).toEqual({ sourceRunId: started.runId });
-      expect(fixRun.budget).toEqual(test.store.getRun(started.runId)?.budget);
-      let secondDone = false;
-      const secondUnsubscribe = test.orchestrator.subscribe((event) => {
-        if (event.type === 'run' && event.run.id === fixRun.id && event.run.status !== 'running') secondDone = true;
+  it(
+    'defers configured pre-review auto-fix until the checked Run releases ownership, then does not recurse',
+    async () => {
+      const test = setup({
+        review: true,
+        artifactChange: true,
+        gitProject: true,
+        checkBeforeReview: true,
+        checkFails: true,
       });
-      const end = Date.now() + 8000;
-      while (!secondDone && Date.now() < end) await new Promise((resolve) => setTimeout(resolve, 10));
-      secondUnsubscribe();
-      expect(secondDone).toBe(true);
-      expect(test.store.listRuns(test.session.id)).toHaveLength(2);
-      expect(
-        test.store.listEvents(test.session.id).filter((event) => event.runId === fixRun.id && event.type === 'check'),
-      ).toHaveLength(0); // the correction made no new artifacts, so no check is fabricated
-    } finally {
-      unsubscribe();
-    }
-  });
+      test.store.putHooks('project', {
+        afterEdit: [{ name: 'fixture typecheck', command: 'npm test', timeoutSec: 10, enabled: true }],
+        blockedCommands: [],
+        autoFix: true,
+      });
+      let terminal!: () => void;
+      const done = new Promise<void>((resolve) => (terminal = resolve));
+      let fixTerminal!: () => void;
+      const fixDone = new Promise<void>((resolve) => (fixTerminal = resolve));
+      let secondDone = false;
+      let sourceRunId: string | undefined;
+      const unsubscribe = test.orchestrator.subscribe((event) => {
+        if (event.type !== 'run' || event.run.sessionId !== test.session.id) return;
+        if (event.run.status !== 'running' && !event.run.hookFix) terminal();
+        if (
+          event.run.status !== 'running' &&
+          sourceRunId !== undefined &&
+          event.run.hookFix?.sourceRunId === sourceRunId
+        ) {
+          secondDone = true;
+          fixTerminal();
+        }
+      });
+      try {
+        const started = await test.orchestrator.start(
+          test.session,
+          'Implement coordinated changes across the UI, storage, and API.',
+        );
+        sourceRunId = started.runId;
+        await done;
+        const sourceCheck = test.store
+          .listEvents(test.session.id)
+          .filter(
+            (event) => event.runId === started.runId && event.type === 'check' && event.check?.status !== 'running',
+          )
+          .at(-1);
+        expect(sourceCheck?.check).toMatchObject({ status: 'failed', exitCode: 1, output: 'falha observada' });
+        const runDeadline = Date.now() + 8000;
+        while (test.store.listRuns(test.session.id).length < 2 && Date.now() < runDeadline)
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        const runsAfterCheck = test.store.listRuns(test.session.id);
+        const fix = runsAfterCheck.find((run) => run.id !== started.runId);
+        expect(fix).toBeDefined();
+        const fixRun = fix!;
+        expect(fixRun.hookFix).toEqual({ sourceRunId: started.runId });
+        expect(fixRun.budget).toEqual(test.store.getRun(started.runId)?.budget);
+        await fixDone;
+        expect(secondDone).toBe(true);
+        expect(test.store.listRuns(test.session.id)).toHaveLength(2);
+        expect(
+          test.store.listEvents(test.session.id).filter((event) => event.runId === fixRun.id && event.type === 'check'),
+        ).toHaveLength(0); // the correction made no new artifacts, so no check is fabricated
+      } finally {
+        unsubscribe();
+      }
+    },
+    AUTO_FIX_WORKFLOW_TIMEOUT_MS,
+  );
 
   it('does not launch a deferred auto-fix when review is cancelled after autoFix is disabled', async () => {
     const test = setup({
@@ -1859,50 +1881,55 @@ describe('automatic orchestration', () => {
     }
   }, 15_000);
 
-  it('repairs a concrete finding despite a failed source-matched check, then passes checks and clean review', async () => {
-    const test = setup({
-      review: true,
-      reviewCycle: 'fixed',
-      artifactChange: true,
-      gitProject: true,
-      checkBeforeReview: true,
-      realCheckRunner: true,
-    });
-    test.store.putHooks('project', {
-      afterEdit: [
-        { name: 'repair-state check', command: 'grep -q false src/implemented.ts', timeoutSec: 10, enabled: true },
-      ],
-      blockedCommands: [],
-      autoFix: false,
-    });
-    let terminal!: () => void;
-    const done = new Promise<void>((resolve) => (terminal = resolve));
-    const unsubscribe = test.orchestrator.subscribe((event) => {
-      if (event.type === 'run' && event.run.sessionId === test.session.id && event.run.status !== 'running') terminal();
-    });
-    try {
-      const started = await test.orchestrator.start(
-        test.session,
-        'Implement coordinated changes across the UI, storage, and API.',
-      );
-      await done;
-      const run = test.store.getRun(started.runId)!;
-      const tasks = test.store.listSessionTasks(test.session.id).filter((task) => task.runId === started.runId);
-      const checks = test.store
-        .listEvents(test.session.id)
-        .filter(
-          (event) => event.runId === started.runId && event.type === 'check' && event.check?.status !== 'running',
+  it(
+    'repairs a concrete finding despite a failed source-matched check, then passes checks and clean review',
+    async () => {
+      const test = setup({
+        review: true,
+        reviewCycle: 'fixed',
+        artifactChange: true,
+        gitProject: true,
+        checkBeforeReview: true,
+        realCheckRunner: true,
+      });
+      test.store.putHooks('project', {
+        afterEdit: [
+          { name: 'repair-state check', command: 'grep -q false src/implemented.ts', timeoutSec: 10, enabled: true },
+        ],
+        blockedCommands: [],
+        autoFix: false,
+      });
+      let terminal!: () => void;
+      const done = new Promise<void>((resolve) => (terminal = resolve));
+      const unsubscribe = test.orchestrator.subscribe((event) => {
+        if (event.type === 'run' && event.run.sessionId === test.session.id && event.run.status !== 'running')
+          terminal();
+      });
+      try {
+        const started = await test.orchestrator.start(
+          test.session,
+          'Implement coordinated changes across the UI, storage, and API.',
         );
-      expect(checks.map((event) => event.check?.status)).toEqual(['failed', 'passed']);
-      expect(checks.every((event) => event.check?.source?.state === 'verified')).toBe(true);
-      expect(tasks.filter((task) => task.title === 'Corrigir achados objetivos da revisão')).toHaveLength(1);
-      expect(tasks.filter((task) => task.role === 'reviewer')).toHaveLength(2);
-      expect(test.reviewPasses()).toBe(2);
-      expect(test.store.getRun(run.id)?.delivery?.objective).not.toBe('met');
-    } finally {
-      unsubscribe();
-    }
-  });
+        await done;
+        const run = test.store.getRun(started.runId)!;
+        const tasks = test.store.listSessionTasks(test.session.id).filter((task) => task.runId === started.runId);
+        const checks = test.store
+          .listEvents(test.session.id)
+          .filter(
+            (event) => event.runId === started.runId && event.type === 'check' && event.check?.status !== 'running',
+          );
+        expect(checks.map((event) => event.check?.status)).toEqual(['failed', 'passed']);
+        expect(checks.every((event) => event.check?.source?.state === 'verified')).toBe(true);
+        expect(tasks.filter((task) => task.title === 'Corrigir achados objetivos da revisão')).toHaveLength(1);
+        expect(tasks.filter((task) => task.role === 'reviewer')).toHaveLength(2);
+        expect(test.reviewPasses()).toBe(2);
+        expect(test.store.getRun(run.id)?.delivery?.objective).not.toBe('met');
+      } finally {
+        unsubscribe();
+      }
+    },
+    REAL_CHECK_REPAIR_WORKFLOW_TIMEOUT_MS,
+  );
 
   it('keeps homonymous hooks independent with verified source identity', async () => {
     const test = setup({

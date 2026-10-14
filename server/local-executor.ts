@@ -24,6 +24,7 @@ import { terminateChildProcess } from './providers/process.js';
 
 const MAX_FRAME = 1024 * 1024;
 const MAX_TIMEOUT = 300_000;
+const MAX_IDENTICAL_REFUSED_MUTATIONS = 3;
 const TOOL_NAMES = new Set<RemoteToolName>([
   'exec',
   'read_file',
@@ -578,6 +579,18 @@ async function spawnLocalExecutorProcess(
   }
 }
 
+function normalizeMutationArgs(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(normalizeMutationArgs);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.keys(value)
+        .sort()
+        .map((key) => [key, normalizeMutationArgs((value as Record<string, unknown>)[key])]),
+    );
+  }
+  return value;
+}
+
 class LocalExecutorFactory implements LocalExecutor {
   readonly label = 'Local isolado';
   readonly root = '/workspace';
@@ -587,6 +600,8 @@ class LocalExecutorFactory implements LocalExecutor {
   private readonly active = new Set<LocalExecutorProcess>();
   private readonly spawning = new Set<Promise<LocalExecutorProcess>>();
   private readonly readProgress = new Map<string, { revision: string; next: number; complete: boolean }>();
+  private readonly refusedMutations = new Map<string, number>();
+  private terminalReason?: Error;
 
   constructor(
     readonly workspace: string,
@@ -594,8 +609,37 @@ class LocalExecutorFactory implements LocalExecutor {
     private readonly spawnProcess: () => Promise<LocalExecutorProcess>,
   ) {}
 
+  private refusalKey(tool: RemoteToolName, args: Record<string, unknown>, error: unknown) {
+    if (tool !== 'replace_text' && tool !== 'write_file') return undefined;
+    const category = error instanceof Error && 'category' in error ? String(error.category) : '';
+    const message = error instanceof Error ? error.message : '';
+    return createHash('sha256')
+      .update(JSON.stringify([tool, normalizeMutationArgs(args), category, message]))
+      .digest('hex');
+  }
+
+  private async refusalError(tool: RemoteToolName, args: Record<string, unknown>, error: unknown): Promise<Error> {
+    const key = this.refusalKey(tool, args, error);
+    if (!key) return error instanceof Error ? error : new Error('Mutação recusada.');
+    const attempts = (this.refusedMutations.get(key) ?? 0) + 1;
+    this.refusedMutations.delete(key);
+    this.refusedMutations.set(key, attempts);
+    if (this.refusedMutations.size > 32) this.refusedMutations.delete(this.refusedMutations.keys().next().value!);
+    if (attempts >= MAX_IDENTICAL_REFUSED_MUTATIONS) {
+      this.terminalReason = Object.assign(
+        new Error(
+          `Executor local interrompeu a tentativa após ${attempts} recusas idênticas de mutação sem progresso.`,
+        ),
+        { category: 'executor' },
+      );
+      await this.close();
+      return this.terminalReason;
+    }
+    return error instanceof Error ? error : new Error('Mutação recusada.');
+  }
+
   async call(tool: RemoteToolName, args: Record<string, unknown>, signal: AbortSignal): Promise<unknown> {
-    if (this.closed) throw new Error('Executor local isolado está fechado.');
+    if (this.closed) throw this.terminalReason ?? new Error('Executor local isolado está fechado.');
     let forwarded = args;
     const fileKey =
       tool === 'read_file' || tool === 'replace_text'
@@ -622,7 +666,7 @@ class LocalExecutorFactory implements LocalExecutor {
       if (!suppliedRevision && !progress?.complete) {
         const error = new Error('file must be read completely before replace_text') as Error & { category?: string };
         error.category = 'conflict';
-        throw error;
+        throw await this.refusalError(tool, args, error);
       }
       const { readRevision: _legacyRevision, ...replaceArgs } = args;
       forwarded = { ...replaceArgs, expectedRevision: suppliedRevision ?? progress!.revision };
@@ -637,11 +681,20 @@ class LocalExecutorFactory implements LocalExecutor {
     }
     if (this.closed) {
       await instance.close();
-      throw new Error('Executor local isolado está fechado.');
+      throw this.terminalReason ?? new Error('Executor local isolado está fechado.');
     }
     this.active.add(instance);
     try {
-      const result = await instance.call(tool, forwarded, signal);
+      let result: unknown;
+      try {
+        result = await instance.call(tool, forwarded, signal);
+        if (tool === 'replace_text' || tool === 'write_file') {
+          this.refusedMutations.clear();
+          if (fileKey) this.readProgress.delete(fileKey);
+        }
+      } catch (error) {
+        throw await this.refusalError(tool, forwarded, error);
+      }
       if (tool === 'read_file' && fileKey && result && typeof result === 'object' && !Array.isArray(result)) {
         const page = result as { revision?: unknown; offset?: unknown; nextOffset?: unknown; truncated?: unknown };
         const previous = this.readProgress.get(fileKey);
@@ -683,6 +736,8 @@ class LocalExecutorFactory implements LocalExecutor {
   close() {
     return (this.closing ??= (async () => {
       this.closed = true;
+      this.readProgress.clear();
+      this.refusedMutations.clear();
       await Promise.all([
         ...[...this.active].map((instance) => instance.close()),
         ...[...this.spawning].map((opening) =>

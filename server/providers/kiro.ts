@@ -21,6 +21,7 @@ import {
   remoteApprovalDetail,
   remoteToolDescription,
   remoteToolError,
+  isTerminalLocalExecutorError,
   remoteToolFailure,
   validateRemoteArguments,
   type RemoteToolSpec,
@@ -904,6 +905,14 @@ export class KiroProvider {
             status: turn.signal.aborted ? 'cancelled' : 'failed',
             toolCallId: remotePending.toolCallId,
           });
+        if (isTerminalLocalExecutorError(error)) {
+          try {
+            turn.process.notify('session/cancel', { sessionId: turn.sessionId });
+          } catch {
+            /* The Kiro process may close concurrently with automatic containment. */
+          }
+          this.finish(turn, { text: turn.text, stopReason: 'completed' }, new Error(safeFailure));
+        }
       }
       return;
     }

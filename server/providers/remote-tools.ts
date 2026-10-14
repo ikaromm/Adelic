@@ -369,6 +369,14 @@ export function remoteToolFailure(result: unknown): string | undefined {
   return `Falhou (código ${String(result.exitCode)})`;
 }
 
+export function isTerminalLocalExecutorError(error: unknown) {
+  return (
+    isRecord(error) &&
+    error.category === 'executor' &&
+    error.message === 'Executor local interrompeu a tentativa após 3 recusas idênticas de mutação sem progresso.'
+  );
+}
+
 export function remoteToolError(error: unknown) {
   const record = isRecord(error) ? error : undefined;
   // Only expose a bounded, allowlisted OS error code in the activity feed; never echo the
@@ -450,6 +458,11 @@ export function remoteToolError(error: unknown) {
   if (category === 'conflict' && safeDiagnostic === 'oldText must match exactly once')
     return 'Trecho de substituição ausente ou duplicado; releia o estado atual e escolha um trecho único.';
   if (category === 'conflict') return 'Conflito; leia o estado atual antes de repetir.';
+  if (
+    category === 'executor' &&
+    safeDiagnostic === 'Executor local interrompeu a tentativa após 3 recusas idênticas de mutação sem progresso.'
+  )
+    return 'Tentativa encerrada: três recusas idênticas de mutação sem progresso; corrija a solicitação antes de retomar.';
   if (category === 'executor') return 'Falha interna do executor; verifique a configuração antes de repetir.';
   const name = error instanceof Error ? error.name : '';
   const message = error instanceof Error ? error.message : '';

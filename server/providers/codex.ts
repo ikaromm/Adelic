@@ -38,6 +38,7 @@ import {
   remoteApprovalDetail,
   remoteToolDescription,
   remoteToolError,
+  isTerminalLocalExecutorError,
   remoteToolFailure,
   remoteToolByName,
   validateRemoteArguments,
@@ -74,8 +75,10 @@ interface ActiveTurn {
   reject: (error: Error) => void;
   signal: AbortSignal;
   abort: () => void;
-  requestInterrupt: () => void;
+  requestInterrupt: () => Promise<void>;
   interruptSent: boolean;
+  /** Terminal containment failure takes precedence over protocol completion caused by interrupt. */
+  terminalError?: Error;
 }
 interface PendingApproval {
   runId: string;
@@ -939,7 +942,13 @@ export class CodexProvider {
         this.threadUsage.beginTurn(threadId);
       } else if (message.method === 'turn/completed') {
         const status = parseParams(TurnParams, message.params)?.turn?.status ?? 'completed';
-        if (status === 'failed')
+        if (turn.terminalError) {
+          this.finishTurn(
+            turn,
+            { text: turn.finalText ?? turn.text, nativeSessionId: turn.threadId, stopReason: 'completed' },
+            turn.terminalError,
+          );
+        } else if (status === 'failed')
           this.finishTurn(
             turn,
             { text: turn.finalText ?? turn.text, nativeSessionId: turn.threadId, stopReason: 'completed' },
@@ -1496,10 +1505,10 @@ export class CodexProvider {
           reject,
           signal,
           interruptSent: false,
-          requestInterrupt: () => {
+          requestInterrupt: async () => {
             if (turn.turnId && !turn.interruptSent) {
               turn.interruptSent = true;
-              void rpc.request('turn/interrupt', { threadId, turnId: turn.turnId }, 3000).catch(() => undefined);
+              await rpc.request('turn/interrupt', { threadId, turnId: turn.turnId }, 3000).catch(() => undefined);
             }
           },
           abort: () => {
@@ -1507,11 +1516,17 @@ export class CodexProvider {
             // turn only changes protocol/UI state; kill and reap this run's private
             // process group before reporting cancellation or removing its scratch.
             void this.cleanupServer(server).then(() =>
-              this.finishTurn(turn, {
-                text: turn.finalText ?? turn.text,
-                nativeSessionId: threadId,
-                stopReason: 'cancelled',
-              }),
+              turn.terminalError
+                ? this.finishTurn(
+                    turn,
+                    { text: turn.finalText ?? turn.text, nativeSessionId: threadId, stopReason: 'completed' },
+                    turn.terminalError,
+                  )
+                : this.finishTurn(turn, {
+                    text: turn.finalText ?? turn.text,
+                    nativeSessionId: threadId,
+                    stopReason: 'cancelled',
+                  }),
             );
           },
         };
@@ -1649,20 +1664,28 @@ export class CodexProvider {
           contentItems: [{ type: 'inputText', text: safeFailure }],
           error: safeFailure,
         });
+        const terminalContainment = isTerminalLocalExecutorError(error);
         const toolCallId = pending.remoteToolCallId;
         if (toolCallId && turn.remoteTools.delete(toolCallId))
           turn.emit({
             type: 'tool',
             name: spec.remoteName,
-            description: remoteToolDescription(
-              runtime,
-              spec,
-              args,
-              turn.signal.aborted ? 'Cancelado' : remoteToolError(error),
-            ),
+            description: remoteToolDescription(runtime, spec, args, turn.signal.aborted ? 'Cancelado' : safeFailure),
             status: turn.signal.aborted ? 'cancelled' : 'failed',
             toolCallId,
           });
+        if (terminalContainment && turn) {
+          // Record the terminal reason before awaiting the interrupt. Codex may emit
+          // turn/completed as part of that interrupt, but it must not turn containment
+          // failure into a successful result or user cancellation.
+          turn.terminalError = new Error(safeFailure);
+          await turn.requestInterrupt();
+          this.finishTurn(
+            turn,
+            { text: turn.finalText ?? turn.text, nativeSessionId: turn.threadId, stopReason: 'completed' },
+            turn.terminalError,
+          );
+        }
       }
       return;
     }

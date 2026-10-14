@@ -80,9 +80,25 @@ async function ready(server: Server) {
 }
 const headers = (base: string) => ({ 'content-type': 'application/json', origin: base });
 
+async function waitForRunIdle(store: Store, orchestrator: Orchestrator, sessionId: string, runId: string) {
+  for (
+    let i = 0;
+    i < 100 &&
+    (store.getRun(runId)?.status === 'running' ||
+      store.getSession(sessionId)?.activeRunId ||
+      orchestrator.isActive(sessionId));
+    i++
+  )
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+  expect(store.getRun(runId)?.status).toBe('completed');
+  expect(store.getSession(sessionId)?.activeRunId).toBeUndefined();
+  expect(orchestrator.isActive(sessionId)).toBe(false);
+}
+
 describe('backend persistence and API', () => {
   it('archives and restores conversations, blocks archived sends, and keeps archive state after restart', async () => {
-    const { store, server } = setup();
+    const { store, server, orchestrator } = setup();
     const base = await ready(server);
     const created = await fetch(`${base}/api/sessions`, {
       method: 'POST',
@@ -96,14 +112,14 @@ describe('backend persistence and API', () => {
       body: JSON.stringify({ content: 'Still running' }),
     });
     expect(runningStart.status).toBe(202);
+    const { runId: initialRunId } = (await runningStart.json()) as { runId: string };
     const runningConflict = await fetch(`${base}/api/sessions/${session.id}`, {
       method: 'PATCH',
       headers: headers(base),
       body: JSON.stringify({ archived: true }),
     });
     expect(runningConflict.status).toBe(409);
-    for (let i = 0; i < 100 && store.getSession(session.id)?.activeRunId; i++)
-      await new Promise((resolve) => setTimeout(resolve, 10));
+    await waitForRunIdle(store, orchestrator, session.id, initialRunId);
     store.enqueue({
       id: 'queued-before-archive',
       sessionId: session.id,
@@ -160,8 +176,7 @@ describe('backend persistence and API', () => {
     });
     expect(started.status).toBe(202);
     const { runId } = (await started.json()) as { runId: string };
-    for (let i = 0; i < 100 && store.getRun(runId)?.status === 'running'; i++)
-      await new Promise((resolve) => setTimeout(resolve, 10));
+    await waitForRunIdle(store, orchestrator, session.id, runId);
 
     const archivedAgain = await fetch(`${base}/api/sessions/${session.id}`, {
       method: 'PATCH',

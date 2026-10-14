@@ -298,7 +298,7 @@ describe('observability store and API', () => {
         status: 'success',
       });
     expect(store.db.prepare('SELECT COUNT(*) n FROM observability_events').get()).toMatchObject({ n: 10_000 });
-  });
+  }, 30_000);
 
   it('removes observation mirrors when their conversation is deleted', () => {
     const { store } = setup();

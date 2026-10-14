@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { createServer, request, type Server } from 'node:http';
@@ -24,6 +24,9 @@ import { startServer, type RunningServer } from '../server/runtime.js';
 import { subframeNavigationAllowed } from '../desktop/policy.js';
 import { applyTerminalEvent } from '../src/hooks/useTerminal.js';
 import { historyKey, loadHistory, recordHistory } from '../src/terminal-history.js';
+
+// Terminal HTTP/runtime assertions do not depend on provider discovery on the host.
+vi.mock('../server/providers/index.js', async () => import('./provider-discovery-fixture.js'));
 
 const cleanup: (() => unknown)[] = [];
 afterEach(async () => {

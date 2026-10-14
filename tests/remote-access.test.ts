@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { request } from 'node:http';
 import { tmpdir } from 'node:os';
@@ -35,6 +35,10 @@ import {
 } from '../server/funnel.js';
 import { runRemoteUserCli } from '../server/remote-user-cli.js';
 import { LOGIN_FAILED, passwordHints, passwordProblems, usernameProblem } from '../shared/remote-access.js';
+
+// Keep provider discovery deterministic in this HTTP fixture. The app, listeners,
+// authentication middleware and bootstrap route remain real.
+vi.mock('../server/providers/index.js', async () => import('./provider-discovery-fixture.js'));
 
 // Remote access is exercised on 127.0.0.2 (tailnet listener: a loopback address the guard does
 // NOT treat as local) and on the Funnel listener (127.0.0.1, ephemeral port, always internet),

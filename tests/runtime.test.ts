@@ -6,6 +6,9 @@ import { join, resolve } from 'node:path';
 import { startServer } from '../server/runtime.js';
 import { AutomationService } from '../server/automations.js';
 
+// Runtime tests cover server lifecycle and route persistence, not installed provider CLIs.
+vi.mock('../server/providers/index.js', async () => import('./provider-discovery-fixture.js'));
+
 const dirs: string[] = [];
 const children: ChildProcess[] = [];
 afterEach(async () => {

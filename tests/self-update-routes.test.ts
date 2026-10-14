@@ -9,6 +9,9 @@ import type { SelfUpdateStatus, Settings, UpdateProgress } from '../shared/contr
 import { BOOT_ID, type SelfUpdater, type UpdateGuard } from '../server/self-update.js';
 import { retryInUse, startServer, type RunningServer } from '../server/runtime.js';
 
+// This fixture tests update and HTTP guards, not host provider discovery; keep CLIs out of bootstrap.
+vi.mock('../server/providers/index.js', async () => import('./provider-discovery-fixture.js'));
+
 const TOKEN = 'c'.repeat(40);
 const cleanup: (() => Promise<void> | void)[] = [];
 afterEach(async () => {

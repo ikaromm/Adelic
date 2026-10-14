@@ -1,9 +1,12 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { startServer } from '../server/runtime.js';
+
+// The PWA fixture exercises real HTTP/static assets, not installed provider CLIs.
+vi.mock('../server/providers/index.js', async () => import('./provider-discovery-fixture.js'));
 
 // Installable-app headers (server/http/web.ts) on a fake web build, plus the remote guard:
 // the shell stays public on the remote address while /api still needs the token. Remote

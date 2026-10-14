@@ -104,7 +104,7 @@ test('global Settings cards read in English', async ({ page, request }) => {
 
   const mcp = page.getByRole('region', { name: 'MCP servers' });
   await expect(mcp.getByRole('note')).toHaveText(
-    "MCP servers run programs as your user inside the agent's sandbox. Tool calls still ask for approval; nothing is approved automatically.",
+    'MCP servers run programs as your user inside the agent’s sandbox. Tool calls follow the configured approval policy, including automatic mode, and the executor’s permissions.',
   );
   await mcp.getByRole('button', { name: 'New MCP server' }).click();
   const mcpForm = mcp.getByRole('form', { name: 'New MCP server' });

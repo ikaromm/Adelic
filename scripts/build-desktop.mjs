@@ -30,6 +30,11 @@ await build({
   outfile: join(stage, 'backend.cjs'),
   external: ['vite'],
 });
+await build({
+  ...options,
+  entryPoints: [join(root, 'server/skills-mcp-cli.ts')],
+  outfile: join(stage, 'skills-mcp.cjs'),
+});
 await cp(join(root, 'dist'), join(stage, 'web'), { recursive: true });
 await cp(join(root, 'desktop/assets/icon.png'), join(stage, 'icon.png'));
 await writeFile(

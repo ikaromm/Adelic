@@ -7,6 +7,8 @@ import path from 'node:path';
 import { CodexProvider, codexMcpConfig } from '../server/providers/codex';
 import { RunEvidenceStore } from '../server/run-evidence';
 import { delegatedEvidenceInputIdentity } from '../server/orchestrator';
+import { cleanupSkillsMcpSnapshots, isSkillsMcpServer, skillsMcpRunServer } from '../server/mcp';
+import { Store } from '../server/store';
 import { KiroProvider, kiroForeignMcp, kiroMcpServers } from '../server/providers/kiro';
 import { bubblewrap, mcpCommandBindings } from '../server/providers/sandbox';
 import type { Approval, ProviderEvent, RunEvent, RunInput } from '../shared/contracts';
@@ -1156,13 +1158,13 @@ describe('Kiro MCP payload', () => {
       script,
       `#!/usr/bin/env node
 import readline from 'node:readline';import fs from 'node:fs';
-const send=(m)=>process.stdout.write(JSON.stringify(m)+'\\n');
+const send=(m)=>process.stdout.write(JSON.stringify(m)+'\\n');let sessionMcp=[];
 readline.createInterface({input:process.stdin}).on('line',(line)=>{const m=JSON.parse(line);if(!m.method)return;
-fs.appendFileSync(${JSON.stringify(log)},JSON.stringify({method:m.method,params:m.params})+'\\n');
+if(process.env.FAKE_KIRO_NO_LOG!=='1')fs.appendFileSync(${JSON.stringify(log)},JSON.stringify({method:m.method,params:m.params})+'\\n');
 if(m.method==='initialize')send({jsonrpc:'2.0',id:m.id,result:{protocolVersion:1}});
-else if(m.method==='session/new')send({jsonrpc:'2.0',id:m.id,result:{sessionId:'k1'}});
+else if(m.method==='session/new'){sessionMcp=m.params.mcpServers;send({jsonrpc:'2.0',id:m.id,result:{sessionId:'k1'}});}
 else if(m.method==='_kiro.dev/commands/execute'){const r=${reported};send({jsonrpc:'2.0',id:m.id,result:r===null?undefined:{success:true,data:{servers:r}}});}
-else if(m.method==='session/prompt'){send({jsonrpc:'2.0',method:'session/update',params:{sessionId:'k1',update:{sessionUpdate:'agent_message_chunk',content:{type:'text',text:'ok'}}}});send({jsonrpc:'2.0',id:m.id,result:{stopReason:'end_turn'}});}});
+else if(m.method==='session/prompt'){send({jsonrpc:'2.0',method:'session/update',params:{sessionId:'k1',update:{sessionUpdate:'agent_message_chunk',content:{type:'text',text:process.env.FAKE_KIRO_ECHO_MCP==='1'?JSON.stringify(sessionMcp):'ok'}}}});send({jsonrpc:'2.0',id:m.id,result:{stopReason:'end_turn'}});}});
 `,
     );
     await chmod(script, 0o755);
@@ -1257,12 +1259,64 @@ else if(m.method==='session/prompt'){send({jsonrpc:'2.0',method:'session/update'
     });
     expect(await fake.read()).toEqual([]);
   });
+
+  it.skipIf(!existsSync('/usr/bin/bwrap'))(
+    'retains only the built-in skills reader in isolated-local Kiro',
+    async () => {
+      const dir = await tempDir(base);
+      const fake = await fakeKiro(dir, `[{name:'adelic-skills'}]`);
+      const store = new Store(dir);
+      const skills = skillsMcpRunServer('worker', store);
+      store.close();
+      const remote = {
+        label: 'Local isolado',
+        root: '/workspace',
+        executionKind: 'isolated-local' as const,
+        call: async () => ({ ok: true }),
+      };
+      let runResultText = '';
+      await withEnv({ ADELIC_KIRO_BIN: fake.script, FAKE_KIRO_NO_LOG: '1', FAKE_KIRO_ECHO_MCP: '1' }, async () => {
+        const kiro = new KiroProvider();
+        try {
+          runResultText = (
+            await kiro.run({ ...kiroInput(dir, [docs, skills]), remote }, () => undefined, new AbortController().signal)
+          ).text;
+        } finally {
+          await kiro.shutdown();
+        }
+      });
+      // The fixture emits the session payload in its protocol response instead of writing
+      // kiro.jsonl into the deliberately read-only project mount.
+      const session = JSON.parse(runResultText) as {
+        name: string;
+        command: string;
+        args: string[];
+        env: { name: string; value: string }[];
+      }[];
+      const skillsEntry = session.find((entry) => entry.name === 'adelic-skills');
+      expect(skillsEntry).toEqual({
+        name: 'adelic-skills',
+        command: skills.command,
+        args: skills.args,
+        env: Object.entries(skills.env).map(([name, value]) => ({ name, value })),
+      });
+      // Kiro’s isolated remote bridge is injected by the provider; arbitrary project MCPs
+      // must still be absent while the builtin gets the role-filtered snapshot binding.
+      expect(session.map((entry) => entry.name)).not.toContain('docs');
+      expect(session.map((entry) => entry.name).filter((name) => name !== 'adelic_remote')).toEqual(['adelic-skills']);
+      // Provider attempts do not own the snapshot: orchestration may retry/fallback with it.
+      expect(existsSync(skills.env.ADELIC_SKILLS_SNAPSHOT!)).toBe(true);
+      cleanupSkillsMcpSnapshots([skills]);
+      expect(existsSync(skills.env.ADELIC_SKILLS_SNAPSHOT!)).toBe(false);
+    },
+  );
 });
 
 describe('sandbox binding of MCP commands', () => {
   it('binds the command directory read-only only when /tmp hides it', async () => {
-    const workspace = await tempDir();
-    const tools = await tempDir();
+    // Use real /tmp rather than the executor's /var/tmp scratch root: bubblewrap hides /tmp.
+    const workspace = await tempDir('/tmp');
+    const tools = await tempDir('/tmp');
     await mkdir(path.join(tools, 'bin'));
     const command = path.join(tools, 'bin', 'srv');
     await writeFile(command, '#!/bin/sh\necho MCP_VISIBLE\n');
@@ -1301,8 +1355,8 @@ describe('sandbox binding of MCP commands', () => {
   it.skipIf(!existsSync('/usr/bin/bwrap'))(
     'makes a /tmp command executable inside real bubblewrap',
     async ({ skip }) => {
-      const workspace = await tempDir();
-      const tools = await tempDir();
+      const workspace = await tempDir('/tmp');
+      const tools = await tempDir('/tmp');
       await mkdir(path.join(tools, 'bin'));
       const command = path.join(tools, 'bin', 'srv');
       await writeFile(
@@ -1330,4 +1384,44 @@ describe('sandbox binding of MCP commands', () => {
       expect(visible.out).toContain('READ_ONLY');
     },
   );
+});
+
+describe('internal skills MCP execution capability', () => {
+  it('allows only the exact built-in skills server through Codex isolated-local, not project MCPs', async () => {
+    const dir = await tempDir();
+    const fake = await fakeCodex(dir);
+    const store = new Store(dir);
+    const skills = skillsMcpRunServer('reviewer', store);
+    store.close();
+    expect(isSkillsMcpServer(skills)).toBe(true);
+    expect(isSkillsMcpServer({ ...skills, command: '/usr/bin/true' })).toBe(false);
+    const remote = {
+      label: 'Local isolado',
+      root: '/workspace',
+      executionKind: 'isolated-local' as const,
+      call: async () => ({ ok: true }),
+    };
+    const codex = provider(fake.file);
+    try {
+      const retryInput = input(dir, { remote, mcpServers: [docs, skills] });
+      await expect(codex.run(retryInput, () => undefined, new AbortController().signal)).resolves.toMatchObject({
+        stopReason: 'completed',
+      });
+      expect(existsSync(skills.env.ADELIC_SKILLS_SNAPSHOT!)).toBe(true);
+      // Simulate the next attempt/fallback using the exact same valid capability.
+      await expect(codex.run(retryInput, () => undefined, new AbortController().signal)).resolves.toMatchObject({
+        stopReason: 'completed',
+      });
+      expect(existsSync(skills.env.ADELIC_SKILLS_SNAPSHOT!)).toBe(true);
+      const thread = (await fake.read()).find((item) => item.method === 'thread/start');
+      expect(Object.keys(thread?.params.config.mcp_servers ?? {})).toEqual(['adelic-skills']);
+      expect(thread?.params.config.mcp_servers['adelic-skills'].env.ADELIC_SKILL_ROLE).toBe('reviewer');
+      expect(thread?.params.config.mcp_servers['adelic-skills'].enabled_tools).toBeUndefined();
+    } finally {
+      await codex.shutdown();
+    }
+    expect(existsSync(skills.env.ADELIC_SKILLS_SNAPSHOT!)).toBe(true);
+    cleanupSkillsMcpSnapshots([skills]);
+    expect(existsSync(skills.env.ADELIC_SKILLS_SNAPSHOT!)).toBe(false);
+  });
 });

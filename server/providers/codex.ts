@@ -24,11 +24,13 @@ import { blockedBy, commandText } from '../../shared/hooks';
 import {
   bubblewrap,
   mcpCommandBindings,
+  skillsSnapshotBindings,
   type BubblewrapOptions,
   type ReadonlyFileBinding,
   type WrappedCommand,
 } from './sandbox';
 import type { RunMcpServer } from '../../shared/mcp';
+import { isSkillsMcpServer } from '../mcp';
 import {
   boundedRemoteResult,
   blockedRemoteTool,
@@ -748,6 +750,9 @@ export class CodexProvider {
         server.mcp.map((item) => item.command),
         server.cwd,
       )),
+      ...(await skillsSnapshotBindings(
+        server.mcp.filter(isSkillsMcpServer).map((item) => item.env.ADELIC_SKILLS_SNAPSHOT!),
+      )),
       ...evidenceBindings,
       ...(await this.authBinding(server.scratch, server.cwd, sandbox)),
     ];
@@ -1351,12 +1356,13 @@ export class CodexProvider {
       const localSandbox = profile === 'remote-tools' ? 'read-only' : input.sandbox;
       if (signal.aborted) throw abortError(signal);
       if (toolsAllowed && !input.remote) await scanCodexRules({ cwd: input.cwd });
-      // Remote execution never inherits project MCP servers. The per-run evidence reader is
-      // the sole exception: its fixed tool reads this run's bounded evidence, and its command
-      // runs inside the same read-only app-server sandbox with only file-path env bindings.
+      // Remote execution never inherits arbitrary project MCP servers. The only exceptions
+      // are fixed internal capabilities: bounded run evidence and role-filtered local skills.
+      // Skills MCP is independently validated by its exact command, arguments, environment,
+      // role and read-only three-tool implementation before it crosses this boundary.
       const mcp = toolsAllowed
         ? input.remote
-          ? (input.mcpServers ?? []).filter((item) => item.name === 'adelic-run-evidence')
+          ? (input.mcpServers ?? []).filter((item) => item.name === 'adelic-run-evidence' || isSkillsMcpServer(item))
           : (input.mcpServers ?? [])
         : [];
       if (new Set(mcp.map((item) => item.name)).size !== mcp.length)

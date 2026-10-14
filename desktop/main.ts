@@ -292,7 +292,9 @@ async function startDesktop() {
   }
 
   const resources = desktopResources(app.getAppPath());
+  const skillsMcpEntry = join(resources.root, 'skills-mcp.cjs');
   if (!existsSync(resources.backend)) throw new Error('O pacote não contém o backend local.');
+  if (!existsSync(skillsMcpEntry)) throw new Error('O pacote não contém o servidor MCP interno de skills.');
   if (!existsSync(join(resources.web, 'index.html'))) throw new Error('O pacote não contém a interface web.');
 
   const child = utilityProcess.fork(resources.backend, [], {
@@ -301,6 +303,7 @@ async function startDesktop() {
       ...process.env,
       NODE_ENV: 'production',
       ADELIC_WEB_DIR: resources.web,
+      ADELIC_SKILLS_MCP_ENTRY: skillsMcpEntry,
       ADELIC_DATA_DIR: dataDir,
       PATH: desktopPath(process.env),
     },

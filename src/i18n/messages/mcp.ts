@@ -6,9 +6,9 @@ export default defineMessages(
   {
     'mcp.title': 'Servidores MCP',
     'mcp.detail':
-      'Catálogo local, desligado por padrão. Cada projeto escolhe quais servidores usar; conversas avulsas nunca usam MCP. Somente servidores locais (stdio) nesta versão.',
+      'Catálogo local, desligado por padrão. Cada projeto escolhe quais servidores usar; conversas avulsas com ferramentas podem usar skills internas, mas não herdam MCPs externos de projetos. Somente servidores locais (stdio) nesta versão.',
     'mcp.warning':
-      'Servidores MCP executam programas com o seu usuário dentro do sandbox do agente. As chamadas de ferramentas continuam pedindo aprovação; nada é aprovado automaticamente.',
+      'Servidores MCP executam programas com o seu usuário dentro do sandbox do agente. As chamadas de ferramentas seguem a política de aprovação configurada, inclusive o modo automático, e as permissões do executor.',
     'mcp.empty': 'Nenhum servidor MCP cadastrado.',
     'mcp.list': 'Servidores MCP cadastrados',
     'mcp.allowedTools.one': '{count} ferramenta permitida',
@@ -68,9 +68,9 @@ export default defineMessages(
   {
     'mcp.title': 'MCP servers',
     'mcp.detail':
-      'Local catalog, off by default. Each project picks which servers to use; standalone conversations never use MCP. Only local (stdio) servers in this version.',
+      'Local catalog, off by default. Each project picks which servers to use; standalone conversations with tools can use internal skills, but do not inherit external MCP servers from projects. Only local (stdio) servers in this version.',
     'mcp.warning':
-      "MCP servers run programs as your user inside the agent's sandbox. Tool calls still ask for approval; nothing is approved automatically.",
+      'MCP servers run programs as your user inside the agent’s sandbox. Tool calls follow the configured approval policy, including automatic mode, and the executor’s permissions.',
     'mcp.empty': 'No MCP servers added.',
     'mcp.list': 'Added MCP servers',
     'mcp.allowedTools.one': '{count} allowed tool',

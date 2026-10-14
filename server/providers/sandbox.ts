@@ -296,6 +296,11 @@ export async function bubblewrap(
     '/dev',
     '--tmpfs',
     TMP_ROOT,
+    // Host TMPDIR paths may be hidden by the private /tmp; point sandboxed clients
+    // (for example tsx's transform cache) at the writable tmpfs we just created.
+    '--setenv',
+    'TMPDIR',
+    TMP_ROOT,
   ];
   const bindings: { source: string; target: string; writable: boolean }[] = [];
   const workspaceWritable = sandbox === 'workspace-write';
@@ -378,4 +383,25 @@ export async function mcpCommandBindings(commands: string[], cwd: string): Promi
     }
   }
   return [...bindings.values()];
+}
+
+/** Bind only the private role-filtered skills JSON, never the operational database directory. */
+export async function skillsSnapshotBindings(files: string[]): Promise<ReadonlyFileBinding[]> {
+  const bindings: ReadonlyFileBinding[] = [];
+  for (const file of files) {
+    const target = path.resolve(file);
+    if (
+      !path.isAbsolute(file) ||
+      !isWithin(target, TMP_ROOT) ||
+      path.basename(target) !== 'catalog.json' ||
+      !path.basename(path.dirname(target)).startsWith('adelic-skills-mcp-')
+    )
+      throw new Error('Skills MCP snapshot fora do diretório privado esperado.');
+    const resolved = await realpath(target);
+    const [fileInfo, directoryInfo] = await Promise.all([lstat(target), stat(path.dirname(target))]);
+    if (resolved !== target || !fileInfo.isFile() || !directoryInfo.isDirectory() || (fileInfo.mode & 0o077) !== 0)
+      throw new Error('Skills MCP snapshot não é um arquivo regular privado.');
+    bindings.push({ source: resolved, target, directory: false });
+  }
+  return bindings;
 }

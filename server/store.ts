@@ -1,11 +1,24 @@
 import type { RemoteHost } from '../shared/remote-hosts.js';
-import { chmodSync, constants, copyFileSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  constants,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  lstatSync,
+  statSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import {
   projectOrchestration,
+  type AgentRole,
   type Approval,
   type Bootstrap,
   type DelegatedTask,
@@ -18,6 +31,8 @@ import {
   type Session,
   type Settings,
   type Skill,
+  type SkillCatalogEntry,
+  type SkillCatalogDiagnostic,
   type ConversationSearchHit,
   type StoredAttachment,
   type MessageQueue,
@@ -36,6 +51,14 @@ import type { ObservationInput, ObservabilityEvent, ObservabilityRunSummary } fr
 import { mcpServerView } from './mcp.js';
 import { migrate, type MigrationResult } from './migrations.js';
 import { httpError } from './i18n.js';
+import {
+  SKILL_BODY_MAX,
+  SKILL_CATALOG_MAX,
+  SKILL_REFERENCE_BODY_MAX,
+  SkillBodySchema,
+  SkillManifestSchema,
+  ProviderContextDiagnosticsSchema,
+} from '../shared/schemas.js';
 
 const observabilityAttributeKeys = new Set([
   'method',
@@ -60,6 +83,8 @@ const observabilityAttributeKeys = new Set([
   'code',
   'outcome',
   'toolName',
+  'contextDiagnostics',
+  'contextOmittedSkills',
 ]);
 const observabilityComponents = new Set([
   'http',
@@ -156,7 +181,7 @@ export class Store {
     this.observabilityEventCount = Number(this.db.prepare('SELECT COUNT(*) n FROM observability_events').get()?.n ?? 0);
     this.pruneObservability(true);
     if (!this.getSettings()) this.setSettings(defaults);
-    if (!this.listSkills().length) for (const skill of seedSkills) this.put('skills', skill.id, skill);
+    if (!this.rows<Skill>('skills').length) for (const skill of seedSkills) this.put('skills', skill.id, skill);
     const interruptedRuns = this.rows<Run>('runs', "WHERE json_extract(data,'$.status')='running'");
     this.db
       .prepare(
@@ -1043,9 +1068,19 @@ export class Store {
         ([key, value]) =>
           observabilityAttributeKeys.has(key) &&
           (typeof value === 'string'
-            ? enumAttributes[key]
-              ? enumAttributes[key].test(value) && !/(token|secret|password|credential|api[_-]?key)/i.test(value)
-              : /^[a-zA-Z0-9_.:/-]{1,80}$/.test(value) && !/(token|secret|password|credential|api[_-]?key)/i.test(value)
+            ? key === 'contextDiagnostics'
+              ? value.length <= 4096 &&
+                (() => {
+                  try {
+                    return ProviderContextDiagnosticsSchema.safeParse(JSON.parse(value)).success;
+                  } catch {
+                    return false;
+                  }
+                })()
+              : enumAttributes[key]
+                ? enumAttributes[key].test(value) && !/(token|secret|password|credential|api[_-]?key)/i.test(value)
+                : /^[a-zA-Z0-9_.:/-]{1,80}$/.test(value) &&
+                  !/(token|secret|password|credential|api[_-]?key)/i.test(value)
             : typeof value === 'number'
               ? Number.isFinite(value)
               : typeof value === 'boolean' || value === null),
@@ -1112,17 +1147,231 @@ export class Store {
       .run(JSON.stringify(s));
     return s;
   }
-  listSkills() {
-    return this.rows<Skill>('skills', 'ORDER BY rowid');
+  private readonly skillDiagnostics = new Map<string, SkillCatalogDiagnostic>();
+  private readonly skillDiagnosticLimit = 100;
+  private recordSkillDiagnostic(diagnostic: SkillCatalogDiagnostic, identity?: string): void {
+    const key = `${diagnostic.code}:${diagnostic.skillId ?? ''}:${identity ?? ''}`;
+    if (this.skillDiagnostics.has(key)) return;
+    if (this.skillDiagnostics.size >= this.skillDiagnosticLimit - 1) {
+      const overflowKey = 'diagnostics_limit:';
+      if (!this.skillDiagnostics.has(overflowKey))
+        this.skillDiagnostics.set(overflowKey, {
+          code: 'unreadable',
+          message: 'Há mais diagnósticos de skills do que o limite de armazenamento; consulte os itens exibidos.',
+        });
+      return;
+    }
+    this.skillDiagnostics.set(key, diagnostic);
   }
-  getSkill(id: string) {
-    return this.get<Skill>('skills', id);
+  private clearSkillDiagnostic(code: SkillCatalogDiagnostic['code'], skillId?: string, identity?: string): void {
+    this.skillDiagnostics.delete(`${code}:${skillId ?? ''}:${identity ?? ''}`);
+  }
+  /** Prompt activation diagnostics contain metadata only, never skill body text or task content. */
+  reportSkillActivationDiagnostic(skillId?: string): void {
+    this.recordSkillDiagnostic({
+      code: 'activation_limit',
+      ...(skillId ? { skillId } : {}),
+      message: 'Limite de ativação de skills atingido; algumas instruções não foram incluídas.',
+    });
+  }
+  clearSkillActivationDiagnostic(skillId?: string): void {
+    if (skillId) this.clearSkillDiagnostic('activation_limit', skillId);
+    else
+      for (const [key, diagnostic] of this.skillDiagnostics)
+        if (diagnostic.code === 'activation_limit') this.skillDiagnostics.delete(key);
+  }
+  /** Catalog contains bounded metadata only; bodies and reference files are read on explicit request. */
+  listSkills(): SkillCatalogEntry[] {
+    const stored = this.rows<Skill>('skills', 'ORDER BY rowid');
+    const storedById = new Map(stored.map((skill) => [skill.id, skill]));
+    const byId = new Map<string, SkillCatalogEntry>();
+    for (const skill of stored) {
+      // Body-less rows are file-backed catalog metadata written by setSkillEnabled().
+      // They are not authoritative: only a current, valid manifest may publish them.
+      if (skill.body === undefined) continue;
+      const { body: _body, ...metadata } = skill;
+      byId.set(skill.id, metadata);
+    }
+    const root = join(this.dataDir, 'skills');
+    if (existsSync(root)) {
+      let directories;
+      try {
+        directories = readdirSync(root, { withFileTypes: true }).filter((entry) => entry.isDirectory());
+      } catch {
+        this.recordSkillDiagnostic({ code: 'unreadable', message: 'Não foi possível ler o catálogo local de skills.' });
+        return [...byId.values()];
+      }
+      directories.sort((a, b) => a.name.localeCompare(b.name));
+      this.clearSkillDiagnostic('unreadable');
+      if (directories.length > SKILL_CATALOG_MAX)
+        this.recordSkillDiagnostic({
+          code: 'catalog_limit',
+          message: `Catálogo local excede o limite de ${SKILL_CATALOG_MAX} skills; itens excedentes não foram carregados.`,
+        });
+      else this.clearSkillDiagnostic('catalog_limit');
+      for (const entry of directories.slice(0, SKILL_CATALOG_MAX)) {
+        const dir = join(root, entry.name);
+        try {
+          const manifestFile = join(dir, 'skill.json');
+          if (lstatSync(manifestFile).isSymbolicLink() || statSync(manifestFile).size > 16_384)
+            throw new Error('manifest invalid');
+          const manifestBytes = readFileSync(manifestFile);
+          const parsed = SkillManifestSchema.safeParse(JSON.parse(manifestBytes.toString('utf8')));
+          const previous = parsed.success ? storedById.get(parsed.data.id) : undefined;
+          if (
+            !parsed.success ||
+            parsed.data.id !== entry.name ||
+            (byId.has(parsed.data.id) && previous?.body !== undefined)
+          ) {
+            this.recordSkillDiagnostic({
+              code: 'invalid_manifest',
+              skillId: entry.name,
+              message: 'Manifesto inválido, id divergente ou duplicado; skill ignorada.',
+            });
+            continue;
+          }
+          byId.set(parsed.data.id, {
+            ...parsed.data,
+            enabled: previous?.enabled ?? true,
+          });
+          this.clearSkillDiagnostic('invalid_manifest', entry.name);
+        } catch {
+          this.recordSkillDiagnostic({
+            code: 'invalid_manifest',
+            skillId: entry.name,
+            message: 'Manifesto local inválido ou ausente; skill ignorada.',
+          });
+        }
+      }
+    }
+    return [...byId.values()];
+  }
+  /** Skills visible to a specific run role: disabled and role-restricted entries are excluded. */
+  listSkillsForRole(role: AgentRole): SkillCatalogEntry[] {
+    return this.listSkills().filter((skill) => skill.enabled && (!skill.roles || skill.roles.includes(role)));
+  }
+  getSkillCatalogDiagnostics(): SkillCatalogDiagnostic[] {
+    return [...this.skillDiagnostics.values()];
+  }
+  /** Explicit activation path. Invalid or oversized instructions are rejected intact, never truncated. */
+  getSkill(id: string): Skill | undefined {
+    const metadata = this.listSkills().find((skill) => skill.id === id);
+    if (!metadata) return undefined;
+    const stored = this.get<Skill>('skills', id);
+    if (stored?.body) {
+      const body = SkillBodySchema.safeParse(stored.body);
+      if (!body.success || Buffer.from(stored.body, 'utf8').toString('utf8') !== stored.body) {
+        this.recordSkillDiagnostic({
+          code: 'body_limit',
+          skillId: id,
+          message: `Corpo da skill excede o limite de ${SKILL_BODY_MAX} caracteres ou está vazio.`,
+        });
+        return undefined;
+      }
+      this.clearSkillDiagnostic('body_limit', id);
+      this.clearSkillDiagnostic('unreadable', id);
+      return { ...metadata, body: stored.body };
+    }
+    try {
+      const bodyFile = join(this.dataDir, 'skills', id, 'SKILL.md');
+      if (lstatSync(bodyFile).isSymbolicLink() || statSync(bodyFile).size > SKILL_BODY_MAX * 4)
+        throw new Error('body file exceeds limit or is linked');
+      const body = new TextDecoder('utf-8', { fatal: true }).decode(readFileSync(bodyFile));
+      if (!SkillBodySchema.safeParse(body).success) {
+        this.recordSkillDiagnostic({
+          code: 'body_limit',
+          skillId: id,
+          message: `Corpo da skill excede o limite de ${SKILL_BODY_MAX} caracteres ou está vazio.`,
+        });
+        return undefined;
+      }
+      this.clearSkillDiagnostic('body_limit', id);
+      this.clearSkillDiagnostic('unreadable', id);
+      return { ...metadata, body };
+    } catch {
+      this.recordSkillDiagnostic({
+        code: 'unreadable',
+        skillId: id,
+        message: 'Corpo da skill não pôde ser carregado.',
+      });
+      return undefined;
+    }
+  }
+  loadSkillReference(id: string, reference: string): string | undefined {
+    const metadata = this.listSkills().find((skill) => skill.id === id);
+    if (
+      !metadata?.enabled ||
+      !metadata.references?.includes(reference) ||
+      reference.startsWith('/') ||
+      reference.includes('\\') ||
+      reference.split('/').some((part) => !part || part === '.' || part === '..')
+    )
+      return undefined;
+    try {
+      const skillRoot = resolve(this.dataDir, 'skills', id);
+      const path = resolve(skillRoot, reference);
+      if (!path.startsWith(skillRoot + '/') || statSync(path).size > SKILL_REFERENCE_BODY_MAX) {
+        this.recordSkillDiagnostic(
+          {
+            code: 'reference_limit',
+            skillId: id,
+            message: `Referência da skill excede o limite de ${SKILL_REFERENCE_BODY_MAX} bytes.`,
+          },
+          reference,
+        );
+        return undefined;
+      }
+      let parent = skillRoot;
+      for (const part of reference.split('/')) {
+        parent = join(parent, part);
+        if (lstatSync(parent).isSymbolicLink()) return undefined;
+      }
+      const content = new TextDecoder('utf-8', { fatal: true }).decode(readFileSync(path));
+      if (Buffer.byteLength(content, 'utf8') > SKILL_REFERENCE_BODY_MAX || content.length > SKILL_REFERENCE_BODY_MAX) {
+        this.recordSkillDiagnostic(
+          {
+            code: 'reference_limit',
+            skillId: id,
+            message: `Referência da skill excede o limite de ${SKILL_REFERENCE_BODY_MAX} bytes ou caracteres.`,
+          },
+          reference,
+        );
+        return undefined;
+      }
+      this.clearSkillDiagnostic('reference_limit', id, reference);
+      this.clearSkillDiagnostic('unreadable', id, reference);
+      return content;
+    } catch {
+      this.recordSkillDiagnostic(
+        {
+          code: 'unreadable',
+          skillId: id,
+          message: 'Referência da skill não pôde ser carregada.',
+        },
+        reference,
+      );
+      return undefined;
+    }
+  }
+  /** Update catalog metadata without loading an optional or invalid body. */
+  setSkillEnabled(id: string, enabled: boolean): SkillCatalogEntry | undefined {
+    const metadata = this.listSkills().find((skill) => skill.id === id);
+    if (!metadata) return undefined;
+    const stored = this.get<Skill>('skills', id);
+    this.put('skills', id, stored ? { ...stored, enabled } : { ...metadata, enabled });
+    return { ...metadata, enabled };
   }
   setSkill(s: Skill) {
-    this.put('skills', s.id, s);
+    // File-backed content remains in its authorized local source; persist only toggle metadata.
+    if (existsSync(join(this.dataDir, 'skills', s.id, 'skill.json'))) {
+      const { body: _body, ...metadata } = s;
+      this.put('skills', s.id, metadata);
+    } else this.put('skills', s.id, s);
     return s;
   }
   bootstrap(providers: Bootstrap['providers'], integrations: Bootstrap['integrations']): Bootstrap {
+    const skills = this.listSkills();
+    const skillDiagnostics = this.getSkillCatalogDiagnostics();
     return {
       projects: this.listProjects(),
       sessions: this.listSessions(),
@@ -1130,7 +1379,8 @@ export class Store {
       providers,
       settings: this.getSettings()!,
       integrations,
-      skills: this.listSkills(),
+      skills,
+      skillDiagnostics,
       runs: this.listRuns().slice(0, 100),
     };
   }
@@ -1419,6 +1669,25 @@ export class Store {
     });
   }
   exportData() {
+    // Backup is an explicit data export, not prompt construction: preserve raw persisted skill
+    // bodies and load file-backed bodies here without changing the metadata-only lazy catalog.
+    const storedSkills = this.rows<Skill>('skills', 'ORDER BY rowid');
+    const skills = new Map(storedSkills.map((skill) => [skill.id, skill]));
+    const skillDiagnostics: SkillCatalogDiagnostic[] = [];
+    const catalog = this.listSkills();
+    skillDiagnostics.push(...this.getSkillCatalogDiagnostics());
+    for (const entry of catalog) {
+      const stored = skills.get(entry.id);
+      if (stored?.body !== undefined) continue;
+      const skill = this.getSkill(entry.id);
+      if (skill) skills.set(entry.id, skill);
+      skillDiagnostics.push(...this.getSkillCatalogDiagnostics());
+    }
+    const uniqueSkillDiagnostics = [
+      ...new Map(
+        skillDiagnostics.map((diagnostic) => [`${diagnostic.code}:${diagnostic.skillId ?? ''}`, diagnostic]),
+      ).values(),
+    ];
     return {
       projects: this.listProjects(),
       sessions: this.listSessions(),
@@ -1428,7 +1697,8 @@ export class Store {
       tasks: this.rows<DelegatedTask>('delegated_tasks', 'ORDER BY rowid'),
       briefs: this.listBriefs(),
       settings: this.getSettings(),
-      skills: this.listSkills(),
+      skills: [...skills.values()],
+      skillDiagnostics: uniqueSkillDiagnostics,
       commands: this.rows<SavedCommand>('commands', 'ORDER BY rowid'),
       automations: this.listAutomations(),
       // Literal environment values stay out of exports.

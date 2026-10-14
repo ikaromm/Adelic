@@ -381,6 +381,29 @@ export const RestoreRunSchema = z.object({
   confirm: required(z.literal(true), vmsg('validation.confirm.restore')),
 });
 
+const ContextPartMeasurementSchema = z.object({
+  characters: z.number().int().nonnegative().nullable(),
+  bytes: z.number().int().nonnegative().nullable(),
+});
+export const ProviderContextDiagnosticsSchema = z.object({
+  scope: z.literal('adelic_run_input'),
+  unit: z.literal('characters_and_utf8_bytes'),
+  tokenizer: z.literal('unavailable'),
+  categories: z.object({
+    currentRequest: ContextPartMeasurementSchema,
+    history: ContextPartMeasurementSchema,
+    summary: ContextPartMeasurementSchema,
+    memory: ContextPartMeasurementSchema,
+    skills: ContextPartMeasurementSchema,
+    graph: ContextPartMeasurementSchema,
+    evidence: ContextPartMeasurementSchema,
+    attachments: ContextPartMeasurementSchema,
+  }),
+  runtimeAddedContext: z.literal('unknown'),
+  observedText: ContextPartMeasurementSchema,
+  assembledPrompt: ContextPartMeasurementSchema,
+});
+
 /** Persisted run telemetry is optional for backwards compatibility; null means unknown. */
 export const ProviderAttemptUsageSchema = z.object({
   attemptId: z.string().min(1),
@@ -436,6 +459,37 @@ export const PlanTaskStatusSchema = z.object({
 export const PlanSaveSchema = z.object({
   overwrite: optional(z.boolean(), boolean('overwrite')),
 });
+/** Local skill catalog bounds. Content beyond these limits is rejected, never sliced. */
+export const SKILL_CATALOG_MAX = 100;
+export const SKILL_NAME_MAX = 120;
+export const SKILL_DESCRIPTION_MAX = 500;
+export const SKILL_BODY_MAX = 32_000;
+export const SKILL_REFERENCES_MAX = 16;
+export const SKILL_REFERENCE_PATH_MAX = 200;
+export const SKILL_REFERENCE_BODY_MAX = 8_000;
+export const SkillManifestSchema = z
+  .object({
+    id: z.string().regex(/^[a-z0-9][a-z0-9._-]{0,79}$/),
+    name: z.string().trim().min(1).max(SKILL_NAME_MAX),
+    description: z.string().trim().min(1).max(SKILL_DESCRIPTION_MAX),
+    references: z.array(z.string().max(SKILL_REFERENCE_PATH_MAX)).max(SKILL_REFERENCES_MAX).optional(),
+    roles: z
+      .array(z.enum(['planner', 'worker', 'reviewer', 'synthesis']))
+      .max(4)
+      .optional(),
+  })
+  .strict()
+  .refine(
+    (manifest) =>
+      (!manifest.references || new Set(manifest.references).size === manifest.references.length) &&
+      (manifest.references ?? []).every(
+        (path) =>
+          !path.startsWith('/') &&
+          !path.includes('\\') &&
+          path.split('/').every((part) => part && part !== '.' && part !== '..'),
+      ),
+  );
+export const SkillBodySchema = z.string().min(1).max(SKILL_BODY_MAX);
 export const SkillPatchSchema = z.object({ enabled: required(z.boolean(), boolean('enabled')) });
 
 // Saved commands (docs/specs/saved-commands.md).

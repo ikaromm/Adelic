@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import type { ProviderRegistry, RunInput } from '../shared/contracts.js';
 import { createBackend } from '../server/index.js';
 import { Store } from '../server/store.js';
-import { mcpServerView, projectMcpReport, resolveMcpCommand, runMcpServers } from '../server/mcp.js';
+import { isSkillsMcpServer, mcpServerView, projectMcpReport, resolveMcpCommand, runMcpServers } from '../server/mcp.js';
 import { CreateMcpServerSchema, PatchMcpServerSchema, ProjectMcpSchema, parseBody } from '../shared/schemas.js';
 import { MCP_MESSAGES, MCP_SECRET_MASK, mcpFieldsError, mcpLines, type McpServerRecord } from '../shared/mcp.js';
 
@@ -309,8 +309,8 @@ describe('what a run receives', () => {
     await call(url, 'PATCH', `/api/projects/${project.id}`, { orchestration: { enabled: false } });
     const entry = (await call(url, 'POST', '/api/mcp-servers', { name: 'docs', command: fakeBinary() })).json;
     await call(url, 'PUT', `/api/projects/${project.id}/mcp`, { enabled: [entry.id] });
-    const send = async (projectId: string | null, content: string) => {
-      const session = (await call(url, 'POST', '/api/sessions', { projectId, mode: 'fast' })).json;
+    const send = async (projectId: string | null, content: string, mode: 'fast' | 'deep' = 'fast') => {
+      const session = (await call(url, 'POST', '/api/sessions', { projectId, mode })).json;
       const before = inputs.length;
       const sent = await call(url, 'POST', `/api/sessions/${session.id}/messages`, { content });
       expect(sent.status).toBeLessThan(300);
@@ -324,9 +324,17 @@ describe('what a run receives', () => {
     };
     const bound = await send(project.id, 'liste os arquivos do projeto');
     expect(bound.plan.tools).toBe(true);
-    expect(bound.mcpServers?.map((s) => s.name)).toEqual(['docs']);
+    expect(bound.mcpServers?.map((s) => s.name)).toEqual(['docs', 'adelic-skills']);
+    const projectSkills = bound.mcpServers?.find((server) => server.name === 'adelic-skills');
+    expect(isSkillsMcpServer(projectSkills!)).toBe(true);
+
     const detached = await send(null, 'liste os arquivos do projeto');
     expect(detached.plan.tools).toBe(true);
-    expect(detached.mcpServers).toBeUndefined();
+    expect(detached.mcpServers?.map((s) => s.name)).toEqual(['adelic-skills']);
+    expect(isSkillsMcpServer(detached.mcpServers![0]!)).toBe(true);
+
+    const noTools = await send(project.id, 'Como funciona um roteador?', 'deep');
+    expect(noTools.plan.tools).toBe(false);
+    expect(noTools.mcpServers).toBeUndefined();
   });
 });

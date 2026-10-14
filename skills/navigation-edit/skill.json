@@ -1,0 +1,6 @@
+{
+  "id": "navigation-edit",
+  "name": "Navegação e edição pontual",
+  "description": "Reduza leituras desnecessárias ao localizar e editar trechos com as ferramentas existentes, preservando revisões atuais e permissões.",
+  "roles": ["worker"]
+}

@@ -6,6 +6,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  statSync,
   rmSync,
   symlinkSync,
   watch,
@@ -15,6 +16,7 @@ import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { Orchestrator } from '../server/orchestrator';
+import { GraphifyService } from '../server/graphify';
 import { RunEvidenceStore } from '../server/run-evidence';
 import { Store } from '../server/store';
 import { createExecutorWorktree, removeWorktree } from '../server/worktrees';
@@ -113,6 +115,7 @@ function setup(options: {
   realCheckRunner?: boolean;
   checkFails?: boolean;
   checkStatuses?: ('failed' | 'passed')[];
+  graphContext?: string;
 }) {
   const directory = mkdtempSync(join(tmpdir(), 'adelic-auto-coordination-'));
   const projectRoot = join(directory, 'project-root');
@@ -134,7 +137,7 @@ function setup(options: {
     createdAt: now,
     memoryWorkspace: 'workspace',
     memoryProject: 'project',
-    graphify: { enabled: false },
+    graphify: { enabled: options.graphContext !== undefined },
     orchestration: {
       enabled: options.orchestrationEnabled ?? true,
       maxWorkers: options.parallelTasks ? 2 : 1,
@@ -163,6 +166,7 @@ function setup(options: {
       : {}),
   });
   const inputs: RunInput[] = [];
+  const skillSnapshotsAtProvider: { role: string; path: string; exists: boolean; mode: number }[] = [];
   let calls = 0;
   let activeReviewerCalls = 0;
   let reviewPasses = 0;
@@ -185,6 +189,16 @@ function setup(options: {
     async run(input, emit, signal) {
       calls++;
       inputs.push(input);
+      for (const server of input.mcpServers ?? []) {
+        if (server.name !== 'adelic-skills') continue;
+        const snapshotPath = server.env.ADELIC_SKILLS_SNAPSHOT ?? '';
+        skillSnapshotsAtProvider.push({
+          role: server.env.ADELIC_SKILL_ROLE ?? '',
+          path: snapshotPath,
+          exists: Boolean(snapshotPath && existsSync(snapshotPath)),
+          mode: snapshotPath && existsSync(snapshotPath) ? statSync(snapshotPath).mode & 0o777 : 0,
+        });
+      }
       if (options.directProviderFailure) throw new Error('fixture direct provider failure');
       if (input.prompt.includes('Produza somente JSON válido')) {
         return {
@@ -612,11 +626,18 @@ function setup(options: {
       autoFix: false,
     });
   let checkIndex = 0;
+  const graphifyService = options.graphContext === undefined ? undefined : new GraphifyService();
+  if (graphifyService)
+    vi.spyOn(graphifyService, 'query').mockImplementation(async (_project, query) => ({
+      query,
+      context: options.graphContext!,
+      status: { enabled: true, installed: true, status: 'ready', graphPath: '/tmp/graph/graph.json', detail: 'ready' },
+    }));
   const orchestrator = new Orchestrator(
     store,
     providers,
     undefined,
-    undefined,
+    graphifyService,
     undefined,
     undefined,
     options.checkBeforeReview && !options.realCheckRunner
@@ -645,6 +666,7 @@ function setup(options: {
     orchestrator,
     providers,
     inputs,
+    skillSnapshotsAtProvider,
     calls: () => calls,
     activeReviewerCalls: () => activeReviewerCalls,
     reviewPasses: () => reviewPasses,
@@ -889,6 +911,34 @@ exec "${realGit}" "$@"
 }
 
 describe('automatic orchestration', () => {
+  it('keeps generic deep-request RunInput free of a large skills catalog', async () => {
+    const test = setup({});
+    for (let index = 0; index < 50; index++) {
+      test.store.setSkill({
+        id: `generic-skill-${index}`,
+        name: `Rotina especializada ${index}`,
+        description: 'Orientação para implementar projeto',
+        body: `private-skill-body-${index}-${'x'.repeat(10_000)}`,
+        enabled: true,
+      });
+    }
+    let completed!: () => void;
+    const done = new Promise<void>((resolve) => (completed = resolve));
+    const unsubscribe = test.orchestrator.subscribe((event) => {
+      if (event.type === 'run' && event.run.sessionId === test.session.id && event.run.status !== 'running')
+        completed();
+    });
+    try {
+      await test.orchestrator.start(test.session, 'Implemente o projeto');
+      await done;
+      expect(test.inputs.length).toBeGreaterThan(0);
+      expect(test.inputs.every((input) => !input.prompt.includes('private-skill-body-'))).toBe(true);
+      expect(test.inputs.every((input) => input.prompt.length < 100_000)).toBe(true);
+    } finally {
+      unsubscribe();
+    }
+  });
+
   it(
     'releases a dependent only after its parent changes are integrated',
     async () => {
@@ -3975,6 +4025,253 @@ exec "${realGit}" "$@"
     } finally {
       unsubscribe();
       git.restore();
+    }
+  }, 30_000);
+
+  it('passes role-bound skills MCP to automatic worker, reviewer and synthesis RunInputs', async () => {
+    const test = setup({ review: true, worker: 'kiro', artifactChange: true, gitProject: true });
+    let terminal!: () => void;
+    const done = new Promise<void>((resolve) => (terminal = resolve));
+    const unsubscribe = test.orchestrator.subscribe((event) => {
+      if (event.type === 'run' && event.run.sessionId === test.session.id && event.run.status !== 'running') terminal();
+    });
+    try {
+      await test.orchestrator.start(test.session, 'Implement coordinated changes across the UI, storage, and API.');
+      await done;
+      const skillInputs = test.inputs.flatMap((input) => {
+        const server = input.mcpServers?.find((item) => item.name === 'adelic-skills');
+        return server ? [{ input, server }] : [];
+      });
+      expect(skillInputs.map(({ server }) => server.env.ADELIC_SKILL_ROLE).sort()).toEqual([
+        'reviewer',
+        'synthesis',
+        'worker',
+      ]);
+      for (const { input, server } of skillInputs) {
+        expect(input.remote?.executionKind).toBe('isolated-local');
+        expect(server.tools).toBeUndefined(); // Kiro/ACP cannot enforce MCP tool allowlists.
+        const snapshotPath = server.env.ADELIC_SKILLS_SNAPSHOT!;
+        expect(snapshotPath).toMatch(/^\/tmp\/adelic-skills-mcp-[^/]+\/catalog\.json$/);
+        expect(existsSync(snapshotPath)).toBe(false); // Run cleanup occurs after the final provider phase.
+      }
+      expect(test.skillSnapshotsAtProvider.map(({ role }) => role).sort()).toEqual(['reviewer', 'synthesis', 'worker']);
+      expect(test.skillSnapshotsAtProvider.every((snapshot) => snapshot.exists && snapshot.mode === 0o600)).toBe(true);
+      expect(test.skillSnapshotsAtProvider.every(({ path }) => !existsSync(path))).toBe(true);
+      expect(skillInputs.find(({ server }) => server.env.ADELIC_SKILL_ROLE === 'worker')?.input.providerId).toBe(
+        'kiro',
+      );
+    } finally {
+      unsubscribe();
+    }
+  }, 30_000);
+
+  it('propagates real per-phase context components, UTF-8 totals, correlation, and Run-local omissions', async () => {
+    const test = setup({
+      mode: 'deep',
+      review: true,
+      artifactChange: true,
+      gitProject: true,
+      graphContext: 'Graph relation 🧠',
+    });
+    const names = ['Alpha', 'Bravo', 'Charlie', 'Delta', 'Echo', 'Foxtrot', 'Golf', 'Hotel', 'India'];
+    for (const name of names) {
+      test.store.setSkill({
+        id: `skill-${name.toLowerCase()}`,
+        name: `Procedure ${name}`,
+        description: 'Focused instruction',
+        body: `Private unicode instruction ${name} 🧠`,
+        enabled: true,
+      });
+    }
+    const runAndWait = async (request: string) => {
+      let terminal!: () => void;
+      const done = new Promise<void>((resolve) => (terminal = resolve));
+      let targetRunId: string | undefined;
+      const unsubscribe = test.orchestrator.subscribe((event) => {
+        if (event.type === 'run' && event.run.id === targetRunId && event.run.status !== 'running') terminal();
+      });
+      try {
+        const started = await test.orchestrator.start(test.session, request);
+        targetRunId = started.runId;
+        if (test.store.getRun(started.runId)?.status === 'running') await done;
+        return started.runId;
+      } finally {
+        unsubscribe();
+      }
+    };
+    const firstRunId = await runAndWait(
+      `Now change the Architecture Across Multiple Modules in the project. Coordinate API, storage, and UI work using ${names.map((name) => `Procedure ${name}`).join(' ')}. Inspect relevant files, preserve established contracts, and break the changes into independently scoped tasks. Avoid unrelated cleanup and report only work actually executed.`,
+    );
+    expect(test.inputs.length).toBeGreaterThan(0);
+    const selected = [
+      test.inputs.find((input) => input.prompt.startsWith('Produza somente JSON válido')),
+      test.inputs.find(
+        (input) =>
+          input.prompt.startsWith('Você é um executor delegado pela harness.') &&
+          input.prompt.includes('Tarefa: Task\nInspect the project'),
+      ),
+      test.inputs.find((input) => input.prompt.startsWith('Faça revisão independente')),
+      test.inputs.find((input) =>
+        input.prompt.includes('Fatos estruturados de execução (JSON observado pelo orquestrador)'),
+      ),
+    ];
+    expect(selected.map(Boolean), test.inputs.map((input) => input.prompt.slice(0, 100)).join(' | ')).toEqual([
+      true,
+      true,
+      true,
+      true,
+    ]);
+    const phases = selected as RunInput[];
+    expect(new Set(phases).size).toBe(4);
+    const [planner, worker] = phases;
+    expect(planner.prompt).toMatch(/^Produza somente JSON válido/);
+    expect(worker.prompt).toContain('Você é um executor delegado pela harness.');
+    expect(worker.prompt).toContain('Tarefa: Task\nInspect the project');
+    expect(worker.contextComponents).toMatchObject({
+      skills: { characters: expect.any(Number), bytes: expect.any(Number) },
+      graph: { characters: expect.any(Number), bytes: expect.any(Number) },
+      evidence: { characters: expect.any(Number), bytes: expect.any(Number) },
+    });
+    const workerContextRow = (
+      test.store as unknown as {
+        db: { prepare: (sql: string) => { all: (...params: string[]) => { run_id: string; attributes: string }[] } };
+      }
+    ).db
+      .prepare(
+        "SELECT run_id, attributes FROM observability_events WHERE run_id = ? AND name = 'provider.context_input'",
+      )
+      .all(worker.runId)[0];
+    expect(workerContextRow).toBeDefined();
+    expect(workerContextRow!.run_id).toBe(worker.runId);
+    expect(JSON.parse(workerContextRow!.attributes)).toMatchObject({
+      providerId: worker.providerId,
+      taskId: expect.any(String),
+      attemptId: expect.any(String),
+    });
+    for (const input of phases) {
+      expect(input.contextComponents).toMatchObject({
+        skills: { characters: expect.any(Number), bytes: expect.any(Number) },
+        graph: { characters: expect.any(Number), bytes: expect.any(Number) },
+        evidence: { characters: expect.any(Number), bytes: expect.any(Number) },
+      });
+      const db = (
+        test.store as unknown as {
+          db: { prepare: (sql: string) => { all: (...params: string[]) => { run_id: string; attributes: string }[] } };
+        }
+      ).db;
+      const contextRow = db
+        .prepare(
+          "SELECT run_id, attributes FROM observability_events WHERE run_id = ? AND name = 'provider.context_input'",
+        )
+        .all(input.runId)[0];
+      expect(contextRow).toBeDefined();
+      expect(contextRow!.run_id).toBe(input.runId);
+      const contextAttributes = JSON.parse(contextRow!.attributes) as {
+        providerId: string;
+        taskId: string;
+        attemptId: string;
+        contextDiagnostics: string;
+      };
+      expect(contextAttributes).toMatchObject({
+        providerId: input.providerId,
+        taskId: expect.any(String),
+        attemptId: expect.any(String),
+      });
+      const diagnostics = JSON.parse(contextAttributes.contextDiagnostics) as {
+        categories: Record<string, { characters: number; bytes: number }>;
+        observedText: { characters: number; bytes: number };
+      };
+      expect(diagnostics.categories.skills).toEqual(input.contextComponents!.skills);
+      expect(diagnostics.categories.graph).toEqual(input.contextComponents!.graph);
+      expect(diagnostics.categories.evidence).toEqual(input.contextComponents!.evidence);
+      for (const unit of ['characters', 'bytes'] as const) {
+        expect(Object.values(diagnostics.categories).reduce((sum, category) => sum + category[unit], 0)).toBe(
+          diagnostics.observedText[unit],
+        );
+      }
+      expect(JSON.stringify(contextAttributes)).not.toContain('Private unicode instruction');
+    }
+    const reviewer = phases.find((input) => input.prompt.startsWith('Faça revisão independente'))!;
+    const synthesis = phases.find((input) =>
+      input.prompt.includes('Fatos estruturados de execução (JSON observado pelo orquestrador)'),
+    )!;
+    expect(reviewer.contextComponents!.evidence.characters).toBeGreaterThan(0);
+    expect(synthesis.contextComponents!.evidence.characters).toBeGreaterThan(0);
+    expect(phases.some((input) => (input.contextComponents?.graph.characters ?? 0) > 0)).toBe(true);
+    expect(phases.some((input) => (input.contextComponents?.skills.characters ?? 0) > 0)).toBe(true);
+    const omission = test.store
+      .listEvents(test.session.id)
+      .find((event) => event.runId === firstRunId && event.status === 'skill_context_omitted');
+    expect(omission?.contextOmittedSkills).toBeGreaterThan(0);
+    await runAndWait('Answer a short unrelated question.');
+    expect(test.store.listEvents(test.session.id).some((event) => event.id === omission?.id)).toBe(true);
+  }, 30_000);
+
+  it('removes a private skills snapshot when cancellation interrupts a queued worker', async () => {
+    const test = setup({ mode: 'deep', artifactChange: true });
+    const before = new Set(readdirSync('/tmp').filter((name) => name.startsWith('adelic-skills-mcp-')));
+    let releasePlanner!: () => void;
+    let plannerEntered!: () => void;
+    const plannerGate = new Promise<void>((resolve) => (releasePlanner = resolve));
+    const plannerStarted = new Promise<void>((resolve) => (plannerEntered = resolve));
+    const originalRun = test.providers.run.bind(test.providers);
+    test.providers.run = async (input, emit, signal) => {
+      if (input.prompt.includes('Produza somente JSON válido')) {
+        plannerEntered();
+        await plannerGate;
+      }
+      return originalRun(input, emit, signal);
+    };
+    let terminal!: () => void;
+    const done = new Promise<void>((resolve) => (terminal = resolve));
+    let runId: string | undefined;
+    const unsubscribe = test.orchestrator.subscribe((event) => {
+      if (event.type === 'run' && event.run.id === runId && event.run.status !== 'running') terminal();
+    });
+    const writes = test.orchestrator as unknown as {
+      withProjectWrite<T>(projectId: string, work: () => Promise<T>): Promise<T>;
+    };
+    let releaseOwner!: () => void;
+    let ownerEntered!: () => void;
+    const ownerGate = new Promise<void>((resolve) => (releaseOwner = resolve));
+    const ownerStarted = new Promise<void>((resolve) => (ownerEntered = resolve));
+    let owner: Promise<void> | undefined;
+    try {
+      const started = await test.orchestrator.start(
+        test.session,
+        'Now change the Architecture Across Multiple Modules in the project.',
+      );
+      runId = started.runId;
+      await plannerStarted;
+      owner = writes.withProjectWrite('project', async () => {
+        ownerEntered();
+        await ownerGate;
+      });
+      await ownerStarted;
+      releasePlanner();
+      let snapshotDirectories: string[] = [];
+      for (let attempt = 0; attempt < 100; attempt++) {
+        snapshotDirectories = readdirSync('/tmp')
+          .filter((name) => name.startsWith('adelic-skills-mcp-') && !before.has(name))
+          .filter((name) => existsSync(join('/tmp', name, 'catalog.json')));
+        if (snapshotDirectories.length) break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(snapshotDirectories).toHaveLength(1);
+      expect(test.inputs.some((input) => input.prompt.includes('Você é um executor delegado'))).toBe(false);
+      await test.orchestrator.cancel(test.session.id);
+      releaseOwner();
+      if (test.store.getRun(started.runId)?.status === 'running') await done;
+      await owner;
+      expect(test.store.getRun(started.runId)).toMatchObject({ status: 'cancelled', termination: 'user_cancelled' });
+      expect(readdirSync('/tmp').filter((name) => name.startsWith('adelic-skills-mcp-') && !before.has(name))).toEqual(
+        [],
+      );
+      expect(test.inputs.some((input) => input.prompt.includes('Você é um executor delegado'))).toBe(false);
+    } finally {
+      releasePlanner();
+      releaseOwner();
+      unsubscribe();
     }
   }, 30_000);
 });

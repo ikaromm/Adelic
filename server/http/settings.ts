@@ -52,12 +52,16 @@ export function settingsRoutes({ store, automations }: BackendContext) {
     res.json({ enabled: true, ...(await checkForUpdate({ force })) });
   });
   app.patch('/api/skills/:id', (req, res) => {
-    const skill = store.getSkill(req.params.id);
-    if (!skill) return error(res, 404, 'settings.skillNotFound');
+    const metadata = store.listSkills().find((skill) => skill.id === req.params.id);
+    if (!metadata) return error(res, 404, 'settings.skillNotFound');
     const parsed = parseBody(SkillPatchSchema, req.body, 'remote.enabledBoolean', req.locale);
     if (!parsed.ok) return error(res, 400, parsed.message);
-    skill.enabled = parsed.data.enabled;
-    res.json(store.setSkill(skill));
+    // Disabling is catalog administration and must work even if a local body is absent or
+    // invalid. Enabling still validates that the complete instructions can be activated.
+    if (parsed.data.enabled && !store.getSkill(metadata.id)) return error(res, 400, 'settings.skillBodyInvalid');
+    const updated = store.setSkillEnabled(metadata.id, parsed.data.enabled);
+    if (!updated) return error(res, 404, 'settings.skillNotFound');
+    res.json(updated);
   });
   return app;
 }

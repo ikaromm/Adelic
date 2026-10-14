@@ -395,6 +395,33 @@ export interface RunArtifactsSnapshot {
   truncated?: boolean;
   capturedAt?: string;
 }
+/** Character/UTF-8 byte counts of Adelic-owned textual input fields. Null means not observable. */
+export interface ContextPartMeasurement {
+  characters: number | null;
+  bytes: number | null;
+}
+/** Snapshot of the RunInput handed to a provider adapter; not a full session/token accounting. */
+export interface ProviderContextDiagnostics {
+  scope: 'adelic_run_input';
+  unit: 'characters_and_utf8_bytes';
+  tokenizer: 'unavailable';
+  categories: {
+    currentRequest: ContextPartMeasurement;
+    history: ContextPartMeasurement;
+    summary: ContextPartMeasurement;
+    memory: ContextPartMeasurement;
+    skills: ContextPartMeasurement;
+    graph: ContextPartMeasurement;
+    evidence: ContextPartMeasurement;
+    attachments: ContextPartMeasurement;
+  };
+  /** Runtime-added instructions, tool output and provider-native context are outside this scope. */
+  runtimeAddedContext: 'unknown';
+  /** Sum of raw observed RunInput textual fields; excludes runtime context. */
+  observedText: ContextPartMeasurement;
+  /** Exact Adelic-assembled text handed as the text prompt by this adapter. */
+  assembledPrompt: ContextPartMeasurement;
+}
 /** Provider-reported usage for one actual invocation/attempt; unknown values stay null. */
 export interface ProviderAttemptUsage {
   attemptId: string;
@@ -660,6 +687,8 @@ export interface RunEvent {
   toolName?: string;
   toolCallId?: string;
   status?: string;
+  /** Number of skills omitted for this exact execution/phase due to context limits. */
+  contextOmittedSkills?: number;
   /** Retry events: attempt number about to start, total attempts, wait and the error that caused it. */
   attempt?: number;
   of?: number;
@@ -774,12 +803,24 @@ export interface Integration {
   status: 'ready' | 'missing' | 'error' | 'planned';
   detail: string;
 }
+/** Full skill content, returned only by explicit load. */
 export interface Skill {
   id: string;
   name: string;
   description: string;
   body: string;
   enabled: boolean;
+  /** Optional relative reference paths; reference contents are never included in the catalog. */
+  references?: string[];
+  /** Optional task roles that may activate this skill; omitted means any matching role. */
+  roles?: AgentRole[];
+}
+/** Metadata-only catalog entry; the body is not loaded or included. */
+export type SkillCatalogEntry = Omit<Skill, 'body'>;
+export interface SkillCatalogDiagnostic {
+  code: 'catalog_limit' | 'invalid_manifest' | 'body_limit' | 'reference_limit' | 'unreadable' | 'activation_limit';
+  skillId?: string;
+  message: string;
 }
 export interface Bootstrap {
   projects: Project[];
@@ -789,7 +830,9 @@ export interface Bootstrap {
   providers: ProviderInfo[];
   settings: Settings;
   integrations: Integration[];
-  skills: Skill[];
+  skills: SkillCatalogEntry[];
+  /** Explicit catalog/body limit or parse diagnostics; absent on older compatible servers. */
+  skillDiagnostics?: SkillCatalogDiagnostic[];
   runs: Run[];
 }
 export interface SessionDetail {
@@ -880,6 +923,14 @@ export interface RunInput {
   /** Remaining wall-clock time from the original journey deadline; never reset per phase. */
   budget?: { deadlineAt: string; remainingMs: number; finalizationReserveMs: number };
   memoryContext?: string;
+  /** Numeric-only measurements of Adelic-composed subparts already contained in prompt. */
+  contextComponents?: {
+    skills: ContextPartMeasurement;
+    graph: ContextPartMeasurement;
+    evidence: ContextPartMeasurement;
+  };
+  /** Run-local skill omissions computed while composing this exact provider input. */
+  contextOmittedSkills?: number;
   /**
    * Latest conversation summary (docs/specs/compaction.md). It replaces the messages it
    * covers: `history` then holds only the messages after it.

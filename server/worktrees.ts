@@ -12,7 +12,7 @@
 //   stages, resets, stashes or checks out the user's main working tree.
 // - Hooks of every event, filters (clean/smudge/process) and custom merge drivers never run.
 import { randomUUID } from 'node:crypto';
-import { lstat, mkdir, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readFile, readlink, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import type { FileChange, Project, Session, SessionWorktree, WorktreeStatus } from '../shared/contracts.js';
 import type { Locale, Vars } from '../shared/i18n.js';
@@ -1296,6 +1296,74 @@ export async function verifyExecutorWorktreeCandidate(
   }
 }
 
+/** Git's reverse apply check can warn and succeed when only a mode differs. Confirm the
+ * filesystem entry against the expected post-delta tree before treating a section as applied.
+ * lstat is deliberate: symlinks must never be followed while checking their type/mode. */
+async function matchesExpectedTreeEntry(repo: Repo, tree: string, path: string, budget: WorktreeBudget) {
+  const entries = nulSplit(
+    await git(repo.top, ['--literal-pathspecs', 'ls-tree', '-z', '--full-tree', tree, '--', path], {
+      repo,
+      ...budgetGit(budget),
+    }),
+  );
+  const entry = entries.find((line) => {
+    const tab = line.indexOf('\t');
+    return tab >= 0 && line.slice(tab + 1) === path;
+  });
+  const filesystemPath = join(repo.top, path);
+  const actual = await lstat(filesystemPath).catch((error) => {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT' || (error as NodeJS.ErrnoException).code === 'ENOTDIR')
+      return undefined;
+    throw error;
+  });
+  if (!entry) return actual === undefined;
+  if (!actual) return false;
+  const tab = entry.indexOf('\t');
+  if (tab < 0) return false;
+  const [mode, type, oid] = entry.slice(0, tab).split(' ');
+  if (type !== 'blob' || !oid) return false;
+  const expected = await git(repo.top, ['cat-file', 'blob', oid], { repo, ...budgetGit(budget) });
+  if (mode === '120000') {
+    if (!actual.isSymbolicLink()) return false;
+    const target = await readlink(filesystemPath, { encoding: 'buffer' });
+    return Buffer.compare(target, expected) === 0;
+  }
+  if (!actual.isFile() || actual.isSymbolicLink()) return false;
+  const executable = (actual.mode & 0o100) !== 0;
+  if (mode !== (executable ? '100755' : '100644')) return false;
+  const contents = await readFile(filesystemPath);
+  return Buffer.compare(contents, expected) === 0;
+}
+
+/** Compare only lstat type/mode, without following symlinks or normalizing file contents. */
+async function matchesExpectedTreeMode(repo: Repo, tree: string, path: string, budget: WorktreeBudget) {
+  const entries = nulSplit(
+    await git(repo.top, ['--literal-pathspecs', 'ls-tree', '-z', '--full-tree', tree, '--', path], {
+      repo,
+      ...budgetGit(budget),
+    }),
+  );
+  const entry = entries.find((line) => {
+    const tab = line.indexOf(String.fromCharCode(9));
+    return tab >= 0 && line.slice(tab + 1) === path;
+  });
+  const filesystemPath = join(repo.top, path);
+  const actual = await lstat(filesystemPath).catch((error) => {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT' || (error as NodeJS.ErrnoException).code === 'ENOTDIR')
+      return undefined;
+    throw error;
+  });
+  if (!entry) return actual === undefined;
+  if (!actual) return false;
+  const tab = entry.indexOf(String.fromCharCode(9));
+  if (tab < 0) return false;
+  const [mode, type] = entry.slice(0, tab).split(' ');
+  if (type !== 'blob') return false;
+  if (mode === '120000') return actual.isSymbolicLink();
+  if (!actual.isFile() || actual.isSymbolicLink()) return false;
+  return mode === ((actual.mode & 0o100) !== 0 ? '100755' : '100644');
+}
+
 /** Integrates only the executor's delta from its creation snapshot onto the current main tree. */
 export async function integrateExecutorWorktree(
   project: Project,
@@ -1328,59 +1396,93 @@ export async function integrateExecutorWorktree(
     deadlineAt: budgetDeadlineAt(budget),
     signal: budget.signal,
   });
-  const patch = await git(
-    opened.tree.top,
-    ['diff-tree', '--no-commit-id', '-p', '-r', '--binary', '--no-renames', baseline, after],
-    {
-      repo: opened.tree,
-      config: await hardened(opened.tree, budget),
-      ...budgetGit(budget),
-    },
-  );
-  if (!patch.length) return { changed: false, files: [] as string[] };
   const changes = await changedFiles(opened.tree, baseline, after, {
     deadlineAt: budgetDeadlineAt(budget),
     signal: budget.signal,
   });
+  if (!changes.length) return { changed: false, files: [] as string[] };
   const names = changes.map((file) => file.path);
   const config = await hardened(opened.main, budget);
-  // First recognize an exact prior application. This must precede the added-file collision
-  // guard: an added path that now contains the patch's exact contents is recovery, not a clash.
-  // Reverse --check validates the whole patch (including created/deleted files) without writing.
-  const alreadyApplied = await git(opened.main.top, ['apply', '--binary', '--reverse', '--check', '-'], {
-    repo: opened.main,
-    input: patch,
-    config,
-    ...budgetGit(budget),
-  }).then(
-    () => true,
-    (error) => {
-      // A failed reverse check (exit 1) means the delta is not fully present. Timeouts,
-      // cancellation and Git failures are not evidence of absence: propagate them instead of
-      // starting the collision check/apply path after an inconclusive probe.
-      if ((error as { code?: unknown }).code === 1) return false;
-      throw error;
-    },
-  );
-  if (alreadyApplied) return { changed: false, alreadyApplied: true, files: names };
+  // Collect complete per-path deltas, including every section Git emits for type changes.
+  // Validate the entire patch once, then apply it in one Git operation.
+  const pending: Buffer[] = [];
+  const alreadyAppliedPaths = new Set<string>();
+  for (const file of changes) {
+    const delta = await git(
+      opened.tree.top,
+      [
+        '--literal-pathspecs',
+        'diff-tree',
+        '--no-commit-id',
+        '-p',
+        '-r',
+        '--binary',
+        '--no-renames',
+        baseline,
+        after,
+        '--',
+        file.path,
+      ],
+      { repo: opened.tree, config: await hardened(opened.tree, budget), ...budgetGit(budget) },
+    );
+    if (!delta.length) throw new Error(`Delta ausente para o caminho literal: ${file.path}`);
+    const isModeOnly = file.additions === 0 && file.deletions === 0;
+    const alreadyApplied = await git(opened.main.top, ['apply', '--binary', '--reverse', '--check', '-'], {
+      repo: opened.main,
+      input: delta,
+      config,
+      ...budgetGit(budget),
+    }).then(
+      () => true,
+      (error) => {
+        // Exit 1 means this complete path delta is not present. Timeout, cancellation and other
+        // failures are inconclusive and must not be converted into an apply attempt.
+        if ((error as { code?: unknown }).code === 1) return false;
+        throw error;
+      },
+    );
+    if (alreadyApplied) {
+      // Reverse-check alone may warn success for a pending mode change. For textual deltas only
+      // type/mode must match, so a merged distant edit is preserved; mode-only deltas additionally
+      // require exact post-image bytes before they may be omitted.
+      const entryMatches = isModeOnly
+        ? await matchesExpectedTreeEntry(opened.main, after, file.path, budget)
+        : await matchesExpectedTreeMode(opened.main, after, file.path, budget);
+      if (entryMatches) {
+        alreadyAppliedPaths.add(file.path);
+        continue;
+      }
+    }
+    // Type transitions remain ordinary complete Git patches; never materialize from a tree or
+    // use restore, which can apply checkout conversions and cannot make mixed writes atomic.
+    pending.push(delta);
+  }
+  if (!pending.length) return { changed: false, alreadyApplied: true, files: names };
+  const remainingPatch = Buffer.concat(pending);
 
   // Never let an added task file replace a file that appeared in the main checkout after capture
-  // (notably an ignored secret, which Git's ordinary status does not report). A differing file
-  // cannot pass reverse --check above, so it remains a real collision.
+  // (notably an ignored secret, which Git's ordinary status does not report). Exact prior
+  // applications have already been excluded; differing files remain real collisions.
   const collisions: string[] = [];
   for (const file of changes)
-    if (file.status === 'added' && (await exists(join(opened.main.top, file.path)))) collisions.push(file.path);
+    if (
+      file.status === 'added' &&
+      !alreadyAppliedPaths.has(file.path) &&
+      (await exists(join(opened.main.top, file.path)))
+    )
+      collisions.push(file.path);
   if (collisions.length) throw fail('worktrees.ignoredFiles', 409, collisions);
 
+  // A single complete-patch check prevents ordinary conflicts from partially writing earlier paths.
   await git(opened.main.top, ['apply', '--binary', '--check', '-'], {
     repo: opened.main,
-    input: patch,
+    input: remainingPatch,
     config,
     ...budgetGit(budget),
   });
   await git(opened.main.top, ['apply', '--binary', '-'], {
     repo: opened.main,
-    input: patch,
+    input: remainingPatch,
     config,
     ...budgetGit(budget),
   });

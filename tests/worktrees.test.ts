@@ -9,6 +9,7 @@ import {
   realpathSync,
   rmSync,
   writeFileSync,
+  symlinkSync,
 } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
@@ -1212,6 +1213,123 @@ exec "${realGit}" "$@"
   );
 
   it(
+    'integrates only unapplied whole-file deltas from a mixed 13-file patch',
+    async () => {
+      const repo = makeRepo();
+      writeFileSync(join(repo, 'mode.sh'), '#!/bin/sh\\necho base\\n');
+      writeFileSync(join(repo, 'delete-me.txt'), 'remove me\\n');
+      gitIn(repo, 'add', '-A');
+      gitIn(repo, ...ID, 'commit', '-qm', 'integration fixtures');
+      const t = setup(repo);
+      const project = t.store.getProject('p')!;
+      const worktree = await createExecutorWorktree(project, { id: 'mixed-thirteen-files', title: 'Mixed' }, t.dataDir);
+
+      chmodSync(join(worktree.path, 'mode.sh'), 0o755);
+      writeFileSync(join(worktree.path, 'mode.sh'), '#!/bin/sh\\necho task\\n');
+      rmSync(join(worktree.path, 'delete-me.txt'));
+      writeFileSync(join(worktree.path, 'already-applied.txt'), 'exact task output\\n');
+      for (let i = 0; i < 10; i++) writeFileSync(join(worktree.path, `pending-${i}.txt`), `pending ${i}\\n`);
+
+      // Simulate a concurrent integration that has already applied exactly this one file delta.
+      writeFileSync(join(repo, 'already-applied.txt'), 'exact task output\\n');
+      const applied = await integrateExecutorWorktree(project, worktree);
+      expect(applied).toMatchObject({
+        changed: true,
+        alreadyApplied: false,
+        files: expect.arrayContaining(['already-applied.txt', 'delete-me.txt', 'mode.sh']),
+      });
+      expect(applied.files).toHaveLength(13);
+      expect(readFileSync(join(repo, 'already-applied.txt'), 'utf8')).toBe('exact task output\\n');
+      expect(readFileSync(join(repo, 'mode.sh'), 'utf8')).toBe('#!/bin/sh\\necho task\\n');
+      expect((await import('node:fs')).statSync(join(repo, 'mode.sh')).mode & 0o111).toBe(0o111);
+      expect(existsSync(join(repo, 'delete-me.txt'))).toBe(false);
+      for (let i = 0; i < 10; i++) expect(readFileSync(join(repo, `pending-${i}.txt`), 'utf8')).toBe(`pending ${i}\\n`);
+      expect(await integrateExecutorWorktree(project, worktree)).toMatchObject({
+        changed: false,
+        alreadyApplied: true,
+        files: expect.arrayContaining(['already-applied.txt', 'delete-me.txt', 'mode.sh']),
+      });
+      await removeWorktree(project, worktree, t.dataDir);
+    },
+    DIRTY_INTEGRATION_TIMEOUT_MS,
+  );
+
+  it('does not treat a partially applied hunk set as an already-applied file delta', async () => {
+    const repo = makeRepo();
+    const initialLines = Array.from({ length: 30 }, (_, index) => `line ${index + 1}\n`);
+    writeFileSync(join(repo, 'multi-hunk.txt'), initialLines.join(''));
+    gitIn(repo, 'add', 'multi-hunk.txt');
+    gitIn(repo, ...ID, 'commit', '-qm', 'multi-hunk fixture');
+    const t = setup(repo);
+    const project = t.store.getProject('p')!;
+    const worktree = await createExecutorWorktree(project, { id: 'partial-hunks', title: 'Partial hunks' }, t.dataDir);
+    const taskLines = [...initialLines];
+    taskLines[1] = 'task line 2\n';
+    taskLines[28] = 'task line 29\n';
+    writeFileSync(join(worktree.path, 'multi-hunk.txt'), taskLines.join(''));
+    const partiallyAppliedLines = [...initialLines];
+    partiallyAppliedLines[1] = 'task line 2\n';
+    writeFileSync(join(repo, 'multi-hunk.txt'), partiallyAppliedLines.join(''));
+
+    await expect(integrateExecutorWorktree(project, worktree)).rejects.toThrow();
+    expect(readFileSync(join(repo, 'multi-hunk.txt'), 'utf8')).toBe(partiallyAppliedLines.join(''));
+    expect(readFileSync(join(worktree.path, 'multi-hunk.txt'), 'utf8')).toBe(taskLines.join(''));
+    await removeWorktree(project, worktree, t.dataDir);
+  });
+
+  it('keeps a real conflict from partially writing otherwise-applicable file deltas', async () => {
+    const repo = makeRepo();
+    const t = setup(repo);
+    const project = t.store.getProject('p')!;
+    const worktree = await createExecutorWorktree(
+      project,
+      { id: 'atomic-integration-conflict', title: 'Conflict' },
+      t.dataDir,
+    );
+    writeFileSync(join(worktree.path, 'aaa-pending.txt'), 'must not be partially written\\n');
+    writeFileSync(join(worktree.path, 'README.md'), 'worker conflict\\n');
+    writeFileSync(join(repo, 'README.md'), 'concurrent conflict\\n');
+    await expect(integrateExecutorWorktree(project, worktree)).rejects.toThrow();
+    expect(existsSync(join(repo, 'aaa-pending.txt'))).toBe(false);
+    expect(readFileSync(join(repo, 'README.md'), 'utf8')).toBe('concurrent conflict\\n');
+    expect(readFileSync(join(worktree.path, 'README.md'), 'utf8')).toBe('worker conflict\\n');
+    await removeWorktree(project, worktree, t.dataDir);
+  });
+
+  it('preserves arbitrary non-UTF-8 text bytes while splitting and applying file deltas', async () => {
+    const repo = makeRepo();
+    const original = Buffer.from([0x6f, 0x6c, 0x64, 0xff, 0x0a]);
+    writeFileSync(join(repo, 'bytes.txt'), original);
+    gitIn(repo, 'add', 'bytes.txt');
+    gitIn(repo, ...ID, 'commit', '-qm', 'non-UTF-8 text fixture');
+    const t = setup(repo);
+    const project = t.store.getProject('p')!;
+    const worktree = await createExecutorWorktree(project, { id: 'non-utf8-delta', title: 'Bytes' }, t.dataDir);
+    const expected = Buffer.from([0x6e, 0x65, 0x77, 0xff, 0x0a]);
+    writeFileSync(join(worktree.path, 'bytes.txt'), expected);
+    expect(await integrateExecutorWorktree(project, worktree)).toMatchObject({
+      changed: true,
+      files: ['bytes.txt'],
+    });
+    expect(readFileSync(join(repo, 'bytes.txt'))).toEqual(expected);
+    await removeWorktree(project, worktree, t.dataDir);
+  });
+
+  it('treats bracketed added paths literally when guarding collisions', async () => {
+    const repo = makeRepo();
+    const t = setup(repo);
+    const project = t.store.getProject('p')!;
+    const worktree = await createExecutorWorktree(project, { id: 'glob-path-collision', title: 'Glob' }, t.dataDir);
+    writeFileSync(join(worktree.path, '[id].txt'), 'expected exact path\\n');
+    writeFileSync(join(repo, '[id].txt'), 'preserve literal collision\\n');
+    // A glob-like include for [id].txt must not obtain a false empty/successful reverse check.
+    await expect(integrateExecutorWorktree(project, worktree)).rejects.toThrow();
+    expect(readFileSync(join(repo, '[id].txt'), 'utf8')).toBe('preserve literal collision\\n');
+    expect(existsSync(join(worktree.path, '[id].txt'))).toBe(true);
+    await removeWorktree(project, worktree, t.dataDir);
+  });
+
+  it(
     'recognizes exact reapplication of a created file but blocks a different-content collision',
     async () => {
       const repo = makeRepo();
@@ -2097,5 +2215,139 @@ describe('worktree per conversation', () => {
     expect(reloadedStore.getSession(session.id)?.worktree).toBeUndefined();
     expect(() => gitIn(repo, 'rev-parse', '--verify', 'refs/heads/' + worktree.branch)).toThrow();
     expect(() => gitIn(repo, 'rev-parse', '--verify', worktree.ownershipProofRef!)).toThrow();
+  });
+
+  it('reapplies pending mode and type deltas when reverse-check only warns, then recognizes exact reapplication', async () => {
+    const repo = makeRepo();
+    writeFileSync(join(repo, 'tool.sh'), '#!/bin/sh\\necho ok\\n');
+    chmodSync(join(repo, 'tool.sh'), 0o755);
+    writeFileSync(join(repo, 'link target.txt'), 'original\\n');
+    gitIn(repo, 'add', '-A');
+    gitIn(repo, ...ID, 'commit', '-qm', 'mode and type fixtures');
+
+    const t = setup(repo);
+    const worktree = await createExecutorWorktree(
+      t.store.getProject('p')!,
+      { id: 'mode-reapply', title: 'Mode reapply' },
+      t.dataDir,
+    );
+    chmodSync(join(worktree.path, 'README.md'), 0o755);
+    chmodSync(join(worktree.path, 'tool.sh'), 0o644);
+    writeFileSync(join(worktree.path, 'link target.txt'), 'updated\\n');
+
+    expect(await integrateExecutorWorktree(t.store.getProject('p')!, worktree)).toMatchObject({ changed: true });
+    expect(readFileSync(join(repo, 'link target.txt'), 'utf8')).toBe('updated\\n');
+
+    // Leave post-delta bytes in place but revert modes in both directions. Reverse --check
+    // may succeed with a warning; expected tree modes must keep both file deltas pending.
+    chmodSync(join(repo, 'README.md'), 0o644);
+    chmodSync(join(repo, 'tool.sh'), 0o755);
+
+    expect(await integrateExecutorWorktree(t.store.getProject('p')!, worktree)).toMatchObject({ changed: true });
+    expect((await import('node:fs')).lstatSync(join(repo, 'README.md')).mode & 0o100).not.toBe(0);
+    expect((await import('node:fs')).lstatSync(join(repo, 'tool.sh')).mode & 0o100).toBe(0);
+    expect(readFileSync(join(repo, 'README.md'))).toEqual(readFileSync(join(worktree.path, 'README.md')));
+    expect(readFileSync(join(repo, 'tool.sh'))).toEqual(readFileSync(join(worktree.path, 'tool.sh')));
+    expect(readFileSync(join(repo, 'link target.txt'))).toEqual(readFileSync(join(worktree.path, 'link target.txt')));
+
+    expect(await integrateExecutorWorktree(t.store.getProject('p')!, worktree)).toMatchObject({
+      changed: false,
+      alreadyApplied: true,
+    });
+
+    // The bytes match through the link, but the expected Git entry is a regular file.
+    writeFileSync(join(repo, 'type target.txt'), readFileSync(join(worktree.path, 'link target.txt')));
+    rmSync(join(repo, 'link target.txt'));
+    symlinkSync('type target.txt', join(repo, 'link target.txt'));
+    let typeMismatch: unknown;
+    try {
+      await integrateExecutorWorktree(t.store.getProject('p')!, worktree);
+    } catch (error) {
+      typeMismatch = error;
+    }
+    expect(typeMismatch).toBeInstanceOf(Error);
+    expect((await import('node:fs')).lstatSync(join(repo, 'link target.txt')).isSymbolicLink()).toBe(true);
+  });
+
+  it('applies and reapplies complete regular-file/symlink deltas in both directions', async () => {
+    const regularRepo = makeRepo();
+    writeFileSync(join(regularRepo, 'convert.txt'), 'regular baseline\\n');
+    gitIn(regularRepo, 'add', 'convert.txt');
+    gitIn(regularRepo, ...ID, 'commit', '-qm', 'regular type fixture');
+    const regularSetup = setup(regularRepo);
+    const regularWorktree = await createExecutorWorktree(
+      regularSetup.store.getProject('p')!,
+      { id: 'regular-to-link', title: 'Regular to link' },
+      regularSetup.dataDir,
+    );
+    rmSync(join(regularWorktree.path, 'convert.txt'));
+    symlinkSync('symlink target\\xff', join(regularWorktree.path, 'convert.txt'));
+    expect(await integrateExecutorWorktree(regularSetup.store.getProject('p')!, regularWorktree)).toMatchObject({
+      changed: true,
+      files: ['convert.txt'],
+    });
+    expect((await import('node:fs')).lstatSync(join(regularRepo, 'convert.txt')).isSymbolicLink()).toBe(true);
+    expect((await import('node:fs')).readlinkSync(join(regularRepo, 'convert.txt'), { encoding: 'buffer' })).toEqual(
+      Buffer.from('symlink target\\xff'),
+    );
+    expect(await integrateExecutorWorktree(regularSetup.store.getProject('p')!, regularWorktree)).toMatchObject({
+      changed: false,
+      alreadyApplied: true,
+      files: ['convert.txt'],
+    });
+    await removeWorktree(regularSetup.store.getProject('p')!, regularWorktree, regularSetup.dataDir);
+
+    const linkRepo = makeRepo();
+    symlinkSync('original target\\xff', join(linkRepo, 'convert.txt'));
+    gitIn(linkRepo, 'add', 'convert.txt');
+    gitIn(linkRepo, ...ID, 'commit', '-qm', 'symlink type fixture');
+    const linkSetup = setup(linkRepo);
+    const linkWorktree = await createExecutorWorktree(
+      linkSetup.store.getProject('p')!,
+      { id: 'link-to-regular', title: 'Link to regular' },
+      linkSetup.dataDir,
+    );
+    rmSync(join(linkWorktree.path, 'convert.txt'));
+    writeFileSync(join(linkWorktree.path, 'convert.txt'), Buffer.from([0x72, 0x65, 0x67, 0xff, 0x0a]));
+    expect(await integrateExecutorWorktree(linkSetup.store.getProject('p')!, linkWorktree)).toMatchObject({
+      changed: true,
+      files: ['convert.txt'],
+    });
+    expect((await import('node:fs')).lstatSync(join(linkRepo, 'convert.txt')).isFile()).toBe(true);
+    expect(readFileSync(join(linkRepo, 'convert.txt'))).toEqual(Buffer.from([0x72, 0x65, 0x67, 0xff, 0x0a]));
+    expect(await integrateExecutorWorktree(linkSetup.store.getProject('p')!, linkWorktree)).toMatchObject({
+      changed: false,
+      alreadyApplied: true,
+      files: ['convert.txt'],
+    });
+    await removeWorktree(linkSetup.store.getProject('p')!, linkWorktree, linkSetup.dataDir);
+  });
+
+  it('recognizes a merged task patch on retry while preserving a distant concurrent edit', async () => {
+    const repo = makeRepo();
+    const lines = Array.from({ length: 30 }, (_, index) => `linha ${index + 1}`);
+    writeFileSync(join(repo, 'README.md'), `${lines.join('\n')}\n`);
+    gitIn(repo, 'add', 'README.md');
+    gitIn(repo, ...ID, 'commit', '-qm', 'distant reapply fixture');
+
+    const t = setup(repo);
+    const project = t.store.getProject('p')!;
+    const worktree = await createExecutorWorktree(
+      project,
+      { id: 'distant-reapply', title: 'Distant reapply' },
+      t.dataDir,
+    );
+    lines[14] = 'alteração da tarefa';
+    writeFileSync(join(worktree.path, 'README.md'), `${lines.join('\n')}\n`);
+
+    expect(await integrateExecutorWorktree(project, worktree)).toMatchObject({ changed: true });
+    lines[0] = 'edição distante';
+    writeFileSync(join(repo, 'README.md'), `${lines.join('\n')}\n`);
+
+    expect(await integrateExecutorWorktree(project, worktree)).toMatchObject({
+      changed: false,
+      alreadyApplied: true,
+    });
+    expect(readFileSync(join(repo, 'README.md'), 'utf8')).toBe(`${lines.join('\n')}\n`);
   });
 });

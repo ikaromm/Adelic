@@ -59,11 +59,27 @@ function setup(options: {
   reviewer?: 'codex' | 'kiro' | 'claude';
   mode?: 'auto' | 'deep' | 'fast';
   review?: boolean;
+  reviewCycle?:
+    | 'fixed'
+    | 'persistent'
+    | 'invalid'
+    | 'incomplete'
+    | 'cancel'
+    | 'cancel-second'
+    | 'invalid-second'
+    | 'failure-second'
+    | 'timeout-second'
+    | 'approved-second-change'
+    | 'finding-second-change';
   reviewStaticOnly?: boolean;
   reviewerFailure?: boolean;
+  repairFailure?: boolean;
   longReviewerOutput?: boolean;
+  longWorkerOutput?: boolean;
   slowReviewer?: boolean;
   reviewerCleanupDelayMs?: number;
+  reviewerDelayMs?: number;
+  onRepairStarted?: () => void;
   workerFailure?: boolean;
   toolEvent?: boolean;
   artifactChange?: boolean;
@@ -91,7 +107,9 @@ function setup(options: {
   slowWorktreeCreation?: boolean;
   retainBranchCheckout?: boolean;
   checkBeforeReview?: boolean;
+  realCheckRunner?: boolean;
   checkFails?: boolean;
+  checkStatuses?: ('failed' | 'passed')[];
 }) {
   const directory = mkdtempSync(join(tmpdir(), 'adelic-auto-coordination-'));
   const projectRoot = join(directory, 'project-root');
@@ -144,6 +162,7 @@ function setup(options: {
   const inputs: RunInput[] = [];
   let calls = 0;
   let activeReviewerCalls = 0;
+  let reviewPasses = 0;
   let inFlight = 0;
   let maxInFlight = 0;
   let isolatedArrivals = 0;
@@ -332,6 +351,64 @@ function setup(options: {
       }
       if (input.prompt.includes('Faça revisão independente') && options.reviewerFailure)
         throw new Error('fixture reviewer failure');
+      if (input.prompt.includes('Faça revisão independente') && options.reviewerDelayMs)
+        await new Promise((resolve) => setTimeout(resolve, options.reviewerDelayMs));
+      if (input.prompt.includes('Corrigir achados objetivos') && options.repairFailure)
+        throw new Error('fixture repair failure');
+      if (input.prompt.includes('Corrigir achados objetivos') && options.reviewCycle === 'cancel') {
+        options.onRepairStarted?.();
+        await new Promise<void>((_resolve, reject) => {
+          if (signal.aborted) reject(new Error('repair cancelled'));
+          else signal.addEventListener('abort', () => reject(new Error('repair cancelled')), { once: true });
+        });
+      }
+      if (input.prompt.includes('Faça revisão independente') && options.reviewCycle) {
+        reviewPasses++;
+        if (options.reviewCycle === 'cancel-second' && reviewPasses > 1) {
+          await new Promise<void>((_resolve, reject) => {
+            if (signal.aborted) reject(new Error('second review cancelled'));
+            else signal.addEventListener('abort', () => reject(new Error('second review cancelled')), { once: true });
+          });
+        }
+        if (options.reviewCycle === 'timeout-second' && reviewPasses > 1) {
+          await new Promise<void>((_resolve, reject) => {
+            const timeout = setTimeout(() => reject(new Error('fixture second reviewer timed out')), 20_000);
+            signal.addEventListener(
+              'abort',
+              () => {
+                clearTimeout(timeout);
+                reject(new Error('fixture second reviewer aborted by run timeout'));
+              },
+              { once: true },
+            );
+          });
+        }
+        if (options.reviewCycle === 'failure-second' && reviewPasses > 1)
+          throw new Error('fixture second reviewer failure');
+        if (
+          (options.reviewCycle === 'approved-second-change' || options.reviewCycle === 'finding-second-change') &&
+          reviewPasses > 1
+        ) {
+          writeFileSync(join(projectRoot, 'src/implemented.ts'), 'changed during review\\n');
+          if (options.reviewCycle === 'finding-second-change')
+            return {
+              text: '{"status":"findings","findings":[{"id":"f2","severity":"P1","title":"Unconfirmed second defect","file":"src/implemented.ts","description":"Changed during review"}]}',
+              stopReason: 'completed',
+            };
+          return { text: '{"status":"approved","findings":[]}', stopReason: 'completed' };
+        }
+        if (options.reviewCycle === 'invalid-second' && reviewPasses > 1)
+          return { text: 'Approved. No issues.', stopReason: 'completed' };
+        if (options.reviewCycle === 'invalid') return { text: 'Approved. No issues.', stopReason: 'completed' };
+        if (options.reviewCycle === 'incomplete')
+          return { text: '{"status":"incomplete","findings":[]}', stopReason: 'completed' };
+        if (options.reviewCycle === 'fixed' && reviewPasses > 1)
+          return { text: '{"status":"approved","findings":[]}', stopReason: 'completed' };
+        return {
+          text: '{"status":"findings","findings":[{"id":"f1","severity":"P2","title":"Fixture defect","file":"src/implemented.ts","description":"Incorrect output branch"}]}',
+          stopReason: 'completed',
+        };
+      }
       if (input.prompt.includes('Faça revisão independente') && options.longReviewerOutput) {
         return {
           text: [
@@ -342,7 +419,7 @@ function setup(options: {
             'Local: server/store.ts:500',
             'A segunda falha também deve manter seu título e localização. ' + 'detalhe '.repeat(260),
             'RAW_FIXTURE_TAIL_NOT_IN_SYNTHESIS',
-          ].join('\\n'),
+          ].join('\n'),
           stopReason: 'completed',
         };
       }
@@ -352,6 +429,8 @@ function setup(options: {
           stopReason: 'completed',
         };
       }
+      if (input.prompt.includes('Faça revisão independente'))
+        return { text: '{"status":"approved","findings":[]}', stopReason: 'completed' };
       if (options.reviewStaticOnly && input.prompt.includes('Responda ao pedido completo')) {
         return {
           text: 'A tarefa foi concluída; a revisão foi apenas estática e a validação dinâmica não foi realizada.',
@@ -454,7 +533,12 @@ function setup(options: {
           const byte = filename === 'large-task-a.bin' ? 0x61 : 0x62;
           writeFileSync(join(input.cwd, filename), Buffer.alloc(2_097_153, byte));
         } else {
-          writeFileSync(join(input.cwd, filename), 'export const implemented = true;\\n');
+          writeFileSync(
+            join(input.cwd, filename),
+            input.prompt.includes('Corrigir achados objetivos')
+              ? 'export const implemented = false;\\n'
+              : 'export const implemented = true;\\n',
+          );
         }
         if (options.commitExecutorChanges) {
           gitIn(
@@ -500,6 +584,14 @@ function setup(options: {
           toolCallId: 'tool-1',
         });
       }
+      if (options.longWorkerOutput && input.prompt.includes('Você é um executor delegado')) {
+        return {
+          text: input.prompt.includes('Corrigir achados objetivos')
+            ? 'REPAIR_SUMMARY_RESERVED ' + 'reparo '.repeat(600)
+            : 'LONG_INITIAL_WORKER ' + 'worker '.repeat(1200),
+          stopReason: 'completed',
+        };
+      }
       if (input.prompt.includes('Fatos estruturados de execução')) {
         if (options.synthesisStreaming) emit({ type: 'delta', text: 'Resposta da síntese.' });
         return { text: options.synthesisResponse ?? 'Resposta da síntese.', stopReason: 'completed' };
@@ -516,6 +608,7 @@ function setup(options: {
       blockedCommands: [],
       autoFix: false,
     });
+  let checkIndex = 0;
   const orchestrator = new Orchestrator(
     store,
     providers,
@@ -523,15 +616,18 @@ function setup(options: {
     undefined,
     undefined,
     undefined,
-    options.checkBeforeReview
-      ? async (check) => ({
-          name: check.name,
-          command: check.command,
-          status: options.checkFails ? 'failed' : 'passed',
-          exitCode: options.checkFails ? 1 : 0,
-          durationMs: 3,
-          output: options.checkFails ? 'falha observada' : undefined,
-        })
+    options.checkBeforeReview && !options.realCheckRunner
+      ? async (check) => {
+          const status = options.checkStatuses?.[checkIndex++] ?? (options.checkFails ? 'failed' : 'passed');
+          return {
+            name: check.name,
+            command: check.command,
+            status,
+            exitCode: status === 'failed' ? 1 : 0,
+            durationMs: 3,
+            output: status === 'failed' ? 'falha observada' : undefined,
+          };
+        }
       : undefined,
   );
   cleanup.push(async () => {
@@ -548,6 +644,7 @@ function setup(options: {
     inputs,
     calls: () => calls,
     activeReviewerCalls: () => activeReviewerCalls,
+    reviewPasses: () => reviewPasses,
     maxInFlight: () => maxInFlight,
     projectRoot,
     branchProtectorPath,
@@ -1140,6 +1237,396 @@ describe('automatic orchestration', () => {
       }
   });
 
+  it('does not launch correction for a valid review with no findings', async () => {
+    const test = setup({ review: true, artifactChange: true });
+    let finish!: () => void;
+    const done = new Promise<void>((resolve) => (finish = resolve));
+    const unsubscribe = test.orchestrator.subscribe((event) => {
+      if (event.type === 'run' && event.run.sessionId === test.session.id && event.run.status !== 'running') finish();
+    });
+    try {
+      const started = await test.orchestrator.start(
+        test.session,
+        'Implement a small change in the project.',
+        undefined,
+        [],
+        {
+          budget: { totalMs: 30_000, finalizationReserveMs: 3_000 },
+        },
+      );
+      await done;
+      const tasks = test.store.listSessionTasks(test.session.id).filter((task) => task.runId === started.runId);
+      expect(tasks.filter((task) => task.role === 'reviewer')).toHaveLength(1);
+      expect(tasks.filter((task) => task.title === 'Corrigir achados objetivos da revisão')).toHaveLength(0);
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it('corrects one validated finding and requires a clean second review', async () => {
+    const test = setup({ review: true, reviewCycle: 'fixed', artifactChange: true });
+    const done = new Promise<void>((resolve) => {
+      const unsubscribe = test.orchestrator.subscribe((event) => {
+        if (event.type === 'run' && event.run.sessionId === test.session.id && event.run.status !== 'running') {
+          unsubscribe();
+          resolve();
+        }
+      });
+    });
+    const started = await test.orchestrator.start(
+      test.session,
+      'Implement a small change in the project.',
+      undefined,
+      [],
+      {
+        budget: { totalMs: 30_000, finalizationReserveMs: 3_000 },
+      },
+    );
+    await done;
+    const tasks = test.store.listSessionTasks(test.session.id).filter((task) => task.runId === started.runId);
+    expect(tasks.filter((task) => task.role === 'reviewer')).toHaveLength(2);
+    expect(test.reviewPasses()).toBe(2);
+    expect(tasks.find((task) => task.title === 'Corrigir achados objetivos da revisão')?.scope).toEqual([
+      'src/implemented.ts',
+    ]);
+    expect(test.inputs.find((input) => input.prompt.includes('Corrigir achados objetivos'))?.approvalMode).toBe(
+      'automatic',
+    );
+    expect(tasks.filter((task) => task.role === 'reviewer').some((task) => task.output?.includes('"approved"'))).toBe(
+      true,
+    );
+  });
+
+  it('records a finding that persists after the single correction pass', async () => {
+    const test = setup({ review: true, reviewCycle: 'persistent', artifactChange: true });
+    let finish!: () => void;
+    const done = new Promise<void>((resolve) => (finish = resolve));
+    const unsubscribe = test.orchestrator.subscribe((event) => {
+      if (event.type === 'run' && event.run.sessionId === test.session.id && event.run.status !== 'running') finish();
+    });
+    try {
+      const started = await test.orchestrator.start(
+        test.session,
+        'Implement a small change in the project.',
+        undefined,
+        [],
+        {
+          budget: { totalMs: 30_000, finalizationReserveMs: 3_000 },
+        },
+      );
+      await done;
+      const tasks = test.store.listSessionTasks(test.session.id).filter((task) => task.runId === started.runId);
+      expect(tasks.filter((task) => task.role === 'reviewer')).toHaveLength(2);
+      expect(tasks.filter((task) => task.title === 'Corrigir achados objetivos da revisão')).toHaveLength(1);
+      expect(test.inputs.find((input) => input.prompt.includes('Fatos estruturados de execução'))?.prompt).toContain(
+        'achados persistem após o limite de uma correção',
+      );
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it('reserves synthesis summary space for a repair after a full worker summary', async () => {
+    const test = setup({
+      review: true,
+      reviewCycle: 'persistent',
+      artifactChange: true,
+      longWorkerOutput: true,
+      synthesisResponse: 'Síntese: Fixture defect permanece pendente após o reparo reservado.',
+    });
+    let terminal!: () => void;
+    const done = new Promise<void>((resolve) => (terminal = resolve));
+    let finalMessage: { content: string } | undefined;
+    const unsubscribe = test.orchestrator.subscribe((event) => {
+      if (event.type === 'message' && event.message.sessionId === test.session.id) finalMessage = event.message;
+      if (event.type === 'run' && event.run.sessionId === test.session.id && event.run.status !== 'running') terminal();
+    });
+    try {
+      const started = await test.orchestrator.start(test.session, 'Implemente uma melhoria no projeto');
+      await done;
+      const synthesis = test.inputs.find((input) => input.prompt.includes('Fatos estruturados de execução'))!;
+      const answer = test.store
+        .listMessages(test.session.id)
+        .find((message) => message.runId === started.runId && message.role === 'assistant');
+      expect(synthesis.prompt).toContain('LONG_INITIAL_WORKER');
+      expect(synthesis.prompt).toContain('reparo reparo');
+      expect(answer?.content).toContain('Fixture defect permanece pendente');
+      expect(finalMessage?.content).toContain('Fixture defect permanece pendente');
+      expect(test.store.getRun(started.runId)?.delivery?.objective).not.toBe('met');
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it('does not repair with unknown identity and no checks, but reports the finding read-only', async () => {
+    const test = setup({
+      review: true,
+      reviewCycle: 'persistent',
+      artifactChange: true,
+      synthesisResponse: 'Tudo certo.',
+    });
+    symlinkSync('src/implemented.ts', join(test.projectRoot, 'unknown-source-link'));
+    let terminal!: () => void;
+    const done = new Promise<void>((resolve) => (terminal = resolve));
+    let finalMessage: { content: string } | undefined;
+    const unsubscribe = test.orchestrator.subscribe((event) => {
+      if (event.type === 'message' && event.message.sessionId === test.session.id) finalMessage = event.message;
+      if (event.type === 'run' && event.run.sessionId === test.session.id && event.run.status !== 'running') terminal();
+    });
+    try {
+      const started = await test.orchestrator.start(test.session, 'Implemente uma melhoria no projeto');
+      await done;
+      const answer = test.store
+        .listMessages(test.session.id)
+        .find((message) => message.runId === started.runId && message.role === 'assistant');
+      expect(
+        test.store
+          .listSessionTasks(test.session.id)
+          .filter((task) => task.title === 'Corrigir achados objetivos da revisão'),
+      ).toHaveLength(0);
+      expect(answer?.content).toContain('Fixture defect');
+      expect(answer?.content).toContain('não confirmados, somente relato read-only');
+      expect(finalMessage?.content).toContain('Achados independentes não confirmados, somente relato read-only');
+      expect(finalMessage?.content).toContain('Fixture defect');
+      const runEvents = test.store.listEvents(test.session.id).filter((event) => event.runId === started.runId);
+      expect(runEvents.some((event) => event.type === 'check')).toBe(false);
+      expect(
+        test.store
+          .listSessionTasks(test.session.id)
+          .filter((task) => task.runId === started.runId && task.role === 'worker')
+          .every((task) => !task.title.includes('Fixture defect')),
+      ).toBe(true); // A finding is evidence for reporting, never a command/task instruction.
+      expect(test.store.getRun(started.runId)?.delivery?.objective).not.toBe('met');
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it('preserves a valid finding when review two approves after the source changes, in persisted answer and SSE', async () => {
+    const test = setup({
+      review: true,
+      reviewCycle: 'approved-second-change',
+      artifactChange: true,
+      synthesisResponse: 'Tudo certo.',
+    });
+    let terminal!: () => void;
+    const done = new Promise<void>((resolve) => (terminal = resolve));
+    let finalMessage: { content: string } | undefined;
+    const unsubscribe = test.orchestrator.subscribe((event) => {
+      if (event.type === 'message' && event.message.sessionId === test.session.id) finalMessage = event.message;
+      if (event.type === 'run' && event.run.sessionId === test.session.id && event.run.status !== 'running') terminal();
+    });
+    try {
+      const started = await test.orchestrator.start(test.session, 'Implemente uma melhoria no projeto');
+      await done;
+      const answer = test.store
+        .listMessages(test.session.id)
+        .find((message) => message.runId === started.runId && message.role === 'assistant');
+      expect(test.reviewPasses()).toBe(2);
+      expect(answer?.content).toContain('Fixture defect');
+      expect(answer?.content).toContain('Achados válidos ainda pendentes');
+      expect(answer?.content).toContain('source-identity-unverified-or-changed');
+      expect(finalMessage?.content).toContain('Fixture defect');
+      expect(test.store.getRun(started.runId)?.delivery?.objective).not.toBe('met');
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it('does not let a source-invalid second finding replace the first confirmed finding', async () => {
+    const test = setup({
+      review: true,
+      reviewCycle: 'finding-second-change',
+      artifactChange: true,
+      synthesisResponse: 'Tudo certo.',
+    });
+    let terminal!: () => void;
+    const done = new Promise<void>((resolve) => (terminal = resolve));
+    const deltas: string[] = [];
+    const unsubscribe = test.orchestrator.subscribe((event) => {
+      if (event.type === 'delta' && event.sessionId === test.session.id) deltas.push(event.text);
+      if (event.type === 'run' && event.run.sessionId === test.session.id && event.run.status !== 'running') terminal();
+    });
+    try {
+      const started = await test.orchestrator.start(test.session, 'Implemente uma melhoria no projeto');
+      await done;
+      const answer = test.store
+        .listMessages(test.session.id)
+        .find((message) => message.runId === started.runId && message.role === 'assistant');
+      expect(answer?.content).toContain('Achados válidos ainda pendentes: P2 Fixture defect');
+      expect(answer?.content).toContain('Unconfirmed second defect');
+      expect(answer?.content).toContain('source-identity-unverified-or-changed');
+      expect(deltas.join('')).toContain('Achados válidos ainda pendentes: P2 Fixture defect');
+      expect(test.store.getRun(started.runId)?.delivery?.objective).not.toBe('met');
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it.each(['invalid-second', 'failure-second'] as const)(
+    'preserves valid pending findings when review pass two is %s in the persisted answer and SSE',
+    async (reviewCycle) => {
+      const test = setup({ review: true, reviewCycle, artifactChange: true, synthesisResponse: 'Tudo certo.' });
+      let terminal!: () => void;
+      const done = new Promise<void>((resolve) => (terminal = resolve));
+      let finalMessage: { content: string } | undefined;
+      const unsubscribe = test.orchestrator.subscribe((event) => {
+        if (event.type === 'message' && event.message.sessionId === test.session.id) finalMessage = event.message;
+        if (event.type === 'run' && event.run.sessionId === test.session.id && event.run.status !== 'running')
+          terminal();
+      });
+      try {
+        const started = await test.orchestrator.start(test.session, 'Implemente uma melhoria no projeto');
+        await done;
+        const answer = test.store
+          .listMessages(test.session.id)
+          .find((message) => message.runId === started.runId && message.role === 'assistant');
+        expect(test.reviewPasses()).toBe(2);
+        expect(answer?.content).toContain('Fixture defect');
+        expect(answer?.content).toContain('Achados válidos ainda pendentes');
+        expect(finalMessage?.content).toContain('Achados válidos ainda pendentes');
+        expect(test.store.getRun(started.runId)?.delivery?.objective).not.toBe('met');
+      } finally {
+        unsubscribe();
+      }
+    },
+  );
+
+  it('preserves the first confirmed finding when review pass two times out', async () => {
+    const test = setup({ review: true, reviewCycle: 'timeout-second', artifactChange: true });
+    let terminal!: () => void;
+    const done = new Promise<void>((resolve) => (terminal = resolve));
+    let finalMessage: { content: string } | undefined;
+    const unsubscribe = test.orchestrator.subscribe((event) => {
+      if (event.type === 'message' && event.message.sessionId === test.session.id) finalMessage = event.message;
+      if (event.type === 'run' && event.run.sessionId === test.session.id && event.run.status !== 'running') terminal();
+    });
+    try {
+      const started = await test.orchestrator.start(test.session, 'Implemente uma melhoria no projeto', undefined, [], {
+        budget: { totalMs: 10_000, finalizationReserveMs: 1_000 },
+      });
+      await done;
+      const answer = test.store
+        .listMessages(test.session.id)
+        .find((message) => message.runId === started.runId && message.role === 'assistant');
+      expect(test.reviewPasses()).toBe(2);
+      expect(answer?.content).toContain('Fixture defect');
+      expect(answer?.content).toContain('Achados válidos ainda pendentes');
+      expect(finalMessage?.content).toContain('Fixture defect');
+      expect(test.store.getRun(started.runId)?.delivery?.objective).not.toBe('met');
+    } finally {
+      unsubscribe();
+    }
+  }, 15_000);
+
+  it('does not correct prose/invalid or inconclusive review output', async () => {
+    for (const options of [
+      { review: true, reviewCycle: 'invalid' as const, artifactChange: true },
+      { review: true, reviewCycle: 'incomplete' as const, artifactChange: true },
+    ]) {
+      const test = setup(options);
+      let finish!: () => void;
+      const done = new Promise<void>((resolve) => (finish = resolve));
+      const unsubscribe = test.orchestrator.subscribe((event) => {
+        if (event.type === 'run' && event.run.sessionId === test.session.id && event.run.status !== 'running') finish();
+      });
+      try {
+        const started = await test.orchestrator.start(test.session, 'Implement a small change in the project.');
+        await done;
+        const tasks = test.store.listSessionTasks(test.session.id).filter((task) => task.runId === started.runId);
+        expect(tasks.filter((task) => task.title === 'Corrigir achados objetivos da revisão')).toHaveLength(0);
+        expect(test.inputs.filter((input) => input.prompt.includes('Faça revisão independente'))).toHaveLength(1);
+        expect(test.inputs.find((input) => input.prompt.includes('Fatos estruturados de execução'))?.prompt).toContain(
+          'INCOMPLETA',
+        );
+      } finally {
+        unsubscribe();
+      }
+    }
+  });
+
+  it('does not start another review after cancellation during correction', async () => {
+    let repairStarted!: () => void;
+    const repair = new Promise<void>((resolve) => (repairStarted = resolve));
+    const test = setup({
+      review: true,
+      reviewCycle: 'cancel',
+      artifactChange: true,
+      onRepairStarted: () => repairStarted(),
+    });
+    let finish!: () => void;
+    const done = new Promise<void>((resolve) => (finish = resolve));
+    let finalMessage: { content: string } | undefined;
+    const unsubscribe = test.orchestrator.subscribe((event) => {
+      if (event.type === 'message' && event.message.sessionId === test.session.id) finalMessage = event.message;
+      if (event.type === 'run' && event.run.sessionId === test.session.id && event.run.status !== 'running') finish();
+    });
+    try {
+      const started = await test.orchestrator.start(
+        test.session,
+        'Implement a small change in the project.',
+        undefined,
+        [],
+        {
+          budget: { totalMs: 30_000, finalizationReserveMs: 3_000 },
+        },
+      );
+      await repair;
+      await test.orchestrator.cancel(test.session.id);
+      await done;
+      const run = test.store.getRun(started.runId)!;
+      const answer = test.store
+        .listMessages(test.session.id)
+        .find((message) => message.runId === started.runId && message.role === 'assistant');
+      expect(run).toMatchObject({ status: 'cancelled', termination: 'user_cancelled' });
+      expect(answer?.content).toContain('cancelada pelo usuário');
+      expect(answer?.content).toContain('Fixture defect');
+      expect(answer?.content).toContain('Achados válidos ainda pendentes');
+      expect(finalMessage?.content).toContain('Fixture defect');
+      expect(test.inputs.some((input) => input.prompt.includes('Responda ao pedido completo usando os resumos'))).toBe(
+        false,
+      );
+      expect(
+        test.store
+          .listSessionTasks(test.session.id)
+          .filter((task) => task.runId === started.runId && task.role === 'reviewer'),
+      ).toHaveLength(1);
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it('retains the first confirmed finding when cancellation interrupts the second review', async () => {
+    const test = setup({ review: true, reviewCycle: 'cancel-second', artifactChange: true });
+    let finish!: () => void;
+    const done = new Promise<void>((resolve) => (finish = resolve));
+    let finalMessage: { content: string } | undefined;
+    const unsubscribe = test.orchestrator.subscribe((event) => {
+      if (event.type === 'message' && event.message.sessionId === test.session.id) finalMessage = event.message;
+      if (event.type === 'run' && event.run.sessionId === test.session.id && event.run.status !== 'running') finish();
+    });
+    try {
+      const started = await test.orchestrator.start(test.session, 'Implement a small change in the project.');
+      await vi.waitFor(() => expect(test.reviewPasses()).toBe(2), { timeout: 10_000 });
+      await test.orchestrator.cancel(test.session.id);
+      await done;
+      const run = test.store.getRun(started.runId)!;
+      const answer = test.store
+        .listMessages(test.session.id)
+        .find((message) => message.runId === started.runId && message.role === 'assistant');
+      expect(run).toMatchObject({ status: 'cancelled', termination: 'user_cancelled' });
+      expect(answer?.content).toContain('Fixture defect');
+      expect(answer?.content).toContain('Achados válidos ainda pendentes');
+      expect(finalMessage?.content).toContain('Fixture defect');
+      expect(test.inputs.some((input) => input.prompt.includes('Responda ao pedido completo usando os resumos'))).toBe(
+        false,
+      );
+      expect(test.reviewPasses()).toBe(2);
+    } finally {
+      unsubscribe();
+    }
+  });
+
   it('produces root-owned evidence capabilities for automatic reviewer and synthesis inputs', async () => {
     const test = setup({ review: true, artifactChange: true, gitProject: true });
     let terminal!: () => void;
@@ -1372,13 +1859,66 @@ describe('automatic orchestration', () => {
     }
   }, 15_000);
 
-  it('delivers integrated diff and observed checks to reviewer before review while source identity stays unknown', async () => {
+  it('repairs a concrete finding despite a failed source-matched check, then passes checks and clean review', async () => {
+    const test = setup({
+      review: true,
+      reviewCycle: 'fixed',
+      artifactChange: true,
+      gitProject: true,
+      checkBeforeReview: true,
+      realCheckRunner: true,
+    });
+    test.store.putHooks('project', {
+      afterEdit: [
+        { name: 'repair-state check', command: 'grep -q false src/implemented.ts', timeoutSec: 10, enabled: true },
+      ],
+      blockedCommands: [],
+      autoFix: false,
+    });
+    let terminal!: () => void;
+    const done = new Promise<void>((resolve) => (terminal = resolve));
+    const unsubscribe = test.orchestrator.subscribe((event) => {
+      if (event.type === 'run' && event.run.sessionId === test.session.id && event.run.status !== 'running') terminal();
+    });
+    try {
+      const started = await test.orchestrator.start(
+        test.session,
+        'Implement coordinated changes across the UI, storage, and API.',
+      );
+      await done;
+      const run = test.store.getRun(started.runId)!;
+      const tasks = test.store.listSessionTasks(test.session.id).filter((task) => task.runId === started.runId);
+      const checks = test.store
+        .listEvents(test.session.id)
+        .filter(
+          (event) => event.runId === started.runId && event.type === 'check' && event.check?.status !== 'running',
+        );
+      expect(checks.map((event) => event.check?.status)).toEqual(['failed', 'passed']);
+      expect(checks.every((event) => event.check?.source?.state === 'verified')).toBe(true);
+      expect(tasks.filter((task) => task.title === 'Corrigir achados objetivos da revisão')).toHaveLength(1);
+      expect(tasks.filter((task) => task.role === 'reviewer')).toHaveLength(2);
+      expect(test.reviewPasses()).toBe(2);
+      expect(test.store.getRun(run.id)?.delivery?.objective).not.toBe('met');
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it('keeps homonymous hooks independent with verified source identity', async () => {
     const test = setup({
       review: true,
       artifactChange: true,
       gitProject: true,
       checkBeforeReview: true,
-      checkFails: true,
+      realCheckRunner: true,
+    });
+    test.store.putHooks('project', {
+      afterEdit: [
+        { name: 'same hook name', command: 'false', timeoutSec: 10, enabled: true },
+        { name: 'same hook name', command: 'true', timeoutSec: 10, enabled: true },
+      ],
+      blockedCommands: [],
+      autoFix: false,
     });
     let terminal!: () => void;
     const done = new Promise<void>((resolve) => (terminal = resolve));
@@ -1401,16 +1941,29 @@ describe('automatic orchestration', () => {
       expect(reviewerPrompt).toContain('"artifact:src/implemented.ts"');
       expect(reviewerPrompt).toContain('"status":"failed"');
       expect(reviewerPrompt).toContain('"exitCode":1');
-      // This integration uses an injected check runner; only the production runner can attest source identity.
-      expect(run.checkSource).toMatchObject({ runId: run.id, state: 'unknown' });
-      expect(run.checkSource).not.toHaveProperty('revision');
+      expect(reviewerPrompt).not.toContain("'false'");
+      expect(reviewerPrompt).not.toContain("'true'");
+      expect(reviewerPrompt).not.toContain('failed hook output');
+      expect(run.checkSource).toMatchObject({ runId: run.id, state: 'verified' });
+      expect(run.checkSource?.revision?.value).toMatch(/^[a-f0-9]{64}$/);
       const checkEvents = test.store
         .listEvents(test.session.id)
         .filter((event) => event.runId === run.id && event.type === 'check');
-      expect(checkEvents.at(-1)?.check).toMatchObject({ status: 'failed', exitCode: 1 });
+      expect(checkEvents.map((event) => event.check?.status)).toEqual(['failed', 'passed']);
+      expect(checkEvents.map((event) => event.check?.command)).toEqual(['false', 'true']);
+      expect(checkEvents.every((event) => event.check?.source?.state === 'verified')).toBe(true);
+      expect(run.delivery?.objective).not.toBe('met');
+      const finalAnswer = test.store
+        .listMessages(test.session.id)
+        .find((message) => message.runId === run.id && message.role === 'assistant');
+      expect(finalAnswer?.content).toContain('Aprovação não confirmada (checks-failed)');
       const persistedEvidence = await test.orchestrator.runEvidence.get(run.id);
       expect(persistedEvidence?.checks).toContainEqual(
-        expect.objectContaining({ status: 'failed', exitCode: 1, output: 'falha observada' }),
+        expect.objectContaining({
+          command: 'false',
+          status: 'failed',
+          exitCode: 1,
+        }),
       );
       expect(persistedEvidence?.workers).toContainEqual(
         expect.objectContaining({
@@ -2180,6 +2733,127 @@ describe('automatic orchestration', () => {
     await expect(test.orchestrator.recoverTaskWorktree(task.id, 'discard')).rejects.toThrow();
     expect(gitIn(test.projectRoot, 'rev-parse', `refs/heads/${worktree.branch}`).trim()).toBe(advancedTip);
     expect(gitIn(test.projectRoot, 'rev-parse', worktree.ownershipProofRef!).trim()).toBe(worktree.base);
+  });
+
+  it.each(['invalid', 'incomplete'] as const)(
+    'records an %s review as unapproved in the final persisted answer and delivery state',
+    async (reviewCycle) => {
+      const test = setup({ review: true, reviewCycle, synthesisResponse: 'Tudo certo.' });
+      let terminal!: () => void;
+      const done = new Promise<void>((resolve) => (terminal = resolve));
+      const unsubscribe = test.orchestrator.subscribe((event) => {
+        if (event.type === 'run' && event.run.sessionId === test.session.id && event.run.status !== 'running')
+          terminal();
+      });
+      try {
+        const started = await test.orchestrator.start(test.session, 'Implement a broad feature.');
+        await done;
+        const answer = test.store
+          .listMessages(test.session.id)
+          .find((message) => message.runId === started.runId && message.role === 'assistant');
+        expect(answer?.content).toContain('revisão');
+        expect(answer?.content).toMatch(/inválida|inconclusiva|sem aprovação/i);
+        expect(test.store.getRun(started.runId)?.delivery).toMatchObject({ response: 'completed' });
+        expect(test.store.getRun(started.runId)?.delivery?.objective).not.toBe('met');
+      } finally {
+        unsubscribe();
+      }
+    },
+  );
+
+  it('keeps the finalization reserve and skips repair when the original budget has no correction window', async () => {
+    const test = setup({ review: true, reviewCycle: 'persistent', artifactChange: true, reviewerDelayMs: 1_100 });
+    let terminal!: () => void;
+    const done = new Promise<void>((resolve) => (terminal = resolve));
+    const unsubscribe = test.orchestrator.subscribe((event) => {
+      if (event.type === 'run' && event.run.sessionId === test.session.id && event.run.status !== 'running') terminal();
+    });
+    try {
+      const started = await test.orchestrator.start(test.session, 'Implemente uma melhoria no projeto', undefined, [], {
+        budget: { totalMs: 10_000, finalizationReserveMs: 9_000 },
+      });
+      await done;
+      const run = test.store.getRun(started.runId)!;
+      const answer = test.store
+        .listMessages(test.session.id)
+        .find((message) => message.runId === started.runId && message.role === 'assistant');
+      expect(run).toMatchObject({ status: 'failed', termination: 'timeout' });
+      expect(test.inputs.some((input) => input.prompt.includes('Corrija somente os achados estruturados'))).toBe(false);
+      expect(answer?.content).toContain('timeout');
+      expect(answer?.content).toContain('Fixture defect');
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it('discloses a failed review correction in the persisted response and SSE', async () => {
+    const test = setup({
+      review: true,
+      reviewCycle: 'persistent',
+      repairFailure: true,
+      artifactChange: true,
+      synthesisResponse: 'Tudo concluído com sucesso.',
+    });
+    let terminal!: () => void;
+    const done = new Promise<void>((resolve) => (terminal = resolve));
+    let finalMessageEvent: { content: string } | undefined;
+    const unsubscribe = test.orchestrator.subscribe((event) => {
+      if (event.type === 'message' && event.message.sessionId === test.session.id) finalMessageEvent = event.message;
+      if (event.type === 'run' && event.run.sessionId === test.session.id && event.run.status !== 'running') terminal();
+    });
+    try {
+      const started = await test.orchestrator.start(test.session, 'Implemente uma melhoria no projeto');
+      await done;
+      const answer = test.store
+        .listMessages(test.session.id)
+        .find((message) => message.runId === started.runId && message.role === 'assistant');
+      expect(test.inputs.some((input) => input.prompt.includes('Corrija somente os achados estruturados'))).toBe(true);
+      expect(answer?.content).toContain('correção falhou');
+      expect(answer?.content).toContain('Fixture defect');
+      expect(finalMessageEvent?.content).toContain('correção falhou');
+      expect(test.store.getRun(started.runId)?.delivery?.objective).not.toBe('met');
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it('discloses persistent review findings in the persisted answer and SSE despite optimistic synthesis, without a budget', async () => {
+    const test = setup({
+      review: true,
+      reviewCycle: 'persistent',
+      artifactChange: true,
+      synthesisResponse: 'Tudo concluído com sucesso.',
+    });
+    let terminal!: () => void;
+    const done = new Promise<void>((resolve) => (terminal = resolve));
+    const deltas: string[] = [];
+    const unsubscribe = test.orchestrator.subscribe((event) => {
+      if (event.type === 'delta' && event.sessionId === test.session.id) deltas.push(event.text);
+      if (event.type === 'run' && event.run.sessionId === test.session.id && event.run.status !== 'running') terminal();
+    });
+    try {
+      const started = await test.orchestrator.start(test.session, 'Implemente uma melhoria no projeto');
+      await done;
+      const run = test.store.getRun(started.runId)!;
+      const answer = test.store
+        .listMessages(test.session.id)
+        .find((message) => message.runId === started.runId && message.role === 'assistant');
+      expect(run.budget).toBeUndefined();
+      expect(test.reviewPasses()).toBe(2);
+      expect(
+        test.inputs.filter((input) => input.prompt.includes('Corrija somente os achados estruturados')),
+      ).toHaveLength(1);
+      expect(test.inputs.find((input) => input.prompt.includes('Fatos estruturados de execução'))?.prompt).toContain(
+        'Corrigir achados objetivos da revisão [completed]',
+      );
+      expect(answer?.content).toContain('Tudo concluído com sucesso.');
+      expect(answer?.content).toContain('Fixture defect');
+      expect(answer?.content).toContain('pendência: achados persistem');
+      expect(deltas.join('')).toContain('Fixture defect');
+      expect(run.delivery).toMatchObject({ response: 'completed', objective: 'unknown' });
+    } finally {
+      unsubscribe();
+    }
   });
 
   it.each([false, true])(

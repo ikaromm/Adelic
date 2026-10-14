@@ -155,7 +155,10 @@ function setup(
   };
   const finished = async (runId: string) => {
     let run: Run | undefined;
-    await until(() => (run = store.getRun(runId))?.status !== 'running' && run !== undefined);
+    await until(() => {
+      run = store.getRun(runId);
+      return run !== undefined && run.status !== 'running' && !store.getSession(run.sessionId)?.activeRunId;
+    });
     return run!;
   };
   const checks = (sessionId: string, runId?: string) =>

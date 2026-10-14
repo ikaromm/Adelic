@@ -5,6 +5,7 @@ import type {
   ProviderInfo,
   ProviderId,
   TaskDeliveryResult,
+  CheckSource,
 } from '../shared/contracts.js';
 import { hasFileReference } from './router.js';
 
@@ -220,6 +221,165 @@ export function synthesisExecutionFacts(tasks: DelegatedTask[]): string {
         : null,
     }));
   return JSON.stringify(facts);
+}
+
+export interface StructuredReviewFinding {
+  id: string;
+  severity: 'P0' | 'P1' | 'P2' | 'P3';
+  title: string;
+  file: string;
+  description: string;
+}
+
+export type StructuredReview =
+  { status: 'approved'; findings: [] } | { status: 'findings'; findings: StructuredReviewFinding[] };
+
+/** Paths are validated for reporting; write authorization is separately restricted to observed scope. */
+export function isSafeReviewPath(path: string): boolean {
+  if (
+    !path ||
+    path.length > 300 ||
+    path.startsWith('/') ||
+    path.startsWith('\\') ||
+    /^[a-z]:/i.test(path) ||
+    path.includes('\\') ||
+    /\p{Cc}/u.test(path)
+  )
+    return false;
+  const segments = path.split('/');
+  return segments.every((segment) => segment.length > 0 && segment !== '.' && segment !== '..');
+}
+
+export interface ReviewDecisionInput {
+  completed: boolean;
+  review?: StructuredReview;
+  before?: CheckSource;
+  after?: CheckSource;
+  checks: { status: string; source?: CheckSource | null }[];
+}
+
+/** One state decision shared by approval, correction, and finding-resolution consumers. */
+export function decideReview(input: ReviewDecisionInput): {
+  valid: boolean;
+  identityStable: boolean;
+  checksCorrespond: boolean;
+  checksPassed: boolean;
+  repairEligible: boolean;
+  approved: boolean;
+  findings: StructuredReviewFinding[];
+  reason?: string;
+} {
+  const findings = input.review?.status === 'findings' ? input.review.findings : [];
+  const before = input.before;
+  const after = input.after;
+  const stableIdentity = Boolean(
+    before &&
+    after &&
+    before.state === 'verified' &&
+    after.state === 'verified' &&
+    before.runId === after.runId &&
+    before.root &&
+    before.root === after.root &&
+    before.revision?.kind === 'source_tree' &&
+    before.revision.value &&
+    before.revision.value === after.revision?.value,
+  );
+  const checksMatch =
+    input.checks.length === 0 ||
+    (stableIdentity &&
+      input.checks.every(
+        (check) =>
+          check.source?.state === 'verified' &&
+          check.source.runId === before?.runId &&
+          check.source.root === before?.root &&
+          check.source.revision?.value === before?.revision?.value,
+      ));
+  const checksPassed = input.checks.every((check) => check.status === 'passed');
+  const valid = input.completed && Boolean(input.review) && stableIdentity && checksMatch;
+  const repairEligible = valid && findings.length > 0;
+  return {
+    valid,
+    identityStable: stableIdentity,
+    checksCorrespond: checksMatch,
+    checksPassed,
+    repairEligible,
+    approved: valid && input.review?.status === 'approved' && checksPassed,
+    findings,
+    ...(!input.completed
+      ? { reason: 'review-incomplete' }
+      : !input.review
+        ? { reason: 'review-contract-invalid' }
+        : !stableIdentity
+          ? { reason: 'source-identity-unverified-or-changed' }
+          : !checksMatch
+            ? { reason: 'checks-do-not-match-reviewed-source' }
+            : !checksPassed
+              ? { reason: 'checks-failed' }
+              : {}),
+  };
+}
+
+/** A review is actionable only as a complete, strictly validated JSON result. */
+export function parseStructuredReview(text: string): StructuredReview | undefined {
+  if (text.length > 32_000) return undefined;
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  if (Object.keys(record).some((key) => !['status', 'findings'].includes(key))) return undefined;
+  if (!Array.isArray(record.findings) || record.findings.length > 12) return undefined;
+  if (record.status === 'approved' && record.findings.length === 0) return { status: 'approved', findings: [] };
+  if (record.status !== 'findings' || record.findings.length === 0) return undefined;
+  const ids = new Set<string>();
+  const findings: StructuredReviewFinding[] = [];
+  for (const candidate of record.findings) {
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return undefined;
+    const finding = candidate as Record<string, unknown>;
+    if (Object.keys(finding).some((key) => !['id', 'severity', 'title', 'file', 'description'].includes(key)))
+      return undefined;
+    if (
+      typeof finding.id !== 'string' ||
+      !/^[a-zA-Z0-9_-]{1,40}$/.test(finding.id) ||
+      ids.has(finding.id) ||
+      typeof finding.severity !== 'string' ||
+      !['P0', 'P1', 'P2', 'P3'].includes(finding.severity) ||
+      typeof finding.title !== 'string' ||
+      !finding.title.trim() ||
+      finding.title.length > 180 ||
+      typeof finding.file !== 'string' ||
+      !isSafeReviewPath(finding.file) ||
+      typeof finding.description !== 'string' ||
+      !finding.description.trim() ||
+      finding.description.length > 1600
+    )
+      return undefined;
+    ids.add(finding.id);
+    findings.push({
+      id: finding.id,
+      severity: finding.severity as StructuredReviewFinding['severity'],
+      title: finding.title.trim(),
+      file: finding.file,
+      description: finding.description.trim(),
+    });
+  }
+  return { status: 'findings', findings };
+}
+
+/** Keep the newest check for each configured name+command identity. */
+export function latestChecksByIdentity<T extends { name: string; command?: string; createdAt: string }>(
+  checks: T[],
+): T[] {
+  const latest = new Map<string, T>();
+  for (const check of checks) {
+    const identity = JSON.stringify([check.name, check.command ?? null]);
+    const prior = latest.get(identity);
+    if (!prior || Date.parse(check.createdAt) >= Date.parse(prior.createdAt)) latest.set(identity, check);
+  }
+  return [...latest.values()];
 }
 
 /**

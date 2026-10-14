@@ -4,12 +4,16 @@ import {
   boundedCoordinatorContext,
   canSkipCoordinationPlanner,
   graphifyPaths,
+  latestChecksByIdentity,
   isSimpleInspectionRequest,
   minimalContinuationContext,
   parseTaskPlan,
   requiresResolvedContinuity,
   resolveAgent,
   summarizeReview,
+  parseStructuredReview,
+  isSafeReviewPath,
+  decideReview,
   synthesisExecutionFacts,
 } from '../server/coordination.js';
 
@@ -506,5 +510,145 @@ describe('delegated task contracts', () => {
     for (const path of ['server/orchestrator.ts', 'server/worktrees.ts', 'server/http/tasks.ts'])
       expect(result.text).toContain(path);
     expect(summarizeReview(review, 0)).toMatchObject({ text: '', incomplete: true });
+  });
+
+  it('accepts only complete, structured review verdicts and rejects prose or malformed findings', () => {
+    expect(parseStructuredReview('{"status":"approved","findings":[]}')).toEqual({
+      status: 'approved',
+      findings: [],
+    });
+    expect(
+      parseStructuredReview(
+        '{"status":"findings","findings":[{"id":"f1","severity":"P2","title":"Bug","file":"src/app.ts","description":"Wrong branch"}]}',
+      ),
+    ).toMatchObject({ status: 'findings', findings: [{ severity: 'P2', file: 'src/app.ts' }] });
+    expect(
+      parseStructuredReview(
+        '{"status":"findings","findings":[{"id":"f1","severity":["P2"],"title":"Bug","file":"src/app.ts","description":"Wrong branch"}]}',
+      ),
+    ).toBeUndefined();
+    expect(
+      parseStructuredReview(
+        '{"status":"findings","findings":[{"id":"f1","severity":2,"title":"Bug","file":"src/app.ts","description":"Wrong branch"}]}',
+      ),
+    ).toBeUndefined();
+    expect(
+      parseStructuredReview(
+        '{"status":"findings","findings":[{"id":"f1","severity":"P2","title":"Bug","file":"src/app.ts"}]}',
+      ),
+    ).toBeUndefined();
+    expect(
+      parseStructuredReview(
+        '{"status":"findings","findings":[{"id":"f1","severity":"P2","title":"Bug","file":"src/app.ts","description":"Wrong branch","extra":true}]}',
+      ),
+    ).toBeUndefined();
+    expect(parseStructuredReview('The review approves this.')).toBeUndefined();
+    expect(
+      parseStructuredReview(
+        '{"status":"findings","findings":[{"id":"f1","severity":"P2","title":"Bug","file":"../evil.ts","description":"x"}]}',
+      ),
+    ).toBeUndefined();
+    expect(parseStructuredReview('{"status":"approved","findings":[{"id":"f1"}]}')).toBeUndefined();
+    expect(parseStructuredReview('{"status":"incomplete","findings":[]}')).toBeUndefined();
+    expect(parseStructuredReview('{"status":"approved","findings":[]} trailing')).toBeUndefined();
+  });
+
+  it('keeps check results separate when hooks share a name but use different commands', () => {
+    const latest = latestChecksByIdentity([
+      { name: 'tests', command: 'npm test', status: 'failed', createdAt: '2026-10-14T10:00:00.000Z' },
+      { name: 'tests', command: 'npm test', status: 'passed', createdAt: '2026-10-14T10:01:00.000Z' },
+      { name: 'tests', command: 'npm run lint', status: 'failed', createdAt: '2026-10-14T10:02:00.000Z' },
+    ]);
+    expect(latest).toHaveLength(2);
+    expect(latest).toContainEqual(expect.objectContaining({ command: 'npm test', status: 'passed' }));
+    expect(latest).toContainEqual(expect.objectContaining({ command: 'npm run lint', status: 'failed' }));
+  });
+
+  it('accepts legitimate relative report paths but rejects traversal, absolute and control paths', () => {
+    for (const path of ['src/routes/[id]/page.tsx', 'src/(admin)/page.tsx', 'src/café page.tsx']) {
+      expect(isSafeReviewPath(path)).toBe(true);
+      expect(
+        parseStructuredReview(
+          JSON.stringify({
+            status: 'findings',
+            findings: [{ id: 'f1', severity: 'P2', title: 'Bug', file: path, description: 'Detail' }],
+          }),
+        ),
+      ).toMatchObject({ status: 'findings', findings: [{ file: path }] });
+    }
+    for (const path of [
+      '../outside.ts',
+      '/etc/passwd',
+      'C:/outside.ts',
+      'src\\\\file.ts',
+      'src/..',
+      'src/line\\nfeed.ts',
+    ]) {
+      expect(isSafeReviewPath(path)).toBe(false);
+      expect(
+        parseStructuredReview(
+          JSON.stringify({
+            status: 'findings',
+            findings: [{ id: 'f1', severity: 'P2', title: 'Bug', file: path, description: 'Detail' }],
+          }),
+        ),
+      ).toBeUndefined();
+    }
+  });
+
+  it('requires stable checkout identity even when no checks exist and preserves findings on invalid approval', () => {
+    const finding = parseStructuredReview(
+      '{"status":"findings","findings":[{"id":"f1","severity":"P2","title":"Bug","file":"src/page.tsx","description":"Detail"}]}',
+    )!;
+    const approved = parseStructuredReview('{"status":"approved","findings":[]}')!;
+    expect(decideReview({ completed: true, review: approved, checks: [] })).toMatchObject({
+      valid: false,
+      identityStable: false,
+      repairEligible: false,
+      approved: false,
+      reason: 'source-identity-unverified-or-changed',
+    });
+    const before = {
+      runId: 'run',
+      root: '/project',
+      state: 'verified' as const,
+      scope: 'filesystem-except-.git-and-node_modules' as const,
+      revision: { kind: 'source_tree' as const, value: 'a' },
+    };
+    const changed = { ...before, revision: { kind: 'source_tree' as const, value: 'b' } };
+    const second = decideReview({ completed: true, review: approved, before, after: changed, checks: [] });
+    expect(second.approved).toBe(false);
+    expect(second.valid).toBe(false);
+    expect(decideReview({ completed: true, review: finding, before, after: before, checks: [] })).toMatchObject({
+      valid: true,
+      repairEligible: true,
+      approved: false,
+      findings: [{ id: 'f1' }],
+    });
+    const failedButSameSource = decideReview({
+      completed: true,
+      review: finding,
+      before,
+      after: before,
+      checks: [{ status: 'failed', source: before }],
+    });
+    expect(failedButSameSource).toMatchObject({
+      valid: true,
+      identityStable: true,
+      checksCorrespond: true,
+      checksPassed: false,
+      repairEligible: true,
+      approved: false,
+      reason: 'checks-failed',
+    });
+    expect(
+      decideReview({
+        completed: true,
+        review: approved,
+        before,
+        after: before,
+        checks: [{ status: 'failed', source: before }],
+      }),
+    ).toMatchObject({ valid: true, approved: false, reason: 'checks-failed' });
   });
 });

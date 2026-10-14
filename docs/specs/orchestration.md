@@ -48,7 +48,7 @@ O teste de coordenação cobre tarefas coesas, mudanças explícitas em múltipl
 
 Histórico de verificação registrado em rodada anterior (2026-10-09, não reexecutado aqui): typecheck e seleções focalizadas foram reportados como aprovados; os testes usaram providers fake, logo não validaram comportamento de modelo real. A execução sem filtro também teve um caso recusado pelo runner remoto somente leitura, que não passou. Isso não demonstra validação completa nem aprovação do benchmark. Checks adicionais e o benchmark congelado ficam a cargo de Root após integração/aprovação; nesta alteração não se afirma execução deles.
 
-Nesta tarefa, foram executados `npx vitest run --configLoader runner tests/automatic-orchestration.test.ts tests/ui-run-activity.test.ts` (30/30) e `npx tsc --noEmit` (0). O teste de checks RO passou pelo fluxo de executor local isolado; a chamada padrão de Vitest que tentava gravar `.vite-temp` no projeto readonly foi recusada por `EROFS` antes de iniciar e não foi contada como teste. Não foram executados suíte completa, benchmark congelado ou validação com modelo real; Root fará os checks de integração após revisão.
+Na tarefa registrada em 2026-10-09, foram executados `npx vitest run --configLoader runner tests/automatic-orchestration.test.ts tests/ui-run-activity.test.ts` (30/30) e `npx tsc --noEmit` (0). O teste de checks RO passou pelo fluxo de executor local isolado; a chamada padrão de Vitest que tentava gravar `.vite-temp` no projeto readonly foi recusada por `EROFS` antes de iniciar e não foi contada como teste. Não foram executados suíte completa, benchmark congelado ou validação com modelo real; Root fará os checks de integração após revisão.
 
 ## Aceite
 
@@ -59,3 +59,29 @@ Nesta tarefa, foram executados `npx vitest run --configLoader runner tests/autom
 5. Contexto de executor e coordenador é separado e limitado; saídas completas persistidas não entram automaticamente no prompt principal.
 6. Cancelamento/falha/reinício e aprovações funcionam também nas tarefas delegadas.
 7. Tela permite alterar as opções por projeto e acompanha estados reais.
+
+## Ciclo limitado de revisão e correção (2026-10-14)
+
+### Contrato da revisão
+
+A revisão coordenada só é aprovada quando o provider termina com `stopReason: completed` e retorna exatamente um objeto JSON completo e validado, sem texto ou propriedades extras. A forma aprovada é `{"status":"approved","findings":[]}`. Achados usam `status:"findings"` e de 1 a 12 registros com `id`, `severity`, `title`, `file` relativo e `description` limitada. `severity` precisa ser uma string escalar do enum `P0`–`P3`; arrays, outros tipos ou valores fora do enum invalidam o contrato. Prosa livre, JSON extra/truncado/malformado, schema desconhecido, resposta incompleta ou stopReason diferente de `completed` são inconclusivos/inválidos: nunca equivalem a aprovação nem autorizam correção.
+
+O texto do reviewer é dado não confiável, não é convertido em comandos de shell e o reviewer recebe ferramentas read-only. A síntese do modelo não é a fonte de verdade do resultado da revisão: o estado da revisão e as pendências observadas são persistidos e incluídos deterministicamente na resposta final e nos eventos SSE, inclusive quando a síntese omite um finding, afirma sucesso ou falha. Aprovação sem achados, isoladamente, não marca o objetivo como concluído; conclusão continua dependendo dos fatos de execução/entrega registrados.
+
+### Correção única, prazo e permissões
+
+Para achados estruturados acionáveis, o orquestrador permite no máximo um executor corretivo e uma segunda revisão. Não há repetição corretiva após a segunda revisão. Em jornadas sem prazo global, a correção pode ocorrer sem `budget` explícito. Com orçamento/prazo, só começa antes da reserva de finalização e preserva o deadline original; não recebe uma janela nova. Se não houver tempo suficiente, o finding permanece pendente. Cancelamento, orçamento esgotado, revisão inválida/incompleta, ou falta de evidência/permissão para corrigir encerram o ciclo sem nova tentativa.
+
+A correção exige rota com ferramentas, projeto local, sandbox configurada como `workspace-write` e correspondência entre caminhos reportados e artefatos modificados observados. O executor corretivo é um worker do mesmo Run e reutiliza seu isolamento, aprovações e cancelamento. Findings são serializados como dados não confiáveis, não instruções. A correção não amplia escopo nem relaxa sandbox/aprovações. Checks after-edit habilitados podem executar após o reparo; a segunda revisão observa o estado resultante. Resumos usados pela síntese devem refletir o reparo, não somente o estado anterior.
+
+### Checks e limites de evidência
+
+Esse ciclo só se aplica ao trabalho coordenado; perguntas simples continuam no caminho curto. Não há execução automática de suíte genérica ou build como política de correção. Checks são correlacionados internamente por identidade exata (nome + comando), sem enviar comandos nem saídas no JSON automático do reviewer; os eventos/evidências privados preservam a associação e os logs completos são recuperáveis sob demanda. Hooks homônimos com comandos diferentes permanecem independentes. Check falho ou sem identidade de fonte confiável não confirma validação.
+
+A decisão de revisão é única e validada antes de aprovar, autorizar correção ou limpar findings: exige resposta concluída, contrato estruturado válido e identidade do checkout verificada e estável antes/depois da revisão. A ausência de checks não dispensa identidade; quando houver checks, cada identidade name+command precisa corresponder ao mesmo fonte estável. Check falho correspondente impede aprovação limpa, mas não bloqueia correção de um finding concreto elegível; para aprovar/limpar achados, todos os checks aplicáveis precisam passar. `unknown` não é convertido em confirmação. JSON de findings pode ser relatado em modo read-only com limitação explícita, inclusive quando `changedPaths` é vazio/unknown/truncated ou artefatos locais não são capturados em SSH; isso não confirma nem resolve o finding. Uma aprovação posterior inválida por mudança de fonte preserva o último finding válido como resolução pendente no estado e resposta persistidos/eventos SSE. Caminhos para relato aceitam segmentos relativos Next/React, espaços e acentos, rejeitando absolutos, escapes e controles; escrita continua exigindo membership nos artefatos alterados, escopo autorizado, revisão e permissões. Conteúdo de finding nunca é executado como comando.
+
+Neste checkout, o snapshot observado retornou `unknown`/truncado e `changedPaths: []`, embora o diff Git mostrasse cinco arquivos alterados. Portanto, não inferir nem documentar uma lista de arquivos alterados a partir desse snapshot, nem tratar identidade como confirmada. Resumos e snapshots não provam que todo o checkout foi verificado.
+
+### Verificações registradas e não executadas
+
+Os resumos das etapas de implementação t1/t2 registram: t1, 26 testes focalizados, `npm run typecheck`, Prettier nos três arquivos e `git diff --check`; t2, `npx tsc --noEmit`, Prettier, `git diff --check`, 8 testes filtrados de revisão/correção/orçamento/cancelamento e 39/39 em `tests/coordination.test.ts` + `tests/hooks-orchestrator.test.ts`. Esses são registros das etapas anteriores, não verificações executadas durante esta atualização de documentação e não constituem aprovação independente. A suíte completa, build, cobertura, benchmark e validação com modelo real não foram executados nas etapas relatadas. A tentativa de suíte padrão mencionada no registro t2 falhou antes de iniciar testes por `EROFS` em `node_modules/.vite-temp`; ela não conta como teste executado.

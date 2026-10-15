@@ -53,6 +53,178 @@ afterEach(async () => {
 });
 
 describe('credential-free remote runner', () => {
+  it('reports per-stream raw-byte capture at the limit, above it, and across UTF-8 decoding', async () => {
+    const harness = await createHarness();
+    const exec = (id: string, code: string) =>
+      harness.send({
+        id,
+        method: 'call',
+        tool: 'exec',
+        args: { command: ['python3', '-c', code], timeoutMs: 5000 },
+      });
+    try {
+      const empty = await exec('capture-empty', 'pass');
+      expect(empty).toMatchObject({
+        ok: true,
+        result: {
+          stdout: '',
+          stderr: '',
+          stdoutCapture: { observedBytes: 0, retainedBytes: 0, truncated: false, state: 'complete' },
+          stderrCapture: { observedBytes: 0, retainedBytes: 0, truncated: false, state: 'complete' },
+        },
+      });
+
+      const exact = await exec(
+        'capture-exact',
+        'import sys; sys.stdout.buffer.write(b"a" * 262144); sys.stderr.buffer.write(b"b" * 262144)',
+      );
+      expect(exact).toMatchObject({
+        ok: true,
+        result: {
+          stdoutCapture: { observedBytes: 262144, retainedBytes: 262144, truncated: false, state: 'complete' },
+          stderrCapture: { observedBytes: 262144, retainedBytes: 262144, truncated: false, state: 'complete' },
+        },
+      });
+      expect((exact.result as { stdout: string }).stdout).toHaveLength(262144);
+      expect((exact.result as { stderr: string }).stderr).toHaveLength(262144);
+
+      const over = await exec(
+        'capture-over',
+        'import sys; sys.stdout.buffer.write(b"a" * 262145); sys.stderr.buffer.write(b"b" * 262145)',
+      );
+      expect(over).toMatchObject({
+        ok: true,
+        result: {
+          stdoutCapture: { observedBytes: 262145, retainedBytes: 262144, truncated: true, state: 'complete' },
+          stderrCapture: { observedBytes: 262145, retainedBytes: 262144, truncated: true, state: 'complete' },
+        },
+      });
+
+      const utf8 = await exec(
+        'capture-utf8',
+        'import sys; sys.stdout.buffer.write(b"x" * 262142 + b"\\xe2\\x82"); sys.stderr.buffer.write(b"\\xff")',
+      );
+      expect(utf8).toMatchObject({
+        ok: true,
+        result: {
+          stdoutCapture: { observedBytes: 262144, retainedBytes: 262142, truncated: true, state: 'complete' },
+          stderrCapture: { observedBytes: 1, retainedBytes: 1, truncated: false, state: 'complete' },
+        },
+      });
+      expect((utf8.result as { stdout: string }).stdout).toBe('x'.repeat(262142));
+      expect((utf8.result as { stderr: string }).stderr).toBe('\uFFFD');
+
+      const malformed = await exec(
+        'capture-malformed-full',
+        'import sys; sys.stdout.buffer.write(b"\\xff" * 262144); sys.stderr.buffer.write(b"\\xff" * 262144)',
+      );
+      expect(malformed).toMatchObject({
+        ok: true,
+        result: {
+          stdoutCapture: { observedBytes: 262144, retainedBytes: 87381, truncated: true, state: 'complete' },
+          stderrCapture: { observedBytes: 262144, retainedBytes: 87381, truncated: true, state: 'complete' },
+        },
+      });
+      expect((malformed.result as { stdout: string }).stdout).toHaveLength(87381);
+      expect((malformed.result as { stderr: string }).stderr).toHaveLength(87381);
+      expect((malformed.result as { stdout: string }).stdout).toBe('\uFFFD'.repeat(87381));
+      expect((malformed.result as { stderr: string }).stderr).toBe('\uFFFD'.repeat(87381));
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('marks a snapshot incomplete when an inherited pipe has not reached EOF', async () => {
+    const harness = await createHarness();
+    try {
+      const response = await harness.send({
+        id: 'capture-incomplete',
+        method: 'call',
+        tool: 'exec',
+        args: {
+          command: [
+            'python3',
+            '-c',
+            'import os,time; pid=os.fork(); os._exit(0) if pid else None; os.setsid(); time.sleep(4)',
+          ],
+          timeoutMs: 5000,
+        },
+      });
+      expect(response).toMatchObject({
+        ok: true,
+        result: {
+          stdoutCapture: { state: 'incomplete' },
+          stderrCapture: { state: 'incomplete' },
+        },
+      });
+    } finally {
+      await harness.close();
+    }
+  }, 10000);
+
+  it('keeps escaped output and capture metadata inside the one-megabyte response frame', async () => {
+    const harness = await createHarness();
+    try {
+      const response = await harness.send({
+        id: 'quoted-frame-edge-' + 'i'.repeat(110),
+        method: 'call',
+        tool: 'exec',
+        args: {
+          command: [
+            'python3',
+            '-c',
+            'import sys; sys.stdout.buffer.write(bytes([34]) * 262144); sys.stderr.buffer.write(bytes([92]) * 87381 + bytes([1]) * 87381 + bytes([34]) * 87382)',
+          ],
+          timeoutMs: 5000,
+        },
+      });
+      expect(response).toMatchObject({ ok: true, result: { exitCode: 0 } });
+      expect(Buffer.byteLength(JSON.stringify(response) + '\n', 'utf8')).toBeLessThanOrEqual(1024 * 1024);
+      const result = response.result as {
+        stdout: string;
+        stderr: string;
+        stdoutCapture: { observedBytes: number; retainedBytes: number; truncated: boolean; state: string };
+        stderrCapture: { observedBytes: number; retainedBytes: number; truncated: boolean; state: string };
+      };
+      expect(result.stdoutCapture).toMatchObject({ observedBytes: 262144, truncated: true, state: 'complete' });
+      expect(result.stderrCapture).toMatchObject({ observedBytes: 262144, truncated: true, state: 'complete' });
+      expect(result.stdoutCapture.retainedBytes).toBe(Buffer.byteLength(result.stdout, 'utf8'));
+      expect(result.stderrCapture.retainedBytes).toBeGreaterThan(0);
+      expect(Buffer.byteLength(result.stdout, 'utf8')).toBeLessThanOrEqual(256 * 1024);
+      expect(Buffer.byteLength(result.stderr, 'utf8')).toBeLessThanOrEqual(256 * 1024);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('reports timeout and cancellation as errors without returning a complete capture result', async () => {
+    const harness = await createHarness();
+    try {
+      const timeout = await harness.send({
+        id: 'capture-timeout',
+        method: 'call',
+        tool: 'exec',
+        args: { command: ['python3', '-c', 'import time; time.sleep(1)'], timeoutMs: 100 },
+      });
+      expect(timeout).toMatchObject({ ok: false, error: 'command timed out' });
+      expect(timeout).not.toHaveProperty('result.stdoutCapture');
+
+      const cancelPromise = harness.send({
+        id: 'capture-cancel',
+        method: 'call',
+        tool: 'exec',
+        args: { command: ['python3', '-c', 'import time; time.sleep(30)'], timeoutMs: 60000 },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 75));
+      harness.child.stdin.write(`${JSON.stringify({ method: 'cancel', id: 'capture-cancel' })}\n`);
+      const cancelled = await cancelPromise;
+      expect(cancelled).toMatchObject({ ok: false, error: 'command cancelled' });
+      expect(cancelled).not.toHaveProperty('result.stdoutCapture');
+    } finally {
+      await harness.close();
+    }
+  }, 10000);
+
   it('diagnoses executor capabilities in-process without installing tools or reading secrets', async () => {
     const harness = await createHarness();
     try {

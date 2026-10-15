@@ -23,6 +23,21 @@ export interface RemoteProbe {
 }
 export type RemoteToolName =
   'exec' | 'read_file' | 'write_file' | 'replace_text' | 'list' | 'stat' | 'search' | 'git' | 'diagnose';
+/** Raw-byte capture status. `complete` means the reader reached EOF, not that output was untruncated. */
+export interface RemoteStreamCapture {
+  observedBytes: number;
+  retainedBytes: number;
+  truncated: boolean;
+  state: 'complete' | 'incomplete' | 'error';
+}
+/** Optional because installed protocol-1 runners may predate capture metadata. */
+export interface RemoteExecResult {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+  stdoutCapture?: RemoteStreamCapture;
+  stderrCapture?: RemoteStreamCapture;
+}
 export interface RemoteRuntime {
   label: string;
   root: string;

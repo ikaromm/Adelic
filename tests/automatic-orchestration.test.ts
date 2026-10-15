@@ -76,6 +76,8 @@ function setup(options: {
     | 'timeout-second'
     | 'approved-second-change'
     | 'finding-second-change'
+    | 'omitted-prior-and-new'
+    | 'id-conflict-second'
     | 'outside-partial';
   reviewStaticOnly?: boolean;
   reviewerFailure?: boolean;
@@ -117,6 +119,8 @@ function setup(options: {
   realCheckRunner?: boolean;
   checkFails?: boolean;
   checkStatuses?: ('failed' | 'passed')[];
+  checkOutput?: string;
+  checkTruncated?: boolean;
   graphContext?: string;
 }) {
   const directory = mkdtempSync(join(tmpdir(), 'adelic-auto-coordination-'));
@@ -380,6 +384,13 @@ function setup(options: {
         await new Promise((resolve) => setTimeout(resolve, options.reviewerDelayMs));
       if (input.prompt.includes('Corrigir achados objetivos') && options.repairFailure)
         throw new Error('fixture repair failure');
+      if (
+        input.prompt.includes('Corrigir achados objetivos') &&
+        ['omitted-prior-and-new', 'id-conflict-second'].includes(options.reviewCycle ?? '')
+      ) {
+        mkdirSync(join(input.cwd, 'src'), { recursive: true });
+        writeFileSync(join(input.cwd, 'src/drift.ts'), 'export const drift = true;\n');
+      }
       if (input.prompt.includes('Corrigir achados objetivos') && options.reviewCycle === 'cancel') {
         options.onRepairStarted?.();
         await new Promise<void>((_resolve, reject) => {
@@ -410,6 +421,27 @@ function setup(options: {
         }
         if (options.reviewCycle === 'failure-second' && reviewPasses > 1)
           throw new Error('fixture second reviewer failure');
+        if (options.reviewCycle === 'omitted-prior-and-new' && reviewPasses > 1)
+          return {
+            text: '{"status":"findings","findings":[{"id":"f2","severity":"P2","title":"Second prior defect","file":"src/implemented.ts","description":"The second initial finding remains unresolved"},{"id":"f3","severity":"P1","title":"Repair drift regression","file":"src/drift.ts","description":"The repair introduced an unrelated regression outside the authorized scope"}]}',
+            stopReason: 'completed',
+          };
+        if (options.reviewCycle === 'id-conflict-second' && reviewPasses > 1)
+          return {
+            text: JSON.stringify({
+              status: 'findings',
+              findings: [
+                {
+                  id: 'a'.repeat(40),
+                  severity: 'P1',
+                  title: 'Unrelated repair drift',
+                  file: 'src/drift.ts',
+                  description: 'A distinct defect appeared outside the repair scope',
+                },
+              ],
+            }),
+            stopReason: 'completed',
+          };
         if (
           (options.reviewCycle === 'approved-second-change' || options.reviewCycle === 'finding-second-change') &&
           reviewPasses > 1
@@ -427,6 +459,27 @@ function setup(options: {
         if (options.reviewCycle === 'outside-partial')
           return {
             text: '{"status":"findings","findings":[{"id":"f1","severity":"P2","title":"Unchanged fixture","file":"src/unmodified.ts","description":"This file did not change in the run"}]}',
+            stopReason: 'completed',
+          };
+        if (options.reviewCycle === 'omitted-prior-and-new')
+          return {
+            text: '{"status":"findings","findings":[{"id":"f1","severity":"P1","title":"First prior defect","file":"src/implemented.ts","description":"Incorrect output branch A"},{"id":"f2","severity":"P2","title":"Second prior defect","file":"src/implemented.ts","description":"Incorrect output branch B"}]}',
+            stopReason: 'completed',
+          };
+        if (options.reviewCycle === 'id-conflict-second')
+          return {
+            text: JSON.stringify({
+              status: 'findings',
+              findings: [
+                {
+                  id: 'a'.repeat(40),
+                  severity: 'P2',
+                  title: 'Fixture defect',
+                  file: 'src/implemented.ts',
+                  description: 'Incorrect output branch',
+                },
+              ],
+            }),
             stopReason: 'completed',
           };
         if (options.reviewCycle === 'invalid') return { text: 'Approved. No issues.', stopReason: 'completed' };
@@ -662,7 +715,8 @@ function setup(options: {
             status,
             exitCode: status === 'failed' ? 1 : 0,
             durationMs: 3,
-            output: status === 'failed' ? 'falha observada' : undefined,
+            output: status === 'failed' ? (options.checkOutput ?? 'falha observada') : undefined,
+            ...(options.checkTruncated ? { truncated: true } : {}),
           };
         }
       : undefined,
@@ -1432,6 +1486,69 @@ describe('automatic orchestration', () => {
     }
   });
 
+  it('rechecks every prior finding, preserves omitted findings as unconfirmed, and reports new drift', async () => {
+    const test = setup({ review: true, reviewCycle: 'omitted-prior-and-new', artifactChange: true });
+    let terminal!: () => void;
+    const done = new Promise<void>((resolve) => (terminal = resolve));
+    const unsubscribe = test.orchestrator.subscribe((event) => {
+      if (event.type === 'run' && event.run.sessionId === test.session.id && event.run.status !== 'running') terminal();
+    });
+    try {
+      const started = await test.orchestrator.start(test.session, 'Implemente uma melhoria no projeto');
+      await done;
+      const reviewerInputs = test.inputs.filter((input) => input.prompt.includes('Faça revisão independente'));
+      const secondPrompt = reviewerInputs[1]?.prompt ?? '';
+      const answer = test.store
+        .listMessages(test.session.id)
+        .find((message) => message.runId === started.runId && message.role === 'assistant');
+      expect(test.reviewPasses()).toBe(2);
+      expect(
+        test.store
+          .listSessionTasks(test.session.id)
+          .filter((task) => task.title === 'Corrigir achados objetivos da revisão'),
+      ).toHaveLength(1);
+      expect(secondPrompt).toContain('reavalie explicitamente cada ID anterior');
+      expect(secondPrompt).toContain('"id":"f1"');
+      expect(secondPrompt).toContain('"id":"f2"');
+      expect(secondPrompt).toContain('Escopo do reparo: ["src/implemented.ts"]');
+      expect(secondPrompt).toContain('Delta esperado');
+      expect(secondPrompt).toContain('drift/regressão');
+      expect(answer?.content).toContain('First prior defect');
+      expect(answer?.content).toContain('Second prior defect');
+      expect(answer?.content).toContain('Repair drift regression');
+      expect(answer?.content).toContain('Resolução não confirmada para: f1');
+      expect(answer?.content).not.toContain('f1 P1 First prior defect permanece');
+      expect(test.store.getRun(started.runId)?.delivery?.objective).not.toBe('met');
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it('preserves the prior finding when a second review reuses its ID for another file', async () => {
+    const originalId = 'a'.repeat(40);
+    const test = setup({ review: true, reviewCycle: 'id-conflict-second', artifactChange: true });
+    let terminal!: () => void;
+    const done = new Promise<void>((resolve) => (terminal = resolve));
+    const unsubscribe = test.orchestrator.subscribe((event) => {
+      if (event.type === 'run' && event.run.sessionId === test.session.id && event.run.status !== 'running') terminal();
+    });
+    try {
+      const started = await test.orchestrator.start(test.session, 'Implemente uma melhoria no projeto');
+      await done;
+      const answer = test.store
+        .listMessages(test.session.id)
+        .find((message) => message.runId === started.runId && message.role === 'assistant');
+      expect(test.reviewPasses()).toBe(2);
+      expect(answer?.content).toContain(`${originalId} P2 Fixture defect (src/implemented.ts)`);
+      expect(answer?.content).toContain(`${originalId.slice(0, 37)}-r2 P1 Unrelated repair drift (src/drift.ts)`);
+      expect(answer?.content).toContain(`Resolução não confirmada para: ${originalId}`);
+      expect(answer?.content).toContain('IDs anteriores reutilizados com outro conteúdo');
+      expect(test.store.getRun(started.runId)?.delivery?.objective).not.toBe('met');
+    } finally {
+      unsubscribe();
+    }
+  });
+
   it('repairs a finding with path-local hashes while the complete artifact list stays unknown', async () => {
     const test = setup({
       review: true,
@@ -1611,10 +1728,10 @@ describe('automatic orchestration', () => {
       const answer = test.store
         .listMessages(test.session.id)
         .find((message) => message.runId === started.runId && message.role === 'assistant');
-      expect(answer?.content).toContain('Achados válidos ainda pendentes: P2 Fixture defect');
+      expect(answer?.content).toContain('Achados válidos ainda pendentes: f1 P2 Fixture defect');
       expect(answer?.content).toContain('Unconfirmed second defect');
       expect(answer?.content).toContain('source-identity-unverified-or-changed');
-      expect(deltas.join('')).toContain('Achados válidos ainda pendentes: P2 Fixture defect');
+      expect(deltas.join('')).toContain('Achados válidos ainda pendentes: f1 P2 Fixture defect');
       expect(test.store.getRun(started.runId)?.delivery?.objective).not.toBe('met');
     } finally {
       unsubscribe();
@@ -3091,7 +3208,8 @@ describe('automatic orchestration', () => {
     expect(answer?.content).toContain('processo failed');
     expect(answer?.content).toContain('fixture worker failure');
     expect(answer?.content).toContain('Ação recusada/bloqueada');
-    expect(answer?.content).toContain('npm test');
+    expect(answer?.content).toMatch(/estado: (blocked|denied)/);
+    expect(answer?.content).not.toContain('npm test');
     expect(answer?.content).toContain('validação não confirmada');
     expect(test.store.getRun(runId)).toMatchObject({
       delivery: { response: 'completed', integration: 'blocked', objective: 'unknown' },
@@ -3100,6 +3218,57 @@ describe('automatic orchestration', () => {
       test.store.listSessionTasks(test.session.id).find((task) => task.runId === runId && task.role === 'worker')
         ?.status,
     ).toBe('failed');
+  });
+
+  it('keeps command and check log details in run evidence while omitting them from synthesis facts', async () => {
+    const commandSecret = 'COMMAND_SECRET_SENTINEL';
+    const logSecret = 'LOG_SECRET_SENTINEL';
+    const test = setup({
+      review: true,
+      artifactChange: true,
+      gitProject: true,
+      checkBeforeReview: true,
+      checkFails: true,
+      checkOutput: logSecret,
+      checkTruncated: true,
+    });
+    test.store.putHooks('project', {
+      afterEdit: [{ name: 'sentinel check', command: `echo ${commandSecret}`, timeoutSec: 10, enabled: true }],
+      blockedCommands: [],
+      autoFix: false,
+    });
+    let terminal!: () => void;
+    const done = new Promise<void>((resolve) => (terminal = resolve));
+    const unsubscribe = test.orchestrator.subscribe((event) => {
+      if (event.type === 'run' && event.run.sessionId === test.session.id && event.run.status !== 'running') terminal();
+    });
+    try {
+      const started = await test.orchestrator.start(test.session, 'Implemente uma melhoria no projeto');
+      await done;
+      const synthesis = test.inputs.find((input) => input.prompt.includes('Fatos estruturados de execução'));
+      const answer = test.store
+        .listMessages(test.session.id)
+        .find((message) => message.runId === started.runId && message.role === 'assistant');
+      const evidence = await test.orchestrator.runEvidence.get(started.runId);
+      expect(synthesis?.prompt).not.toContain(commandSecret);
+      expect(synthesis?.prompt).not.toContain(logSecret);
+      expect(answer?.content).toContain('sentinel check');
+      expect(answer?.content).toContain('failed');
+      expect(answer?.content).toContain('código de saída 1');
+      expect(answer?.content).toContain('saída truncada');
+      expect(answer?.content).toContain('identidade da fonte não confirmada');
+      expect(answer?.content).toContain('checkEventId=');
+      expect(answer?.content).not.toContain(commandSecret);
+      expect(answer?.content).not.toContain(logSecret);
+      expect(evidence?.checks[0]).toMatchObject({
+        command: `echo ${commandSecret}`,
+        output: logSecret,
+        truncated: true,
+      });
+      expect(evidence?.checks[0]?.eventId).toMatch(/^[0-9a-f-]{36}$/i);
+    } finally {
+      unsubscribe();
+    }
   });
 
   it(

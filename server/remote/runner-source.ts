@@ -435,16 +435,33 @@ def run_process(command, cwd, timeout, request_id):
         running[request_id] = (proc, cancel, descendants)
     stdout = bytearray()
     stderr = bytearray()
-    def drain(source, target):
-        while True:
-            chunk = source.read(8192)
-            if not chunk:
-                return
-            available = MAX_OUTPUT - len(target)
-            if available > 0:
-                target.extend(chunk[:available])
-    stdout_thread = threading.Thread(target=drain, args=(proc.stdout, stdout), daemon=True)
-    stderr_thread = threading.Thread(target=drain, args=(proc.stderr, stderr), daemon=True)
+    capture_lock = threading.Lock()
+    captures = {
+        "stdout": {"observedBytes": 0, "retainedBytes": 0, "state": "incomplete"},
+        "stderr": {"observedBytes": 0, "retainedBytes": 0, "state": "incomplete"},
+    }
+    def drain(name, source, target):
+        try:
+            while True:
+                chunk = source.read(8192)
+                with capture_lock:
+                    capture = captures[name]
+                    if not chunk:
+                        capture["state"] = "complete"
+                        return
+                    # JavaScript consumers require safe integers. Saturation still
+                    # truthfully signals that more output existed via the truncation flag.
+                    capture["observedBytes"] = min(9007199254740991, capture["observedBytes"] + len(chunk))
+                    available = MAX_OUTPUT - len(target)
+                    if available > 0:
+                        retained = chunk[:available]
+                        target.extend(retained)
+                        capture["retainedBytes"] += len(retained)
+        except Exception:
+            with capture_lock:
+                captures[name]["state"] = "error"
+    stdout_thread = threading.Thread(target=drain, args=("stdout", proc.stdout, stdout), daemon=True)
+    stderr_thread = threading.Thread(target=drain, args=("stderr", proc.stderr, stderr), daemon=True)
     stdout_thread.start()
     stderr_thread.start()
     deadline = time.monotonic() + timeout / 1000.0
@@ -462,7 +479,59 @@ def run_process(command, cwd, timeout, request_id):
             terminate_process(proc, descendants)
         stdout_thread.join(timeout=1)
         stderr_thread.join(timeout=1)
-        return {"exitCode": proc.returncode, "stdout": bytes(stdout).decode("utf-8", errors="replace"), "stderr": bytes(stderr).decode("utf-8", errors="replace")}
+        # Capture text and metadata under one lock so counters describe exactly the
+        # byte snapshot that was decoded, even when a reader missed the join limit.
+        with capture_lock:
+            stdout_bytes = bytes(stdout)
+            stderr_bytes = bytes(stderr)
+            stdout_capture = dict(captures["stdout"])
+            stderr_capture = dict(captures["stderr"])
+        def decode_retained(raw):
+            text = raw.decode("utf-8", errors="replace")
+            if len(text.encode("utf-8")) <= MAX_OUTPUT:
+                return raw, text
+            # Replacement characters can expand invalid UTF-8 to three output
+            # bytes per input byte. Choose a bounded raw prefix whose decoded text
+            # fits the existing output/frame contract. Prefix decoding can shrink
+            # when a UTF-8 sequence becomes complete, so this need not be maximal.
+            low = 0
+            high = len(raw)
+            while low < high:
+                middle = (low + high + 1) // 2
+                candidate = raw[:middle].decode("utf-8", errors="replace")
+                if len(candidate.encode("utf-8")) <= MAX_OUTPUT:
+                    low = middle
+                else:
+                    high = middle - 1
+            raw = raw[:low]
+            return raw, raw.decode("utf-8", errors="replace")
+        stdout_bytes, stdout_text = decode_retained(stdout_bytes)
+        stderr_bytes, stderr_text = decode_retained(stderr_bytes)
+        stdout_capture["retainedBytes"] = len(stdout_bytes)
+        stderr_capture["retainedBytes"] = len(stderr_bytes)
+        def result_value():
+            return {
+                "exitCode": proc.returncode,
+                "stdout": stdout_text,
+                "stderr": stderr_text,
+                "stdoutCapture": {**stdout_capture, "truncated": stdout_capture["observedBytes"] > stdout_capture["retainedBytes"]},
+                "stderrCapture": {**stderr_capture, "truncated": stderr_capture["observedBytes"] > stderr_capture["retainedBytes"]},
+            }
+        def response_fits():
+            envelope = {"id": request_id, "ok": True, "result": result_value()}
+            return len(json.dumps(envelope, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) + 1 <= MAX_FRAME
+        while not response_fits():
+            if len(stdout_bytes) >= len(stderr_bytes) and stdout_bytes:
+                stdout_bytes = stdout_bytes[:-min(16384, len(stdout_bytes))]
+                stdout_text = stdout_bytes.decode("utf-8", errors="replace")
+                stdout_capture["retainedBytes"] = len(stdout_bytes)
+            elif stderr_bytes:
+                stderr_bytes = stderr_bytes[:-min(16384, len(stderr_bytes))]
+                stderr_text = stderr_bytes.decode("utf-8", errors="replace")
+                stderr_capture["retainedBytes"] = len(stderr_bytes)
+            else:
+                raise RuntimeError("remote exec response metadata exceeds frame limit")
+        return result_value()
     finally:
         if proc.poll() is None:
             terminate_process(proc, descendants)
@@ -539,7 +608,13 @@ def execute(tool, args, request_id):
         # repository helpers, then override every configured executable filter key.
         # This controls normal Git behavior, not a hostile same-uid config race.
         filters = run_process(["git", "-C", str(cwd), "config", "--null", "--name-only", "--get-regexp", r"^filter\..*\.(clean|smudge|process|required)$"], cwd, timeout, request_id)
-        if filters["exitCode"] not in (0, 1) or len(filters["stdout"].encode("utf-8")) >= MAX_OUTPUT or (filters["stdout"] and not filters["stdout"].endswith("\0")):
+        if (filters["exitCode"] not in (0, 1) or
+                filters["stdoutCapture"]["state"] != "complete" or
+                filters["stdoutCapture"]["truncated"] or
+                filters["stderrCapture"]["state"] != "complete" or
+                filters["stderrCapture"]["truncated"] or
+                len(filters["stdout"].encode("utf-8")) >= MAX_OUTPUT or
+                (filters["stdout"] and not filters["stdout"].endswith("\0"))):
             raise ValueError("cannot safely read Git filter configuration")
         filter_keys = set(filters["stdout"].split("\0")) - {""}
         if len(filter_keys) > 1024:

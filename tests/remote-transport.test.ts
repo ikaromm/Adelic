@@ -156,6 +156,58 @@ afterAll(async () => {
 });
 
 describe('SSH remote host transport', () => {
+  it('accepts legacy exec results as unknown and validates optional raw-byte capture metadata', () => {
+    const legacy = { exitCode: 0, stdout: 'old runner', stderr: '' };
+    expect(validateRemoteResult('exec', legacy)).toEqual(legacy);
+
+    const current = {
+      exitCode: 0,
+      stdout: '\uFFFD',
+      stderr: '',
+      stdoutCapture: { observedBytes: 1, retainedBytes: 1, truncated: false, state: 'complete' },
+      stderrCapture: { observedBytes: 0, retainedBytes: 0, truncated: false, state: 'complete' },
+    };
+    expect(validateRemoteResult('exec', current)).toEqual(current);
+    expect(() =>
+      validateRemoteResult('exec', {
+        ...current,
+        stdoutCapture: { observedBytes: 0, retainedBytes: 0, truncated: false, state: 'incomplete' },
+        stderrCapture: { observedBytes: 0, retainedBytes: 0, truncated: false, state: 'error' },
+      }),
+    ).not.toThrow();
+    // Raw invalid UTF-8 may decode to more UTF-8 bytes than were retained.
+    expect(() =>
+      validateRemoteResult('exec', {
+        ...current,
+        stdout: '\uFFFD'.repeat(100),
+        stdoutCapture: { observedBytes: 100, retainedBytes: 100, truncated: false, state: 'complete' },
+      }),
+    ).not.toThrow();
+    expect(() =>
+      validateRemoteResult('exec', {
+        ...current,
+        stdout: '\uFFFD'.repeat(87381),
+        stderr: '\uFFFD'.repeat(87381),
+        stdoutCapture: { observedBytes: 262144, retainedBytes: 87381, truncated: true, state: 'complete' },
+        stderrCapture: { observedBytes: 262144, retainedBytes: 87381, truncated: true, state: 'complete' },
+      }),
+    ).not.toThrow();
+
+    const invalid = [
+      { observedBytes: Number.MAX_SAFE_INTEGER + 1, retainedBytes: 0, truncated: true, state: 'complete' },
+      { observedBytes: 1, retainedBytes: 2, truncated: false, state: 'complete' },
+      { observedBytes: 262145, retainedBytes: 262145, truncated: false, state: 'complete' },
+      { observedBytes: 2, retainedBytes: 1, truncated: false, state: 'complete' },
+      { observedBytes: 0, retainedBytes: 0, truncated: false, state: 'unknown' },
+      { observedBytes: 0, retainedBytes: 0, truncated: false, state: ['complete'] },
+      { observedBytes: 0, retainedBytes: 0, truncated: 0, state: 'complete' },
+    ];
+    for (const stdoutCapture of invalid) {
+      expect(() => validateRemoteResult('exec', { ...current, stdoutCapture })).toThrow(/exec result/);
+    }
+    expect(() => validateRemoteResult('exec', { ...current, stderrCapture: undefined })).toThrow(/exec result/);
+  });
+
   it('validates bounded executor capability diagnostics', () => {
     const report = {
       git: 'binary-only',
@@ -284,7 +336,26 @@ describe('SSH remote host transport', () => {
           { command: ['printf', 'still-alive'], timeoutMs: 5000 },
           AbortSignal.timeout(5000),
         ),
-      ).toMatchObject({ exitCode: 0, stdout: 'still-alive' });
+      ).toMatchObject({
+        exitCode: 0,
+        stdout: 'still-alive',
+        stdoutCapture: { observedBytes: 11, retainedBytes: 11, truncated: false, state: 'complete' },
+        stderrCapture: { observedBytes: 0, retainedBytes: 0, truncated: false, state: 'complete' },
+      });
+      const malformedOutput = (await connection.call(
+        'exec',
+        {
+          command: [
+            'python3',
+            '-c',
+            'import sys; sys.stdout.buffer.write(b"\\xff" * 262144); sys.stderr.buffer.write(b"\\xff" * 262144)',
+          ],
+          timeoutMs: 5000,
+        },
+        AbortSignal.timeout(5000),
+      )) as { stdout: string; stderr: string };
+      expect(malformedOutput.stdout).toBe('\uFFFD'.repeat(87381));
+      expect(malformedOutput.stderr).toBe('\uFFFD'.repeat(87381));
       expect(
         await connection.call('write_file', { path: 'remote.txt', content: 'from ssh' }, AbortSignal.timeout(5000)),
       ).toMatchObject({ bytesWritten: 8 });

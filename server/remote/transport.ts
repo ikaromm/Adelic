@@ -3,7 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { chmod, link, lstat, mkdir, open, readFile, rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import type { RemoteHost, RemoteProbe, RemoteToolName } from '../../shared/remote-hosts.js';
+import type { RemoteHost, RemoteProbe, RemoteStreamCapture, RemoteToolName } from '../../shared/remote-hosts.js';
 import { REMOTE_RUNNER_SOURCE } from './runner-source.js';
 
 const MAX_FRAME = 1024 * 1024;
@@ -22,6 +22,7 @@ const TOOL_NAMES = new Set<RemoteToolName>([
 ]);
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+const MAX_REMOTE_OUTPUT = 256 * 1024;
 const ERROR_CATEGORIES = ['timeout', 'not_found', 'permission', 'invalid_request', 'conflict', 'executor'] as const;
 type RemoteErrorCategory = (typeof ERROR_CATEGORIES)[number];
 const isErrorCategory = (value: unknown): value is RemoteErrorCategory =>
@@ -122,7 +123,15 @@ export const validateRemoteResult = (tool: RemoteToolName, value: unknown): unkn
       break;
     case 'exec':
     case 'git':
-      if (!Number.isInteger(value.exitCode) || !isText(value.stdout, 256 * 1024) || !isText(value.stderr, 256 * 1024)) {
+      if (
+        !Number.isInteger(value.exitCode) ||
+        // Raw-byte counters are validated independently: replacement decoding can
+        // change UTF-8 string size relative to the retained prefix byte count.
+        !isText(value.stdout, MAX_REMOTE_OUTPUT) ||
+        !isText(value.stderr, MAX_REMOTE_OUTPUT) ||
+        ((value.stdoutCapture !== undefined || value.stderrCapture !== undefined) &&
+          (!validStreamCapture(value.stdoutCapture) || !validStreamCapture(value.stderrCapture)))
+      ) {
         throw new Error(`Remote ${tool} result did not match its schema`);
       }
       break;
@@ -210,6 +219,25 @@ export const validateRemoteResult = (tool: RemoteToolName, value: unknown): unkn
   }
   return value;
 };
+
+function validStreamCapture(value: unknown): value is RemoteStreamCapture {
+  if (!isRecord(value)) return false;
+  const { observedBytes, retainedBytes, truncated, state } = value;
+  if (
+    !Number.isSafeInteger(observedBytes) ||
+    !Number.isSafeInteger(retainedBytes) ||
+    (observedBytes as number) < 0 ||
+    (retainedBytes as number) < 0 ||
+    (retainedBytes as number) > (observedBytes as number) ||
+    (retainedBytes as number) > MAX_REMOTE_OUTPUT ||
+    typeof truncated !== 'boolean' ||
+    truncated !== (observedBytes as number) > (retainedBytes as number) ||
+    typeof state !== 'string' ||
+    !['complete', 'incomplete', 'error'].includes(state)
+  )
+    return false;
+  return true;
+}
 
 const validateInfo = (value: unknown): { protocol: number; python: string; platform: string; root: string } => {
   if (

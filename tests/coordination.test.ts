@@ -14,6 +14,7 @@ import {
   parseStructuredReview,
   isSafeReviewPath,
   decideReview,
+  reconcileReviewFindings,
   repairParentAreaContext,
   synthesisExecutionFacts,
   synthesisValidationIndex,
@@ -825,6 +826,131 @@ describe('delegated task contracts', () => {
     expect(parseStructuredReview('{"status":"approved","findings":[{"id":"f1"}]}')).toBeUndefined();
     expect(parseStructuredReview('{"status":"incomplete","findings":[]}')).toBeUndefined();
     expect(parseStructuredReview('{"status":"approved","findings":[]} trailing')).toBeUndefined();
+  });
+
+  it('parses explicit finding resolutions and optional bounded reproduction details strictly', () => {
+    const legacy = parseStructuredReview('{"status":"approved","findings":[]}');
+    expect(legacy).toEqual({ status: 'approved', findings: [] });
+    const parsed = parseStructuredReview(
+      JSON.stringify({
+        status: 'findings',
+        findings: [
+          {
+            id: 'f2',
+            severity: 'P1',
+            title: 'Regression',
+            file: 'src/app.ts',
+            description: 'Incorrect branch',
+            reproduction: {
+              steps: 'Run the app',
+              expected: 'Page loads',
+              observed: 'It crashes',
+              observationId: '18a9ec24-3a21-4dcb-91dc-82c9e7b9f9ba',
+            },
+          },
+        ],
+        resolvedFindings: [
+          {
+            id: 'f1',
+            evidence: 'The guard now handles the empty case.',
+            observationId: 'd973ca5b-6b4f-47cf-8f90-0a88a02a93e5',
+          },
+        ],
+      }),
+    );
+    expect(parsed).toMatchObject({
+      resolvedFindings: [
+        {
+          id: 'f1',
+          evidence: 'The guard now handles the empty case.',
+          observationId: 'd973ca5b-6b4f-47cf-8f90-0a88a02a93e5',
+        },
+      ],
+      findings: [
+        {
+          reproduction: {
+            steps: 'Run the app',
+            expected: 'Page loads',
+            observed: 'It crashes',
+            observationId: '18a9ec24-3a21-4dcb-91dc-82c9e7b9f9ba',
+          },
+        },
+      ],
+    });
+    const invalid = [
+      { resolvedFindings: [{ id: 'f1', evidence: 'ok', extra: true }] },
+      { resolvedFindings: [{ id: 'f1', evidence: '  ' }] },
+      { resolvedFindings: [{ id: 'f1', evidence: 'ok', observationId: 'fake-id' }] },
+      { resolvedFindings: Array.from({ length: 13 }, (_, index) => ({ id: `f${index}`, evidence: 'ok' })) },
+      {
+        findings: [{ id: 'f1', severity: 'P2', title: 'Bug', file: 'src/a.ts', description: 'Detail' }],
+        resolvedFindings: [{ id: 'f1', evidence: 'same ID cannot be both' }],
+      },
+      {
+        findings: [
+          {
+            id: 'f1',
+            severity: 'P2',
+            title: 'Bug',
+            file: 'src/a.ts',
+            description: 'Detail',
+            reproduction: { steps: 'Run', expected: 'Pass', observed: 'Fail', extra: 'rejected' },
+          },
+        ],
+      },
+      {
+        findings: [
+          {
+            id: 'f1',
+            severity: 'P2',
+            title: 'Bug',
+            file: 'src/a.ts',
+            description: 'Detail',
+            reproduction: { steps: ' ', expected: 'Pass', observed: 'Fail' },
+          },
+        ],
+      },
+    ];
+    for (const extra of invalid) {
+      const review = {
+        status: 'findings',
+        findings: [{ id: 'f2', severity: 'P2', title: 'Bug', file: 'src/a.ts', description: 'Detail' }],
+        ...extra,
+      };
+      expect(parseStructuredReview(JSON.stringify(review))).toBeUndefined();
+    }
+  });
+
+  it('reconciles only explicitly resolved IDs and preserves conflicting finding identities', () => {
+    const previous = [
+      { id: 'f1', severity: 'P2' as const, title: 'Old title', file: 'src/old.ts', description: 'Old issue' },
+      { id: 'f3', severity: 'P1' as const, title: 'Keep open', file: 'src/keep.ts', description: 'Still present' },
+    ];
+    const reconciled = reconcileReviewFindings(previous, {
+      status: 'findings',
+      findings: [{ id: 'f2', severity: 'P1', title: 'New issue', file: 'src/new.ts', description: 'Found now' }],
+      resolvedFindings: [{ id: 'f1', evidence: 'Fixed in the reviewed source.' }],
+    });
+    expect(reconciled).toMatchObject({
+      pending: [{ id: 'f3' }, { id: 'f2' }],
+      resolved: [{ finding: { id: 'f1' }, evidence: 'Fixed in the reviewed source.' }],
+      unconfirmed: [],
+      conflicts: [],
+    });
+
+    const omission = reconcileReviewFindings(previous, { status: 'approved', findings: [] });
+    expect(omission.pending.map(({ id }) => id)).toEqual(['f1', 'f3']);
+    expect(omission.resolved).toEqual([]);
+
+    const conflict = reconcileReviewFindings(previous, {
+      status: 'findings',
+      findings: [{ id: 'f1', severity: 'P2', title: 'Different title', file: 'src/old.ts', description: 'New report' }],
+      resolvedFindings: [{ id: 'unknown', evidence: 'No matching prior finding.' }],
+    });
+    expect(conflict.pending.map(({ id }) => id)).toEqual(['f1', 'f3', 'f1-2']);
+    expect(conflict.conflicts).toMatchObject([{ id: 'f1', renamedId: 'f1-2', previous: { title: 'Old title' } }]);
+    expect(conflict.unconfirmed).toEqual([{ id: 'unknown', evidence: 'No matching prior finding.' }]);
+    expect(conflict.resolved).toEqual([]);
   });
 
   it('accepts legitimate relative report paths but rejects traversal, absolute and control paths', () => {

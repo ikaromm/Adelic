@@ -315,6 +315,14 @@ export interface StructuredReviewFinding {
   title: string;
   file: string;
   description: string;
+  /** Untrusted reproduction details for reviewer context; never grants execution authority. */
+  reproduction?: { steps: string; expected: string; observed: string; observationId?: string };
+}
+
+export interface StructuredReviewResolution {
+  id: string;
+  evidence: string;
+  observationId?: string;
 }
 
 /** Parent scopes are bounded investigation context; they do not grant access or replace the request. */
@@ -351,7 +359,82 @@ export function repairParentAreaContext(
 }
 
 export type StructuredReview =
-  { status: 'approved'; findings: [] } | { status: 'findings'; findings: StructuredReviewFinding[] };
+  | { status: 'approved'; findings: []; resolvedFindings?: StructuredReviewResolution[] }
+  | { status: 'findings'; findings: StructuredReviewFinding[]; resolvedFindings?: StructuredReviewResolution[] };
+
+export interface ReviewFindingConflict {
+  id: string;
+  renamedId: string;
+  previous: StructuredReviewFinding;
+  incoming: StructuredReviewFinding;
+}
+
+export interface ReviewFindingReconciliation {
+  /** Prior findings that remain open, followed by findings first reported in this review. */
+  pending: StructuredReviewFinding[];
+  /** Prior findings explicitly resolved by this response. */
+  resolved: { finding: StructuredReviewFinding; evidence: string }[];
+  /** Resolution IDs absent from the prior finding set; they are never treated as confirmed. */
+  unconfirmed: StructuredReviewResolution[];
+  /** Same-ID findings whose file or title changed; the prior identity is retained. */
+  conflicts: ReviewFindingConflict[];
+}
+
+/**
+ * Reconcile findings by explicit ID only. Omitted resolutions (including legacy approved
+ * reviews) keep prior findings pending; source identity and approval remain the caller's gate.
+ */
+export function reconcileReviewFindings(
+  previous: StructuredReviewFinding[],
+  review: StructuredReview,
+): ReviewFindingReconciliation {
+  const priorById = new Map(previous.map((finding) => [finding.id, finding]));
+  const currentById = new Map(review.findings.map((finding) => [finding.id, finding]));
+  const requested = review.resolvedFindings ?? [];
+  const conflicts: ReviewFindingConflict[] = [];
+  const conflictIds = new Set<string>();
+  const usedIds = new Set([...previous, ...review.findings].map((finding) => finding.id));
+  requested.forEach(({ id }) => usedIds.add(id));
+  const renamedCurrent = new Map<string, StructuredReviewFinding>();
+
+  for (const incoming of review.findings) {
+    const prior = priorById.get(incoming.id);
+    if (!prior || (prior.file === incoming.file && prior.title === incoming.title)) continue;
+    conflictIds.add(prior.id);
+    let suffix = 2;
+    let renamedId: string;
+    do {
+      const ending = `-${suffix++}`;
+      renamedId = `${incoming.id.slice(0, 40 - ending.length)}${ending}`;
+    } while (usedIds.has(renamedId));
+    usedIds.add(renamedId);
+    const renamed = { ...incoming, id: renamedId };
+    renamedCurrent.set(incoming.id, renamed);
+    conflicts.push({ id: prior.id, renamedId, previous: prior, incoming });
+  }
+
+  const resolved: ReviewFindingReconciliation['resolved'] = [];
+  const unconfirmed: StructuredReviewResolution[] = [];
+  for (const resolution of requested) {
+    const prior = priorById.get(resolution.id);
+    if (!prior || conflictIds.has(resolution.id)) unconfirmed.push(resolution);
+    else resolved.push({ finding: prior, evidence: resolution.evidence });
+  }
+  const resolvedIds = new Set(resolved.map(({ finding }) => finding.id));
+  const pending: StructuredReviewFinding[] = [];
+  for (const prior of previous) {
+    if (resolvedIds.has(prior.id)) continue;
+    pending.push(currentById.get(prior.id) && !conflictIds.has(prior.id) ? currentById.get(prior.id)! : prior);
+  }
+  for (const incoming of review.findings) {
+    if (priorById.has(incoming.id)) {
+      if (conflictIds.has(incoming.id)) pending.push(renamedCurrent.get(incoming.id)!);
+      continue;
+    }
+    pending.push(incoming);
+  }
+  return { pending, resolved, unconfirmed, conflicts };
+}
 
 /** Paths are validated for reporting; write authorization is separately restricted to observed scope. */
 export function isSafeReviewPath(path: string): boolean {
@@ -455,16 +538,53 @@ export function parseStructuredReview(text: string): StructuredReview | undefine
   }
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
   const record = value as Record<string, unknown>;
-  if (Object.keys(record).some((key) => !['status', 'findings'].includes(key))) return undefined;
+  if (Object.keys(record).some((key) => !['status', 'findings', 'resolvedFindings'].includes(key))) return undefined;
   if (!Array.isArray(record.findings) || record.findings.length > 12) return undefined;
-  if (record.status === 'approved' && record.findings.length === 0) return { status: 'approved', findings: [] };
+  const resolvedFindings: StructuredReviewResolution[] | undefined =
+    record.resolvedFindings === undefined ? undefined : [];
+  if (record.resolvedFindings !== undefined) {
+    if (!Array.isArray(record.resolvedFindings) || record.resolvedFindings.length > 12) return undefined;
+    const resolvedIds = new Set<string>();
+    for (const candidate of record.resolvedFindings) {
+      if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return undefined;
+      const resolution = candidate as Record<string, unknown>;
+      if (
+        Object.keys(resolution).some((key) => !['id', 'evidence', 'observationId'].includes(key)) ||
+        typeof resolution.id !== 'string' ||
+        !/^[a-zA-Z0-9_-]{1,40}$/.test(resolution.id) ||
+        resolvedIds.has(resolution.id) ||
+        typeof resolution.evidence !== 'string' ||
+        !resolution.evidence.trim() ||
+        resolution.evidence.length > 1200 ||
+        (resolution.observationId !== undefined &&
+          (typeof resolution.observationId !== 'string' ||
+            !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+              resolution.observationId,
+            )))
+      )
+        return undefined;
+      resolvedIds.add(resolution.id);
+      resolvedFindings!.push({
+        id: resolution.id,
+        evidence: resolution.evidence.trim(),
+        ...(resolution.observationId === undefined ? {} : { observationId: resolution.observationId }),
+      });
+    }
+  }
+  if (record.status === 'approved' && record.findings.length === 0) {
+    return { status: 'approved', findings: [], ...(resolvedFindings === undefined ? {} : { resolvedFindings }) };
+  }
   if (record.status !== 'findings' || record.findings.length === 0) return undefined;
   const ids = new Set<string>();
   const findings: StructuredReviewFinding[] = [];
   for (const candidate of record.findings) {
     if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return undefined;
     const finding = candidate as Record<string, unknown>;
-    if (Object.keys(finding).some((key) => !['id', 'severity', 'title', 'file', 'description'].includes(key)))
+    if (
+      Object.keys(finding).some(
+        (key) => !['id', 'severity', 'title', 'file', 'description', 'reproduction'].includes(key),
+      )
+    )
       return undefined;
     if (
       typeof finding.id !== 'string' ||
@@ -482,6 +602,35 @@ export function parseStructuredReview(text: string): StructuredReview | undefine
       finding.description.length > 1600
     )
       return undefined;
+    let reproduction: StructuredReviewFinding['reproduction'];
+    if (finding.reproduction !== undefined) {
+      if (!finding.reproduction || typeof finding.reproduction !== 'object' || Array.isArray(finding.reproduction))
+        return undefined;
+      const details = finding.reproduction as Record<string, unknown>;
+      if (
+        Object.keys(details).some((key) => !['steps', 'expected', 'observed', 'observationId'].includes(key)) ||
+        typeof details.steps !== 'string' ||
+        !details.steps.trim() ||
+        details.steps.length > 1200 ||
+        typeof details.expected !== 'string' ||
+        !details.expected.trim() ||
+        details.expected.length > 600 ||
+        typeof details.observed !== 'string' ||
+        !details.observed.trim() ||
+        details.observed.length > 1200 ||
+        (details.observationId !== undefined &&
+          (typeof details.observationId !== 'string' ||
+            !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(details.observationId)))
+      )
+        return undefined;
+      reproduction = {
+        steps: details.steps.trim(),
+        expected: details.expected.trim(),
+        observed: details.observed.trim(),
+        ...(details.observationId === undefined ? {} : { observationId: details.observationId }),
+      };
+    }
+    if (resolvedFindings?.some(({ id }) => id === finding.id)) return undefined;
     ids.add(finding.id);
     findings.push({
       id: finding.id,
@@ -489,9 +638,10 @@ export function parseStructuredReview(text: string): StructuredReview | undefine
       title: finding.title.trim(),
       file: finding.file,
       description: finding.description.trim(),
+      ...(reproduction === undefined ? {} : { reproduction }),
     });
   }
-  return { status: 'findings', findings };
+  return { status: 'findings', findings, ...(resolvedFindings === undefined ? {} : { resolvedFindings }) };
 }
 
 /**

@@ -27,6 +27,8 @@ export interface RunEvidenceRecord {
   checks: RunEvidenceCheck[];
   outcome: { status: string; termination?: string; error?: string };
   workers?: unknown[];
+  /** Bounded observed executions, separate from configured checks and approval. */
+  reviewObservations?: unknown[];
   /** Bounded excerpt for indexes/context; full output is available only via explicit paging. */
   review?: string;
   fullReview?: string;

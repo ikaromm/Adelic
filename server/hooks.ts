@@ -347,10 +347,11 @@ export class HookChecks {
       text: '',
       createdAt: new Date().toISOString(),
     };
-    const save = (check: CheckResult) => {
-      const { key, vars } = checkHeadlineKey(check);
+    const save = (result: CheckResult) => {
+      const observed = { ...result, command: check.command, timeoutSec: check.timeoutSec };
+      const { key, vars } = checkHeadlineKey(observed);
       // `text` stays checkHeadline() (pt-BR); the key lets the UI show it in its locale.
-      this.deps.saveEvent({ ...event, text: checkHeadline(check), textKey: key, textVars: vars, check });
+      this.deps.saveEvent({ ...event, text: checkHeadline(observed), textKey: key, textVars: vars, check: observed });
     };
     const sourceWatch = watchCheckSource(cwd);
     const runner = this.deps.runner ?? runCheck;
@@ -404,6 +405,8 @@ export class HookChecks {
     else if (sourceWatch.changed()) source.state = 'changed';
     const observed: CheckResult = {
       ...result!,
+      command: check.command,
+      timeoutSec: check.timeoutSec,
       source,
       environment: observeCheckEnvironmentAfter(environmentAtSpawn, sandbox),
       operationalLog,

@@ -16,6 +16,7 @@ import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { Orchestrator } from '../server/orchestrator';
+import { observeCheckEnvironment, observeCheckSource } from '../server/check-source';
 import { GraphifyService } from '../server/graphify';
 import { RunEvidenceStore } from '../server/run-evidence';
 import { Store } from '../server/store';
@@ -129,12 +130,18 @@ function setup(options: {
   checkStatuses?: ('failed' | 'passed')[];
   checkOutput?: string;
   checkTruncated?: boolean;
+  repairDependency?: boolean;
   graphContext?: string;
 }) {
   const directory = mkdtempSync(join(tmpdir(), 'adelic-auto-coordination-'));
   const projectRoot = join(directory, 'project-root');
   const branchProtectorPath = join(directory, 'branch-protector');
   mkdirSync(projectRoot);
+  if (options.repairDependency) {
+    mkdirSync(join(projectRoot, 'src'));
+    writeFileSync(join(projectRoot, 'src/dependency.ts'), 'dependency before repair\n');
+    writeFileSync(join(projectRoot, 'src/preserve.ts'), 'user restricted file\n');
+  }
   if (options.gitProject) {
     writeFileSync(join(projectRoot, 'README.md'), 'base\\n');
     if (options.unchangedFindingState && options.unchangedFindingState !== 'untracked') {
@@ -337,7 +344,7 @@ function setup(options: {
                             instructions: options.slowWorktreeCreation
                               ? 'Create src/implemented.ts'
                               : 'Inspect the project',
-                            scope: [],
+                            scope: options.repairDependency ? ['src/'] : [],
                             dependsOn: [],
                           },
                         ],
@@ -696,6 +703,31 @@ function setup(options: {
               ? 'export const implemented = false;\\n'
               : 'export const implemented = true;\\n',
           );
+        }
+        if (options.repairDependency && input.prompt.includes('Corrigir achados objetivos')) {
+          expect(input.remote).toBeDefined();
+          const signal = new AbortController().signal;
+          const read = await input.remote!.call('read_file', { path: 'src/dependency.ts' }, signal);
+          await input.remote!.call(
+            'replace_text',
+            {
+              path: 'src/dependency.ts',
+              oldText: 'dependency before repair',
+              newText: 'dependency fixed',
+              expectedRevision: (read as { revision: string }).revision,
+            },
+            signal,
+          );
+          await expect(
+            input.remote!.call(
+              'write_file',
+              {
+                path: '../outside-project.txt',
+                content: 'must not escape',
+              },
+              signal,
+            ),
+          ).rejects.toThrow();
         }
         if (options.commitExecutorChanges) {
           gitIn(
@@ -1110,6 +1142,186 @@ exec "${realGit}" "$@"
 }
 
 describe('automatic orchestration', () => {
+  it.each([false, true])(
+    'does not run after-edit hooks or auto-fix an unchanged inspection (partial=%s)',
+    async (partialArtifacts) => {
+      const test = setup({ review: true, mode: 'deep', gitProject: true, partialArtifacts });
+      test.store.setSettings({ ...test.store.getSettings()!, sandbox: 'workspace-write' });
+      test.store.putHooks('project', {
+        afterEdit: [{ name: 'after edits only', command: 'false', timeoutSec: 10, enabled: true }],
+        blockedCommands: [],
+        autoFix: true,
+      });
+      const runId = await startAndWait(
+        test,
+        'Inspect the project architecture and report findings without changing any files.',
+      );
+      expect(
+        test.store.listEvents(test.session.id).filter((event) => event.runId === runId && event.check),
+      ).toHaveLength(0);
+      expect(test.store.listRuns(test.session.id)).toHaveLength(1);
+      expect(test.store.listSessionTasks(test.session.id).some((task) => task.role === 'reviewer')).toBe(true);
+    },
+    REAL_GIT_WORKFLOW_TIMEOUT_MS,
+  );
+
+  it(
+    'integrates a necessary dependency repair without treating finding locations as a file allowlist',
+    async () => {
+      const test = setup({
+        review: true,
+        reviewCycle: 'fixed',
+        artifactChange: true,
+        gitProject: true,
+        repairDependency: true,
+      });
+      test.store.setSettings({ ...test.store.getSettings()!, approvalMode: 'automatic' });
+      const runId = await startAndWait(
+        test,
+        'Implement coordinated changes across the project. Preserve src/preserve.ts.',
+      );
+      const repair = test.inputs.find((input) => input.prompt.includes('Corrigir achados objetivos'))!;
+      expect(repair).toBeDefined();
+      expect(repair.prompt).toContain('não são uma lista exaustiva dos arquivos necessários');
+      expect(repair.prompt).toContain('Preserve src/preserve.ts.');
+      expect(repair.prompt).toContain('Contexto das áreas parentais');
+      expect(readFileSync(join(test.projectRoot, 'src/dependency.ts'), 'utf8')).toBe('dependency fixed\n');
+      expect(readFileSync(join(test.projectRoot, 'src/preserve.ts'), 'utf8')).toBe('user restricted file\n');
+      expect(existsSync(join(test.projectRoot, 'outside-project.txt'))).toBe(false);
+      expect(existsSync(join(test.directory, 'outside-project.txt'))).toBe(false);
+      const tasks = test.store.listSessionTasks(test.session.id).filter((task) => task.runId === runId);
+      expect(tasks.find((task) => task.title === 'Corrigir achados objetivos da revisão')?.integration?.status).toBe(
+        'applied',
+      );
+      expect(test.reviewPasses()).toBe(2);
+    },
+    REAL_GIT_WORKFLOW_TIMEOUT_MS,
+  );
+
+  it(
+    'runs required hooks with partial artifacts and no Git integration',
+    async () => {
+      const test = setup({
+        review: true,
+        artifactChange: true,
+        partialArtifacts: true,
+        checkBeforeReview: true,
+        realCheckRunner: true,
+      });
+      test.store.putHooks('project', {
+        afterEdit: [{ name: 'required partial check', command: 'true', timeoutSec: 10, enabled: true }],
+        blockedCommands: [],
+        autoFix: false,
+      });
+      const runId = await startAndWait(test, 'Implement coordinated changes across the project.');
+      expect(test.store.getRun(runId)?.artifacts?.status).toBe('unknown');
+      const events = test.store.listEvents(test.session.id).filter((event) => event.runId === runId && event.check);
+      expect(events).toHaveLength(1);
+      expect(events[0].check).toMatchObject({
+        status: 'passed',
+        command: 'true',
+        timeoutSec: 10,
+        source: { state: 'verified' },
+      });
+      const review = test.inputs.find((input) => input.prompt.startsWith('Faça revisão independente'))!;
+      expect(review.prompt).toContain('"applicability":"applicable"');
+      expect(review.prompt).toContain('"pendingNames":[]');
+    },
+    LARGE_ARTIFACT_WORKFLOW_TIMEOUT_MS,
+  );
+
+  it(
+    'runs a missing hook even when a different required hook already has a current result',
+    async () => {
+      const test = setup({
+        review: true,
+        artifactChange: true,
+        gitProject: true,
+        checkBeforeReview: true,
+        realCheckRunner: true,
+      });
+      test.store.putHooks('project', {
+        afterEdit: [
+          { name: 'already checked', command: 'true', timeoutSec: 10, enabled: true },
+          { name: 'still required', command: 'printf second', timeoutSec: 10, enabled: true },
+        ],
+        blockedCommands: [],
+        autoFix: false,
+      });
+      let seeded = false;
+      const unsubscribe = test.orchestrator.subscribe((event) => {
+        if (seeded || event.type !== 'task' || event.task.integration?.status !== 'applied') return;
+        seeded = true;
+        test.store.addEvent({
+          id: 'seeded-current-check',
+          sessionId: test.session.id,
+          runId: event.task.runId,
+          type: 'check',
+          text: 'fixture current check',
+          createdAt: new Date().toISOString(),
+          check: {
+            name: 'already checked',
+            command: 'true',
+            timeoutSec: 10,
+            status: 'passed',
+            exitCode: 0,
+            source: observeCheckSource(test.projectRoot, event.task.runId),
+            environment: observeCheckEnvironment('workspace-write'),
+          },
+        });
+      });
+      try {
+        const runId = await startAndWait(test, 'Implement coordinated changes across the project.');
+        const events = test.store.listEvents(test.session.id).filter((event) => event.runId === runId && event.check);
+        expect(seeded).toBe(true);
+        expect(events).toHaveLength(2);
+        expect(events.find((event) => event.check?.name === 'still required')?.check).toMatchObject({
+          status: 'passed',
+          output: 'second',
+          source: { state: 'verified' },
+        });
+      } finally {
+        unsubscribe();
+      }
+    },
+    REAL_CHECK_REPAIR_WORKFLOW_TIMEOUT_MS,
+  );
+
+  it(
+    'does not approve when the required hook configuration changes during review',
+    async () => {
+      const test = setup({
+        review: true,
+        artifactChange: true,
+        gitProject: true,
+        checkBeforeReview: true,
+        realCheckRunner: true,
+      });
+      test.store.putHooks('project', {
+        afterEdit: [{ name: 'before', command: 'true', timeoutSec: 10, enabled: true }],
+        blockedCommands: [],
+        autoFix: false,
+      });
+      const original = test.providers.run.bind(test.providers);
+      vi.spyOn(test.providers, 'run').mockImplementation(async (input, emit, signal) => {
+        if (input.prompt.startsWith('Faça revisão independente'))
+          test.store.putHooks('project', {
+            afterEdit: [{ name: 'after', command: 'false', timeoutSec: 10, enabled: true }],
+            blockedCommands: [],
+            autoFix: false,
+          });
+        return original(input, emit, signal);
+      });
+      const runId = await startAndWait(test, 'Implement coordinated changes across the project.');
+      const answer = test.store
+        .listMessages(test.session.id)
+        .find((message) => message.runId === runId && message.role === 'assistant');
+      expect(answer?.content).toContain('Aprovação não confirmada (required-checks-pending)');
+      expect(test.store.getRun(runId)?.delivery?.objective).not.toBe('met');
+    },
+    REAL_CHECK_REPAIR_WORKFLOW_TIMEOUT_MS,
+  );
+
   it('keeps generic deep-request RunInput free of a large skills catalog', async () => {
     const test = setup({});
     for (let index = 0; index < 50; index++) {
@@ -1639,7 +1851,7 @@ describe('automatic orchestration', () => {
         .listSessionTasks(test.session.id)
         .find((task) => task.runId === secondStart.runId && task.output?.includes('RUN_TWO_REPORT'))!;
       const firstRepairInput = test.inputs.find((input) => input.prompt.includes('Handoff limitado do run'))!;
-      const handoffStart = firstRepairInput.prompt.indexOf('Handoff limitado do run');
+      const handoffStart = firstRepairInput.prompt.indexOf('Contexto das áreas parentais');
       const handoffEnd = firstRepairInput.prompt.indexOf('[/FIM HANDOFF]', handoffStart) + '[/FIM HANDOFF]'.length;
       expect(repairPrompts).toHaveLength(2);
       expect(repairPrompts[0]).toContain(`"runId":"${firstStart.runId}"`);
@@ -1732,7 +1944,9 @@ describe('automatic orchestration', () => {
       expect(secondPrompt).toContain('reavalie explicitamente cada ID anterior');
       expect(secondPrompt).toContain('"id":"f1"');
       expect(secondPrompt).toContain('"id":"f2"');
-      expect(secondPrompt).toContain('Escopo do reparo: ["src/implemented.ts"]');
+      expect(secondPrompt).toContain(
+        'Localizações dos achados do reparo (não são fronteira exaustiva de dependências): ["src/implemented.ts"]',
+      );
       expect(secondPrompt).toContain('Delta esperado');
       expect(secondPrompt).toContain('drift/regressão');
       expect(answer?.content).toContain('First prior defect');
@@ -2393,9 +2607,12 @@ describe('automatic orchestration', () => {
         gitProject: true,
         checkBeforeReview: true,
         checkFails: true,
+        realCheckRunner: true,
       });
       test.store.putHooks('project', {
-        afterEdit: [{ name: 'fixture typecheck', command: 'npm test', timeoutSec: 10, enabled: true }],
+        afterEdit: [
+          { name: 'fixture typecheck', command: "printf 'falha observada'; exit 1", timeoutSec: 10, enabled: true },
+        ],
         blockedCommands: [],
         autoFix: true,
       });
@@ -2445,7 +2662,7 @@ describe('automatic orchestration', () => {
         expect(test.store.listRuns(test.session.id)).toHaveLength(2);
         expect(
           test.store.listEvents(test.session.id).filter((event) => event.runId === fixRun.id && event.type === 'check'),
-        ).toHaveLength(0); // the correction made no new artifacts, so no check is fabricated
+        ).toHaveLength(1); // required verification still runs, while hookFix prevents recursion
       } finally {
         unsubscribe();
       }
@@ -2538,7 +2755,7 @@ describe('automatic orchestration', () => {
           { name: 'repair-state check', command: 'grep -q false src/implemented.ts', timeoutSec: 10, enabled: true },
         ],
         blockedCommands: [],
-        autoFix: false,
+        autoFix: true,
       });
       let terminal!: () => void;
       const done = new Promise<void>((resolve) => (terminal = resolve));
@@ -2564,6 +2781,8 @@ describe('automatic orchestration', () => {
         expect(tasks.filter((task) => task.title === 'Corrigir achados objetivos da revisão')).toHaveLength(1);
         expect(tasks.filter((task) => task.role === 'reviewer')).toHaveLength(2);
         expect(test.reviewPasses()).toBe(2);
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        expect(test.store.listRuns(test.session.id)).toHaveLength(1);
         expect(test.store.getRun(run.id)?.delivery?.objective).not.toBe('met');
       } finally {
         unsubscribe();
@@ -3447,7 +3666,11 @@ describe('automatic orchestration', () => {
         .listMessages(test.session.id)
         .find((message) => message.runId === started.runId && message.role === 'assistant');
       expect(run).toMatchObject({ status: 'failed', termination: 'timeout' });
-      expect(test.inputs.some((input) => input.prompt.includes('Corrija somente os achados estruturados'))).toBe(false);
+      expect(
+        test.inputs.some((input) =>
+          input.prompt.includes('Corrija somente os defeitos descritos nos achados estruturados'),
+        ),
+      ).toBe(false);
       expect(answer?.content).toContain('timeout');
       expect(answer?.content).toContain('Fixture defect');
     } finally {
@@ -3476,7 +3699,11 @@ describe('automatic orchestration', () => {
       const answer = test.store
         .listMessages(test.session.id)
         .find((message) => message.runId === started.runId && message.role === 'assistant');
-      expect(test.inputs.some((input) => input.prompt.includes('Corrija somente os achados estruturados'))).toBe(true);
+      expect(
+        test.inputs.some((input) =>
+          input.prompt.includes('Corrija somente os defeitos descritos nos achados estruturados'),
+        ),
+      ).toBe(true);
       expect(answer?.content).toContain('correção falhou');
       expect(answer?.content).toContain('Fixture defect');
       expect(finalMessageEvent?.content).toContain('correção falhou');
@@ -3510,7 +3737,9 @@ describe('automatic orchestration', () => {
       expect(run.budget).toBeUndefined();
       expect(test.reviewPasses()).toBe(2);
       expect(
-        test.inputs.filter((input) => input.prompt.includes('Corrija somente os achados estruturados')),
+        test.inputs.filter((input) =>
+          input.prompt.includes('Corrija somente os defeitos descritos nos achados estruturados'),
+        ),
       ).toHaveLength(1);
       expect(test.inputs.find((input) => input.prompt.includes('Fatos estruturados de execução'))?.prompt).toContain(
         'Corrigir achados objetivos da revisão [completed]',

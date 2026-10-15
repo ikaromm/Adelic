@@ -37,6 +37,8 @@ export interface CheckResult {
   name: string;
   /** Configured command that was actually dispatched by the check runner. */
   command?: string;
+  /** Effective configured deadline; retained to distinguish homonymous checks with different limits. */
+  timeoutSec?: number;
   status: CheckStatus;
   exitCode?: number | null;
   durationMs?: number;

@@ -627,6 +627,7 @@ async function runNative(task, info, workspace, attemptId) {
       .filter(Boolean)
       .at(-1) ??
     {};
+  const nativeUsageReported = nativeUsageSnapshot(usage);
   const toolItems = new Set(
     events
       .filter(
@@ -651,23 +652,12 @@ async function runNative(task, info, workspace, attemptId) {
           : child.code === 0
             ? 'unknown'
             : 'failed',
-    inputTokens: usage.input_tokens ?? usage.inputTokens ?? null,
-    outputTokens: usage.output_tokens ?? usage.outputTokens ?? null,
-    cachedInputTokens:
-      usage.cached_input_tokens ??
-      usage.cachedInputTokens ??
-      usage.input_tokens_details?.cached_tokens ??
-      usage.inputTokenDetails?.cachedTokens ??
-      null,
-    reasoningOutputTokens:
-      usage.reasoning_output_tokens ??
-      usage.reasoningOutputTokens ??
-      usage.output_tokens_details?.reasoning_tokens ??
-      usage.outputTokenDetails?.reasoningTokens ??
-      null,
-    tokenAvailability: Object.keys(usage).length
-      ? 'reported by Codex JSON events'
-      : 'Codex JSON events contained no usage object',
+    ...nativeUsageReported,
+    tokenAvailability: Object.values(nativeUsageReported).some((value) => value !== null)
+      ? 'valid counters reported by Codex JSON events; invalid counters remain unknown'
+      : Object.keys(usage).length
+        ? 'Codex JSON usage object contained no valid token counters'
+        : 'Codex JSON events contained no usage object',
     toolCalls: toolItems.size,
     failures,
     exitCode: child.code,

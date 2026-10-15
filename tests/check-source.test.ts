@@ -35,6 +35,36 @@ const fixture = () => {
 const check = (command: string): AfterEditCheck => ({ name: 'regression', command, timeoutSec: 10, enabled: true });
 
 describe('check source and environment evidence', () => {
+  it('attributes a real check with scratch output but detects a cache written into the checkout', async () => {
+    const root = fixture();
+    const events: RunEvent[] = [];
+    const hooks = new HookChecks({ saveEvent: (event) => events.push(event), startFix: async () => undefined });
+    await hooks.start(
+      'project',
+      root,
+      'workspace-write',
+      { id: 'run-scratch', sessionId: 'session' },
+      [check('file=$(mktemp); printf cache > "$file"; test -s "$file"; rm "$file"')],
+      false,
+    );
+    const scratch = events.filter((event) => event.check?.status === 'passed').at(-1)?.check;
+    expect(scratch).toMatchObject({ status: 'passed', source: { state: 'verified' } });
+    expect(events.every((event) => event.check?.command && event.check.timeoutSec === 10)).toBe(true);
+    await hooks.start(
+      'project',
+      root,
+      'workspace-write',
+      { id: 'run-project-cache', sessionId: 'session' },
+      [check('mkdir -p .cache; printf cache > .cache/check-output')],
+      false,
+    );
+    expect(readFileSync(join(root, '.cache/check-output'), 'utf8')).toBe('cache');
+    expect(events.filter((event) => event.check?.status === 'passed').at(-1)?.check).toMatchObject({
+      status: 'passed',
+      source: { state: 'changed' },
+    });
+  });
+
   it('fingerprints a dirty tracked and untracked source tree, not HEAD, and correlates failed real checks', async () => {
     const root = fixture();
     const baseline = observeCheckSource(root, 'run-baseline');

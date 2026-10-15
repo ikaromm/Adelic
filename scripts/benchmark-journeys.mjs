@@ -43,34 +43,92 @@ const sha256 = (data) => createHash('sha256').update(data).digest('hex');
 const iso = () => new Date().toISOString();
 
 export function parseArgs(argv) {
-  const options = { mode: 'preflight' };
+  const options = { mode: 'preflight', journey: null };
   for (let i = 0; i < argv.length; i += 1) {
     if (['--help', '-h'].includes(argv[i])) options.mode = 'help';
     else if (argv[i] === '--dry-run') options.mode = 'dry-run';
     else if (argv[i] === '--preflight') options.mode = 'preflight';
     else if (argv[i] === '--run') options.mode = 'run';
-    else throw new Error(`Unknown option: ${argv[i]}`);
+    else if (argv[i] === '--journey') {
+      const journey = argv[++i];
+      if (!journey) throw new Error('--journey requires a journey ID');
+      if (!tasks.some((task) => task.id === journey))
+        throw new Error(`Unknown journey ${journey}; choose one of: ${tasks.map((task) => task.id).join(', ')}`);
+      if (options.journey) throw new Error('--journey may be specified only once');
+      options.journey = journey;
+    } else throw new Error(`Unknown option: ${argv[i]}`);
   }
   return options;
 }
 
-export function normalizeProfile(profile, roles = []) {
-  if (!['direct', 'coordinated'].includes(profile)) throw new Error(`Unknown profile: ${profile}`);
-  const roleModels = Object.fromEntries(
-    roles.map((role) => [role.role, `${role.providerId ?? '?'}:${role.model ?? '?'}`]),
+export function selectedJourneyTasks(journey = null) {
+  if (!journey) return tasks;
+  const selected = tasks.find((task) => task.id === journey);
+  if (!selected)
+    throw new Error(`Unknown journey ${journey}; choose one of: ${tasks.map((task) => task.id).join(', ')}`);
+  return [selected];
+}
+
+export function maxAttemptsFor(journey = null) {
+  return selectedJourneyTasks(journey).length * PROFILE_ORDER.length;
+}
+
+export function collectExecutedTaskIds(turns) {
+  return new Set(
+    turns
+      .flatMap((turn) => [
+        ...(turn.providerAttemptDetails ?? []).map((attempt) => attempt.taskId),
+        ...(turn.providerTaskIds ?? []),
+      ])
+      .filter((taskId) => typeof taskId === 'string' && taskId.length > 0),
   );
-  const expected = `codex:${MODEL}`;
-  // Check every task: a later worker must not hide an earlier worker's mismatch.
-  const mismatches = roles
-    .map((role) => [role.role, `${role.providerId ?? '?'}:${role.model ?? '?'}`])
-    .filter(([, model]) => model !== expected);
-  return {
-    profile,
-    expectedModel: expected,
-    observedRoleModels: roleModels,
-    sameModelVerified: mismatches.length === 0,
-    mismatches: mismatches.map(([role, model]) => `${role}=${model}`),
-  };
+}
+
+export function observedProviderCall(providerAttemptCount, traceProviderAttempts) {
+  if (Number.isSafeInteger(providerAttemptCount) && providerAttemptCount >= 0) return providerAttemptCount > 0;
+  if (Number.isSafeInteger(traceProviderAttempts) && traceProviderAttempts >= 0) return traceProviderAttempts > 0;
+  return null;
+}
+
+export function rolesForExecutedTasks(detail, executedTaskIds) {
+  return (detail.tasks ?? [])
+    .filter((task) => executedTaskIds.has(task.id))
+    .map((task) => ({
+      taskId: task.id,
+      role: task.role ?? 'worker',
+      providerId: task.providerId ?? task.provider,
+      model: task.model ?? null,
+      effort: task.effort ?? null,
+    }));
+}
+
+export function observedProfileStatus(configured, modelObservations, effortObservations) {
+  if (!configured || modelObservations.includes(false) || effortObservations.includes(false)) return 'mismatch';
+  if (
+    modelObservations.includes(null) ||
+    effortObservations.includes(null) ||
+    !modelObservations.length ||
+    !effortObservations.length
+  )
+    return 'unknown';
+  return 'verified';
+}
+
+export function applyProfileVerification(attempt, evidence) {
+  const status = observedProfileStatus(
+    evidence.configuredVerified,
+    [evidence.observedModelVerified],
+    [evidence.observedEffortVerified],
+  );
+  attempt.profileVerification = { ...evidence, status, verified: status === 'verified' };
+  if (status !== 'verified') {
+    const reason =
+      status === 'mismatch'
+        ? 'known profile model/effort mismatch'
+        : 'actual profile model/effort evidence is incomplete';
+    attempt.failure = [attempt.failure, reason].filter(Boolean).join('; ');
+  }
+  return attempt.profileVerification;
 }
 
 export function median(values) {
@@ -195,13 +253,13 @@ export function frozenManifest() {
   }));
 }
 
-async function preflight() {
+async function preflight(maxJourneyAttempts = MAX_ATTEMPTS) {
   const manifest = frozenManifest();
   const loopback = validateLoopbackUrl(BASE_URL);
   const checks = {
     loopbackUrl: loopback,
     fixturesFrozen: manifest.length === 6,
-    maxJourneyAttempts: MAX_ATTEMPTS,
+    maxJourneyAttempts,
     missingRuntimeFixture: verifyMissingRuntime(),
   };
   if (process.env.ADELIC_JOURNEY_CHECK_SERVER === '1') {
@@ -427,19 +485,6 @@ export async function grade(task, workspace) {
   }
 }
 
-function extractRoleModels(detail) {
-  const roles = [];
-  for (const task of detail.tasks ?? []) {
-    roles.push({
-      role: task.role ?? 'worker',
-      providerId: task.providerId ?? task.provider,
-      model: task.model,
-      effort: task.effort ?? null,
-    });
-  }
-  return roles;
-}
-
 function compactTrace(trace, rootRunId) {
   const events = trace.events ?? [];
   const context = events
@@ -470,12 +515,22 @@ function compactTrace(trace, rootRunId) {
       runId: event.runId,
       parentId: event.parentId,
       phase: event.attributes?.phase ?? null,
+      taskId: event.attributes?.taskId ?? null,
     }));
+  const providerTaskIds = [
+    ...new Set(
+      events
+        .filter((event) => event.name === 'provider.run')
+        .map((event) => event.attributes?.taskId)
+        .filter((taskId) => typeof taskId === 'string' && taskId.length > 0),
+    ),
+  ];
   return {
     eventCount: events.length,
     context,
     spans,
-    providerAttempts: spans.filter((event) => event.name === 'provider.run').length || null,
+    providerAttempts: spans.filter((event) => event.name === 'provider.run').length,
+    providerTaskIds,
     effectiveRunIds: [...new Set(events.map((event) => event.runId))],
     rootRunId,
   };
@@ -731,8 +786,25 @@ async function runAttempt(task, profile, runId, info, fixture, inputCommit, froz
               reasoningOutputTokens: item.reasoningOutputTokens ?? null,
             }))
           : null,
-        effectiveModel: run?.model ?? session.model ?? MODEL,
-        effectiveEffort: run?.route?.effort ?? session.thinking ?? null,
+        providerTaskIds: diagnostics?.providerTaskIds ?? [],
+        actualProviderCallObserved: observedProviderCall(
+          Array.isArray(run?.providerAttempts) ? run.providerAttempts.length : null,
+          diagnostics?.providerAttempts ?? null,
+        ),
+        effectiveModel:
+          observedProviderCall(
+            Array.isArray(run?.providerAttempts) ? run.providerAttempts.length : null,
+            diagnostics?.providerAttempts ?? null,
+          ) === true
+            ? (run?.model ?? null)
+            : null,
+        effectiveEffort:
+          observedProviderCall(
+            Array.isArray(run?.providerAttempts) ? run.providerAttempts.length : null,
+            diagnostics?.providerAttempts ?? null,
+          ) === true
+            ? (run?.route?.effort ?? null)
+            : null,
         firstObservedToolCallMs: firstToolTimeMs(toolEvents, turnStart),
         firstObservedToolCallMeaning:
           'elapsed time from message submission to earliest timestamped Adelic tool event; null if event timestamps are unavailable',
@@ -746,40 +818,60 @@ async function runAttempt(task, profile, runId, info, fixture, inputCommit, froz
     }
     const coordinationDetail =
       profile === 'coordinated' ? await api(`/api/projects/${encodeURIComponent(project.id)}/coordination`) : null;
-    const roles = extractRoleModels(coordinationDetail ?? {});
-    attempt.profileVerification =
-      profile === 'direct'
-        ? {
-            profile,
-            sessionModel: `${session.providerId ?? 'codex'}:${session.model ?? MODEL}`,
-            coordinationDisabled: true,
-            sessionThinking: session.thinking ?? null,
-            verified:
-              `${session.providerId ?? 'codex'}:${session.model ?? MODEL}` === `codex:${MODEL}` &&
-              session.thinking === EFFORT &&
-              attempt.turns.every((turn) => turn.effectiveModel === MODEL && turn.effectiveEffort === EFFORT),
-          }
-        : {
-            configured: normalizeProfile(profile, [
-              { role: 'worker', providerId: 'codex', model: MODEL },
-              { role: 'reviewer', providerId: 'codex', model: MODEL },
-            ]),
-            observedDelegatedRoles: roles.map(({ role, providerId, model }) => ({ role, providerId, model })),
-            observedDelegatedRolesSameModel: roles.length ? normalizeProfile(profile, roles).sameModelVerified : null,
-            observedDelegatedRolesSameEffort: roles.length ? roles.every((role) => role.effort === EFFORT) : null,
-            effectivePath: roles.length
-              ? 'delegated roles observed'
-              : 'no delegated roles observed; configured coordination may have taken the direct path',
-            verified:
-              normalizeProfile(profile, [
-                { role: 'worker', providerId: 'codex', model: MODEL },
-                { role: 'reviewer', providerId: 'codex', model: MODEL },
-              ]).sameModelVerified &&
-              session.thinking === EFFORT &&
-              attempt.turns.every((turn) => turn.effectiveModel === MODEL && turn.effectiveEffort === EFFORT) &&
-              (!roles.length ||
-                (normalizeProfile(profile, roles).sameModelVerified && roles.every((role) => role.effort === EFFORT))),
-          };
+    const executedTaskIds = collectExecutedTaskIds(attempt.turns);
+    const roles = rolesForExecutedTasks(coordinationDetail ?? {}, executedTaskIds);
+    const coordinationTaskIds = new Set((coordinationDetail?.tasks ?? []).map((task) => task.id));
+    const unmatchedExecutedTaskIds =
+      profile === 'coordinated' ? [...executedTaskIds].filter((taskId) => !coordinationTaskIds.has(taskId)) : [];
+    const configuredVerified =
+      `${session.providerId ?? 'codex'}:${session.model ?? MODEL}` === `codex:${MODEL}` && session.thinking === EFFORT;
+    const runtimeCallTurns = attempt.turns.filter((turn) => turn.actualProviderCallObserved === true);
+    const modelObservations = [
+      ...runtimeCallTurns.map((turn) => (turn.effectiveModel ? turn.effectiveModel === MODEL : null)),
+      ...roles.map((role) => (role.model ? role.model === MODEL : null)),
+      ...roles.map((role) => (role.providerId ? role.providerId === 'codex' : null)),
+      ...attempt.turns.filter((turn) => turn.runId && turn.actualProviderCallObserved === null).map(() => null),
+      ...unmatchedExecutedTaskIds.map(() => null),
+    ];
+    const effortObservations = [
+      ...runtimeCallTurns.map((turn) => (turn.effectiveEffort ? turn.effectiveEffort === EFFORT : null)),
+      ...roles.map((role) => (role.effort ? role.effort === EFFORT : null)),
+      ...attempt.turns.filter((turn) => turn.runId && turn.actualProviderCallObserved === null).map(() => null),
+      ...unmatchedExecutedTaskIds.map(() => null),
+    ];
+    const observedModelVerified = modelObservations.length
+      ? modelObservations.includes(false)
+        ? false
+        : modelObservations.includes(null)
+          ? null
+          : true
+      : null;
+    const observedEffortVerified = effortObservations.length
+      ? effortObservations.includes(false)
+        ? false
+        : effortObservations.includes(null)
+          ? null
+          : true
+      : null;
+    const profileEvidence = {
+      profile,
+      configuredVerified,
+      configured: {
+        sessionModel: `${session.providerId ?? 'codex'}:${session.model ?? MODEL}`,
+        sessionThinking: session.thinking ?? null,
+        orchestrationEnabled: profile === 'coordinated',
+        expectedDelegatedModel: profile === 'coordinated' ? MODEL : null,
+        configuredVerified,
+      },
+      effectivePath: roles.length
+        ? 'delegated provider calls observed'
+        : 'no delegated provider calls observed; coordinated profile may have taken the direct path',
+      executedTaskIds: [...executedTaskIds],
+      unmatchedExecutedTaskIds,
+      observedDelegatedRoles: roles,
+      observedModelVerified,
+      observedEffortVerified,
+    };
     attempt.toolCalls = sumKnown(attempt.turns, 'toolCalls');
     const providerAttempts = attempt.turns.map((turn) => turn.providerAttempts);
     attempt.providerAttempts = providerAttempts.every(Number.isSafeInteger)
@@ -795,15 +887,7 @@ async function runAttempt(task, profile, runId, info, fixture, inputCommit, froz
         .map((turn) => turn.failure)
         .filter(Boolean)
         .join('; ') || null;
-    if (attempt.profileVerification?.verified !== true) {
-      attempt.failure = [
-        attempt.failure,
-        'profile model/effort verification failed or an observed delegated role differed',
-      ]
-        .filter(Boolean)
-        .join('; ');
-      attempt.outcome = 'profile_invalid';
-    }
+    applyProfileVerification(attempt, profileEvidence);
     attempt.inputTokens = sumKnown(attempt.turns, 'inputTokens');
     attempt.outputTokens = sumKnown(attempt.turns, 'outputTokens');
     attempt.cachedInputTokens = sumKnown(attempt.turns, 'cachedInputTokens');
@@ -922,7 +1006,8 @@ export function summarize(results) {
 export async function executeAttemptSchedule(journeys, executeAttempt) {
   const results = [];
   for (const [index, journey] of journeys.entries()) {
-    const order = index % 2 ? [...PROFILE_ORDER].reverse() : PROFILE_ORDER;
+    const scheduleIndex = Number.isInteger(journey?.scheduleIndex) ? journey.scheduleIndex : index;
+    const order = scheduleIndex % 2 ? [...PROFILE_ORDER].reverse() : PROFILE_ORDER;
     for (const profile of order) {
       try {
         results.push(await executeAttempt(journey, profile, index));
@@ -959,7 +1044,7 @@ function renderReport(run, results) {
       return `| ${profile} | ${x.attempts} | ${x.externallyAccepted}/${x.attempts} | ${fmtMs(x.medianWallTimeMs)} | ${fmtRange(x.wallTimeRangeMs)} | ${x.repairAttemptsObserved} observed, ${x.attemptsWithUnknownRepairCount} unknown | ${x.timeouts} | ${x.errors} |`;
     }),
     '',
-    'No P95 is reported for this 12-attempt cap. Actual cost is unknown unless the runtime reports it; estimated cost is present only for explicit caller-supplied rates. Phase spans may overlap and are not summed as wall time. Prompt bytes are not token counts.',
+    `No P95 is calculated for this sample size (maximum ${run.maxJourneyAttempts} attempts). Actual cost is unknown unless the runtime reports it; estimated cost is present only for explicit caller-supplied rates. Phase spans may overlap and are not summed as wall time. Prompt bytes are not token counts.`,
     '',
     '## Paired journeys',
     '',
@@ -988,9 +1073,10 @@ function fmtRange(value) {
   return value ? `${fmtMs(value[0])}–${fmtMs(value[1])}` : 'unknown';
 }
 
-async function runPilot(manifest) {
+async function runPilot(manifest, selectedTasks) {
   requireRunAuthorization();
-  await preflight();
+  const maxJourneyAttempts = Math.min(MAX_ATTEMPTS, manifest.length * PROFILE_ORDER.length);
+  await preflight(maxJourneyAttempts);
   const bootstrap = await api('/api/bootstrap');
   const provider = bootstrap.providers?.find((item) => item.id === 'codex');
   const model = provider?.models?.find((item) => item.id === MODEL);
@@ -1045,13 +1131,16 @@ async function runPilot(manifest) {
     runtime: 'Adelic local Codex provider',
     approvals: 'automatic in disposable local server',
     sandbox: 'workspace-write',
-    maxJourneyAttempts: MAX_ATTEMPTS,
+    maxJourneyAttempts,
     journeyDeadlineMs: JOURNEY_LIMIT_MS,
     finalizationReserveMs: FINALIZATION_RESERVE_MS,
-    profileOrder: manifest.map((item, i) => ({
-      journey: item.id,
-      order: i % 2 ? [...PROFILE_ORDER].reverse() : PROFILE_ORDER,
-    })),
+    profileOrder: manifest.map((item) => {
+      const originalIndex = tasks.findIndex((task) => task.id === item.id);
+      return {
+        journey: item.id,
+        order: originalIndex % 2 ? [...PROFILE_ORDER].reverse() : PROFILE_ORDER,
+      };
+    }),
     sourceInputManifest: manifest.map(
       ({ id: task, turns, promptSha256, graderSha256, graderHelpersSha256, files }) => ({
         task,
@@ -1077,7 +1166,11 @@ async function runPilot(manifest) {
     sourceCommit,
     manifestSha256: sha256(JSON.stringify(run.sourceInputManifest)),
   });
-  const results = await executeAttemptSchedule(tasks, async (task, profile) => {
+  const scheduleTasks = selectedTasks.map((task) => ({
+    ...task,
+    scheduleIndex: tasks.findIndex((entry) => entry.id === task.id),
+  }));
+  const results = await executeAttemptSchedule(scheduleTasks, async (task, profile) => {
     const info = fixtureInfo(task);
     const preparationStartedAt = Date.now();
     let fixture;
@@ -1168,20 +1261,27 @@ function applyEstimatedCost(result, rates) {
   result.costCurrency = rates?.currency ?? null;
 }
 
-const help = `Usage: node scripts/benchmark-journeys.mjs [--dry-run|--preflight|--run]\nDefault: --preflight; neither mode makes model calls. --run requires ADELIC_JOURNEY_ALLOW_LIVE=${EXPLICIT_RUN_AUTH}, ADELIC_JOURNEY_ISOLATED_SERVER=1, explicit ADELIC_JOURNEY_MODEL and ADELIC_JOURNEY_URL, and a loopback URL. Six journeys × two profiles = at most 12 journey attempts; continuation uses one shared 180-second budget.`;
+const help = `Usage: node scripts/benchmark-journeys.mjs [--dry-run|--preflight|--run] [--journey ID]\nDefault: --preflight; neither mode makes model calls. --journey ID selects one complete direct/coordinated pair (two attempts); without it, all six journeys are selected (12 attempts max). --run requires ADELIC_JOURNEY_ALLOW_LIVE=${EXPLICIT_RUN_AUTH}, ADELIC_JOURNEY_ISOLATED_SERVER=1, explicit ADELIC_JOURNEY_MODEL and ADELIC_JOURNEY_URL, and a loopback URL. Continuation uses one shared 180-second budget.`;
 
 export async function main(argv = process.argv.slice(2)) {
   const options = parseArgs(argv);
+  const selectedTasks = selectedJourneyTasks(options.journey);
+  const maxJourneyAttempts = Math.min(MAX_ATTEMPTS, selectedTasks.length * PROFILE_ORDER.length);
   if (options.mode === 'help') return process.stdout.write(`${help}\n`);
   if (options.mode === 'dry-run') {
+    const selectedIds = new Set(selectedTasks.map((task) => task.id));
     process.stdout.write(
-      `${JSON.stringify({ mode: 'dry-run', modelCalls: 0, maxJourneyAttempts: MAX_ATTEMPTS, manifest: frozenManifest() }, null, 2)}\n`,
+      `${JSON.stringify({ mode: 'dry-run', modelCalls: 0, maxJourneyAttempts, selectedJourney: options.journey, manifest: frozenManifest().filter((entry) => selectedIds.has(entry.id)) }, null, 2)}\n`,
     );
     return;
   }
-  const result = await preflight();
-  process.stdout.write(`${JSON.stringify({ mode: options.mode, modelCalls: 0, ...result }, null, 2)}\n`);
-  if (options.mode === 'run') await runPilot(result.manifest);
+  const result = await preflight(maxJourneyAttempts);
+  const selectedIds = new Set(selectedTasks.map((task) => task.id));
+  const manifest = result.manifest.filter((entry) => selectedIds.has(entry.id));
+  process.stdout.write(
+    `${JSON.stringify({ mode: options.mode, modelCalls: 0, selectedJourney: options.journey, ...result, manifest }, null, 2)}\n`,
+  );
+  if (options.mode === 'run') await runPilot(manifest, selectedTasks);
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

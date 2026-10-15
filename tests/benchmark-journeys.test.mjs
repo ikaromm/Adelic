@@ -5,15 +5,22 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   assertUnreplayed,
+  applyProfileVerification,
   checkoutChanges,
+  collectExecutedTaskIds,
   continuationBudget,
   estimateCost,
   executeAttemptSchedule,
   grade,
   isJourneyTimeout,
+  maxAttemptsFor,
   MODEL,
-  normalizeProfile,
+  observedProfileStatus,
+  observedProviderCall,
+  parseArgs,
+  rolesForExecutedTasks,
   readCostRates,
+  selectedJourneyTasks,
   summarize,
 } from '../scripts/benchmark-journeys.mjs';
 
@@ -38,6 +45,22 @@ describe('general journey evaluation integrity', () => {
     expect(calls).toEqual(['a/direct', 'a/coordinated', 'b/coordinated', 'b/direct', 'c/direct', 'c/coordinated']);
     expect(result[0]).toMatchObject({ outcome: 'runner_error', accepted: false, failure: 'isolated setup failure' });
     expect(result).toHaveLength(6);
+  });
+
+  it('selects one original paired journey while keeping the default cap at twelve', async () => {
+    expect(parseArgs(['--run'])).toMatchObject({ mode: 'run', journey: null });
+    expect(parseArgs(['--run', '--journey', 'continuation'])).toMatchObject({ mode: 'run', journey: 'continuation' });
+    expect(selectedJourneyTasks()).toHaveLength(6);
+    expect(selectedJourneyTasks('continuation').map((task) => task.id)).toEqual(['continuation']);
+    expect(maxAttemptsFor()).toBe(12);
+    expect(maxAttemptsFor('continuation')).toBe(2);
+    expect(() => parseArgs(['--journey', 'not-a-journey'])).toThrow(/Unknown journey/);
+    const scheduled = [];
+    await executeAttemptSchedule([{ id: 'continuation', scheduleIndex: 3 }], async (task, profile) => {
+      scheduled.push(`${task.id}/${profile}`);
+      return { outcome: 'completed' };
+    });
+    expect(scheduled).toEqual(['continuation/coordinated', 'continuation/direct']);
   });
 
   it('preserves unknown costs and only estimates from explicit caller rates', () => {
@@ -126,11 +149,44 @@ describe('general journey evaluation integrity', () => {
     );
     expect(await grade({ id: 'multi-area' }, workspace)).toMatchObject({ accepted: true, outcome: 'passed' });
 
+    mkdirSync(join(workspace, 'tests'), { recursive: true });
+    writeFileSync(join(workspace, 'tests/query.test.js'), 'export const exists = true;\n');
+    writeFileSync(join(workspace, 'tests/handler.test.js'), 'export const exists = true;\n');
+    writeFileSync(join(workspace, 'README.md'), 'Implementation notes.\n');
+    expect(await grade({ id: 'multi-area' }, workspace)).toMatchObject({ accepted: true, outcome: 'passed' });
+
+    writeFileSync(join(workspace, 'package.json'), '{"type":"module","dependencies":{"new-package":"1.0.0"}}\n');
+    expect((await grade({ id: 'multi-area' }, workspace)).checks.dependenciesUnchanged).toBe(false);
+    writeFileSync(join(workspace, 'package.json'), '{"type":"module"}\n');
+
     writeFileSync(
       join(src, 'handler.js'),
       'export function handle(query) { return { pageSize: query.pageSize ?? 20 }; }\n',
     );
     expect((await grade({ id: 'multi-area' }, workspace)).accepted).toBe(false);
+  });
+
+  it('allows continuation tests and other files while preserving version and public behavior', async () => {
+    const workspace = tempDir();
+    cpSync(new URL('../scripts/fixtures/general-journeys/continuation/starter', import.meta.url), workspace, {
+      recursive: true,
+    });
+    writeFileSync(
+      join(workspace, 'src/stats.js'),
+      'export const version = 1;\nexport function summarize(values) { const count = values.length; const sum = values.reduce((a, b) => a + b, 0); return { count, sum, mean: count ? sum / count : null }; }\nexport function median(values) { const sorted = [...values].sort((a, b) => a - b); const mid = Math.floor(sorted.length / 2); return sorted.length === 0 ? null : sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2; }\n',
+    );
+    expect(await grade({ id: 'continuation' }, workspace)).toMatchObject({ accepted: true, outcome: 'passed' });
+
+    mkdirSync(join(workspace, 'tests'), { recursive: true });
+    writeFileSync(join(workspace, 'tests/stats.test.js'), 'export const smokeTest = true;\n');
+    writeFileSync(join(workspace, 'README.md'), 'Implementation notes.\n');
+    expect(await grade({ id: 'continuation' }, workspace)).toMatchObject({ accepted: true, outcome: 'passed' });
+
+    writeFileSync(
+      join(workspace, 'src/stats.js'),
+      'export const version = 0;\nexport function summarize(values) { const count = values.length; const sum = values.reduce((a, b) => a + b, 0); return { count, sum, mean: count ? sum / count : null }; }\nexport function median(values) { const sorted = [...values].sort((a, b) => a - b); const mid = Math.floor(sorted.length / 2); return sorted.length === 0 ? null : sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2; }\n',
+    );
+    expect((await grade({ id: 'continuation' }, workspace)).checks.versionPreserved).toBe(false);
   });
 
   it('runs the supplied regression test against the public function and rejects the original bug', async () => {
@@ -154,7 +210,7 @@ describe('general journey evaluation integrity', () => {
 
     writeFileSync(
       join(workspace, 'src/tags.test.js'),
-      `import assert from 'node:assert/strict';\nexport function runRegressionTests(countTags) {\n  assert.deepEqual(countTags([' Bug ', 'FEATURE']), { bug: 1, feature: 1 });\n  return true;\n}\n`,
+      `import assert from 'node:assert/strict';\nexport function runRegressionTests(countTags) {\n  assert.deepEqual(countTags([' Dog ', 'FEATURE']), { dog: 1, feature: 1 });\n  return true;\n}\n`,
     );
     expect(await grade({ id: 'bug-regression' }, workspace)).toMatchObject({ accepted: true, outcome: 'passed' });
 
@@ -165,19 +221,71 @@ describe('general journey evaluation integrity', () => {
     });
   });
 
-  it('accepts correct per-role model identity and records real mismatches', () => {
+  it('derives role evidence only from executed task IDs and keeps missing evidence unknown', () => {
     expect(
-      normalizeProfile('coordinated', [
-        { role: 'worker', providerId: 'codex', model: 'unexpected-model' },
-        { role: 'worker', providerId: 'codex', model: MODEL },
-      ]).sameModelVerified,
-    ).toBe(false);
+      collectExecutedTaskIds([
+        {
+          providerAttemptDetails: [{ taskId: 'executed-task' }, { taskId: null }],
+          providerTaskIds: ['trace-task'],
+        },
+      ]),
+    ).toEqual(new Set(['executed-task', 'trace-task']));
     expect(
-      normalizeProfile('coordinated', [{ role: 'worker', providerId: 'codex', model: MODEL }]).sameModelVerified,
-    ).toBe(true);
-    expect(
-      normalizeProfile('coordinated', [{ role: 'reviewer', providerId: 'codex', model: 'gpt-6-astra' }]),
-    ).toMatchObject({ sameModelVerified: false, mismatches: ['reviewer=codex:gpt-6-astra'] });
+      rolesForExecutedTasks(
+        {
+          tasks: [
+            { id: 'executed-task', role: 'worker', providerId: 'codex', model: MODEL, effort: 'high' },
+            { id: 'placeholder', role: 'reviewer', providerId: 'codex', model: null, effort: null },
+          ],
+        },
+        new Set(['executed-task']),
+      ),
+    ).toEqual([{ taskId: 'executed-task', role: 'worker', providerId: 'codex', model: MODEL, effort: 'high' }]);
+    expect(observedProviderCall(0, null)).toBe(false);
+    expect(observedProviderCall(null, null)).toBeNull();
+    expect(observedProviderCall(null, 1)).toBe(true);
+    expect(observedProfileStatus(true, [true, null], [true, null])).toBe('unknown');
+  });
+
+  it('keeps profile unknown distinct from mismatch and preserves timeout as the primary outcome', () => {
+    const attempt = { outcome: 'timeout', failure: 'budget deadline reached' };
+    applyProfileVerification(attempt, {
+      configuredVerified: true,
+      observedModelVerified: null,
+      observedEffortVerified: null,
+    });
+    expect(attempt).toMatchObject({
+      outcome: 'timeout',
+      profileVerification: { status: 'unknown', verified: false },
+    });
+    expect(attempt.failure).toMatch(/incomplete/);
+    expect(observedProfileStatus(true, [false], [true])).toBe('mismatch');
+    expect(observedProfileStatus(true, [true], [true])).toBe('verified');
+  });
+
+  it('grades diagnosis cause and permits an installation recommendation without performing it', async () => {
+    const workspace = tempDir();
+    cpSync(new URL('../scripts/fixtures/general-journeys/missing-runtime/starter', import.meta.url), workspace, {
+      recursive: true,
+    });
+    writeFileSync(
+      join(workspace, 'diagnosis.json'),
+      JSON.stringify({
+        cause: 'missing-runtime',
+        executable: 'journey-missing-compiler',
+        probeFoundOnPath: false,
+        checkPassed: false,
+        recovery: {
+          requiresInstallation: true,
+          checkPassed: false,
+          nextStep: 'Request the approved runtime through the normal setup process.',
+        },
+      }),
+    );
+    expect(await grade({ id: 'missing-runtime' }, workspace)).toMatchObject({
+      accepted: true,
+      checks: { probeExecution: expect.stringMatching(/unknown/i) },
+    });
   });
 
   it('summarizes acceptance before comparing paired timings and avoids small-sample percentiles', () => {

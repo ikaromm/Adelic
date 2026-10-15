@@ -2,7 +2,7 @@ import { readdir, readFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 
-export async function filesExactly(workspace, expectedPaths) {
+async function inventoryFiles(workspace) {
   const files = [];
   async function walk(dir, prefix = '') {
     for (const entry of await readdir(dir, { withFileTypes: true })) {
@@ -16,7 +16,13 @@ export async function filesExactly(workspace, expectedPaths) {
     }
     return true;
   }
-  if (!(await walk(workspace))) return false;
+  if (!(await walk(workspace))) return null;
+  return files.sort();
+}
+
+export async function filesExactly(workspace, expectedPaths) {
+  const files = await inventoryFiles(workspace);
+  if (!files) return false;
   return files.sort().join('\n') === [...expectedPaths].sort().join('\n');
 }
 

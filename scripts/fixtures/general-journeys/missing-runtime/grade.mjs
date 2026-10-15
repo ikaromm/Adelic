@@ -12,7 +12,7 @@ export async function grade(workspace) {
       diagnosis.executable === 'journey-missing-compiler' &&
       diagnosis.probeFoundOnPath === false &&
       diagnosis.checkPassed === false &&
-      diagnosis.recovery?.requiresInstallation === false &&
+      typeof diagnosis.recovery?.requiresInstallation === 'boolean' &&
       diagnosis.recovery?.checkPassed === false &&
       typeof diagnosis.recovery?.nextStep === 'string' &&
       diagnosis.recovery.nextStep.trim().length >= 8 &&

@@ -1,7 +1,16 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { observeCheckSource } from '../server/check-source.js';
 import { HookChecks } from '../server/hooks.js';
@@ -134,6 +143,77 @@ describe('check source and environment evidence', () => {
     expect(two.state).toBe('verified');
     expect(one.revision?.value).not.toBe(two.revision?.value);
     expect(copy.revision?.value).toBe(two.revision?.value);
+  });
+
+  it('verifies internal regular-file links and changes the fingerprint when their target or link changes', () => {
+    const root = fixture();
+    const link = join(root, 'src-link.ts');
+    writeFileSync(join(root, 'other.ts'), readFileSync(join(root, 'src.ts')));
+    symlinkSync('src.ts', link);
+    const baseline = observeCheckSource(root, 'link-baseline');
+    expect(baseline.state).toBe('verified');
+
+    writeFileSync(join(root, 'src.ts'), 'export const value = 3;\n');
+    const targetChanged = observeCheckSource(root, 'link-target-changed');
+    expect(targetChanged.state).toBe('verified');
+    expect(targetChanged.revision?.value).not.toBe(baseline.revision?.value);
+
+    rmSync(link);
+    // Replacing the symlink changes its relative target while both destinations remain internal.
+    symlinkSync('other.ts', link);
+    const retargeted = observeCheckSource(root, 'link-retargeted');
+    expect(retargeted.state).toBe('verified');
+    expect(retargeted.revision?.value).not.toBe(targetChanged.revision?.value);
+  });
+
+  it('verifies a nested relative file link with safe parent segments', () => {
+    const root = fixture();
+    mkdirSync(join(root, 'docs', 'assets'), { recursive: true });
+    symlinkSync('../../src.ts', join(root, 'docs', 'assets', 'source.ts'));
+    expect(observeCheckSource(root, 'nested-link').state).toBe('verified');
+  });
+
+  it('keeps external, broken, excluded, cyclic, and directory links unknown', () => {
+    const externalRoot = fixture();
+    const externalFile = join(mkdtempSync(join(tmpdir(), 'adelic-check-external-')), 'outside.ts');
+    dirs.push(dirname(externalFile));
+    writeFileSync(externalFile, 'export const outside = true;\n');
+    symlinkSync(externalFile, join(externalRoot, 'external.ts'));
+    expect(observeCheckSource(externalRoot, 'external').state).toBe('unknown');
+
+    const cases = [
+      { name: 'broken', setup: (root: string) => symlinkSync('missing.ts', join(root, 'link')) },
+      { name: 'git-excluded', setup: (root: string) => symlinkSync('.git/config', join(root, 'link')) },
+      {
+        name: 'modules-excluded',
+        setup: (root: string) => {
+          execFileSync('mkdir', ['-p', join(root, 'node_modules')]);
+          writeFileSync(join(root, 'node_modules', 'hidden.ts'), 'x');
+          symlinkSync('node_modules/hidden.ts', join(root, 'link'));
+        },
+      },
+      { name: 'cyclic', setup: (root: string) => symlinkSync('link', join(root, 'link')) },
+      { name: 'directory', setup: (root: string) => symlinkSync('.', join(root, 'link')) },
+    ];
+    for (const { name, setup } of cases) {
+      const root = fixture();
+      setup(root);
+      expect(observeCheckSource(root, name).state, name).toBe('unknown');
+    }
+  });
+
+  it('does not normalize away an excluded symlink traversal before resolving a parent segment', () => {
+    const root = fixture();
+    const outside = mkdtempSync(join(tmpdir(), 'adelic-check-link-parent-'));
+    dirs.push(outside);
+    mkdirSync(join(outside, 'deps'));
+    writeFileSync(join(outside, 'src.ts'), 'external-v1');
+    symlinkSync(join(outside, 'deps'), join(root, 'node_modules'));
+    symlinkSync('node_modules/../src.ts', join(root, 'alias.ts'));
+    expect(readFileSync(join(root, 'alias.ts'), 'utf8')).toBe('external-v1');
+    expect(observeCheckSource(root, 'parent-escape').state).toBe('unknown');
+    writeFileSync(join(outside, 'src.ts'), 'external-v2');
+    expect(observeCheckSource(root, 'parent-escape-edited').state).toBe('unknown');
   });
 
   it('returns unknown rather than claiming a fingerprint when the source root is unavailable', () => {

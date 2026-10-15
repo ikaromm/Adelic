@@ -14,6 +14,10 @@ const implementationPattern =
   /\b(implemente|implement|crie|create|corr(?:ig\w*|ij\w*)|fix|edite|edit|altere|change|refatore|refactor|adicione|add|keep|mantenha)\b.{0,120}\b(api|endpoint|fun[cç][aã]o|function|componente|component|schema|migration|migra[cç][aã]o|banco de dados|database|script|servidor|server|frontend|backend|filter|filtro|persistent|persistente|persist)\b/i;
 const technicalChangePattern =
   /\b(implement\w*|create\w*|change\w*|alter\w*|refactor\w*|migrate\w*|add\w*|build\w*|design\w*|redesign\w*|implemente?\w*|crie?\w*|altere?\w*|refatore?\w*|migre?\w*|adicione?\w*|construa?\w*|projete?\w*|corr(?:ig\w*|ij\w*)|fech\w*|format\w*|fix\w*|close\w*)\b/i;
+const reportedFailurePattern =
+  /\b(bug|issue|regression|problem|errors?|erros?|freezes?|hangs?|trava|falha|problema|defeito|regress[aã]o|not (?:handled|supported|propagated|represented|preserved|recognized|included|applied|rendered)|does(?:n't| not) work|cannot|can't|fail(?:s|ed|ure|ures)?|crashes?|throws?|raises?|incorrect|wrong|unexpected|missing|drops?|loses?|n[aã]o funciona|n[aã]o [eé] tratado|n[aã]o [eé] suportado|n[aã]o propaga|falha|incorreto|inesperado|ausente)\b/i;
+const technicalFailureEvidencePattern =
+  /\b(ui|interface|code|source|compiler|function|method|class|module|package|library|parser|printer|serializer|test|command|cli|api|endpoint|backend|service|route|database|db|sqlite|sql|table|column|constraint|foreign key|query|orm|model|field|migration|schema|template|mathml|codebase|c[oó]digo|fun[cç][aã]o|m[eé]todo|classe|m[oó]dulo|pacote|biblioteca|comando|banco de dados|tabela|coluna|chave estrangeira|consulta|modelo|campo|migra[cç][aã]o|esquema|template)\b/i;
 const explanationPattern =
   /\b(explain|describe|what|why|how|difference|meaning|explique|descreva|o que|por que|como|diferen[cç]a|significado)\b/i;
 const broadTechnicalWorkPattern =
@@ -69,7 +73,8 @@ export function routeMessage(content: string, mode: Mode, history: Message[] = [
     return {
       level: 'deep',
       reason: 'Modo Completo selecionado pelo operador',
-      tools: needsTools(text) || continuesTechnicalWork(text, history),
+      // Explicit mode selects capabilities; lexical routing must not revoke them.
+      tools: true,
       memory: memoryEnabled && memoryRequestPattern.test(text),
       effort: 'high',
       contextBudget: 24000,
@@ -93,6 +98,16 @@ export function routeMessage(content: string, mode: Mode, history: Message[] = [
     return {
       level: 'deep',
       reason: 'O pedido requer alteração técnica ampla entre módulos',
+      tools: true,
+      memory: memoryEnabled && (memoryRequestPattern.test(text) || priorContextPattern.test(text)),
+      effort: 'high',
+      contextBudget: 24000,
+    };
+  }
+  if (isTechnicalFailureReport(text)) {
+    return {
+      level: 'deep',
+      reason: 'O relato descreve uma falha em comportamento técnico',
       tools: true,
       memory: memoryEnabled && (memoryRequestPattern.test(text) || priorContextPattern.test(text)),
       effort: 'high',
@@ -160,9 +175,29 @@ function needsTools(text: string) {
   return (
     implementationPattern.test(text) ||
     broadTechnicalWorkPattern.test(text) ||
+    isTechnicalFailureReport(text) ||
     researchPattern.test(text) ||
     (actionPattern.test(text) && (filePattern.test(text) || hasFileReference(text))) ||
     (technicalChangePattern.test(text) && technicalWorkAreaPatterns.filter((area) => area.test(text)).length > 1)
+  );
+}
+
+function isTechnicalFailureReport(text: string) {
+  return (
+    reportedFailurePattern.test(text) &&
+    (technicalFailureEvidencePattern.test(text) || hasFileReference(text) || /```|`[^`]+`/.test(text)) &&
+    (!/^\s*(?:please\s+)?(?:explain|describe|what|why|how|explique|descreva|o que|por que|como)\b/i.test(text) ||
+      hasConcreteFailureContext(text))
+  );
+}
+
+function hasConcreteFailureContext(text: string) {
+  return (
+    hasFileReference(text) ||
+    /```|`[^`]+`|\b(traceback|stack trace|exception trace|reproduction|repro steps|mwe|reproducer)\b/i.test(text) ||
+    /\b(my|our|this|these|following|meu|minha|nosso|nossa|este|esta|esse|essa|seguinte)\b.{0,60}\b(code|query|table|model|class|function|module|project|app|database|c[oó]digo|consulta|tabela|modelo|classe|fun[cç][aã]o|m[oó]dulo|projeto|aplicativo|banco de dados)\b/i.test(
+      text,
+    )
   );
 }
 

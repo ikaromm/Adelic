@@ -41,6 +41,7 @@
 
 - Só para a raiz de um repositório; projetos numa subpasta e conversas avulsas não têm cópia.
 - Submódulos não são inicializados na cópia. Arquivos ignorados (`node_modules`, `.env`) não são copiados: o agente começa sem eles.
+- No executor local isolado, dependências `node_modules` do checkout principal verificado podem ser montadas somente leitura na worktree. Quando falta o destino no modo read-only, um overlay temporário cria o ponto de montagem dentro do namespace e o projeto é remontado somente leitura antes do comando; a pasta não é criada na worktree real. Isso compartilha dependências existentes, sem instalá-las ou herdar arquivos `.env`. Falha da preparação bloqueia o comando.
 - Arquivos com drivers de merge próprios conflitam em vez de rodar o driver; o merge é desfeito e o usuário aplica o branch à mão.
 - Dentro do sandbox, o agente edita os arquivos da cópia, mas comandos git que gravam (`add`, `commit`, `branch`) falham: o índice, os objetos e as refs da cópia ficam no `.git` do projeto, fora da pasta gravável. O commit é feito pelo Adelic no **Aplicar no projeto**.
 - Branches da cópia (`adelic/…`) ficam no repositório até serem apagados pelo descarte ou pelo usuário.

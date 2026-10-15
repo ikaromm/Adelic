@@ -489,13 +489,15 @@ export function isSimpleInspectionRequest(text: string) {
 }
 
 /**
- * Conservative lexical fast path for one small change or an explicit short follow-up.
+ * Conservative lexical fast path for cohesive defect reports, one small change, or an explicit short follow-up.
  * It is not a model classification: broad/multi-area requests keep the planner and Graphify
  * planning pass; the worker still receives only this conversation's bounded context.
  */
 export function canSkipCoordinationPlanner(text: string): boolean {
   const request = text.trim();
-  if (!request || request.length > 600) return false;
+  // A first-turn defect report can be longer than a small feature request because it
+  // includes reproduction steps and expected/actual behavior. Keep that bounded separately.
+  if (!request || request.length > 1200) return false;
   // Preservation constraints describe boundaries, not work to decompose. Detect them by
   // meaning-bearing verbs and references to established behavior/rules, not a benchmark phrase.
   const preservationConstraint =
@@ -516,6 +518,26 @@ export function canSkipCoordinationPlanner(text: string): boolean {
     /\b(authentication|authorization|cache|queue|messaging|autentica[cç][aã]o|autoriza[cç][aã]o|fila)\b/i,
   ];
   if (workAreas.filter((area) => area.test(workRequest)).length > 1) return false;
+  // One described defect is usually one cohesive investigation, even when its complete
+  // report mentions reproduction, observed behavior, expected behavior, and a regression
+  // test. Explicitly plural issues or separately requested features remain planner work.
+  const multipleDefects =
+    /\b(?:multiple|several|both|two|three|four|v[aá]rios|m[uú]ltiplos|ambos|duas?|dois|tr[eê]s|quatro)\s+(?:bugs?|defects?|regressions?|issues?|failures?|problems?|erros?|defeitos?|falhas?|problemas?)\b/i.test(
+      request,
+    );
+  const separateFeature =
+    /\b(?:separate(?:ly)?|unrelated|independent|another feature|additionally|em separado|independente|outro recurso|outra funcionalidade)\b/i.test(
+      request,
+    ) ||
+    /\b(?:and|also|e|tamb[eé]m)\s+(?:add|create|implement|change|update|migrate|build|design|refactor|adicione|crie|implemente|altere|atualize|migre|construa|refatore)\s+(?!(?:a\s+)?(?:(?:regression|unit|integration|regress[aã]o|unit[aá]rio|integra[cç][aã]o)\s+)?tests?\b)/i.test(
+      request,
+    );
+  if (multipleDefects || separateFeature) return false;
+  const cohesiveDefect =
+    /\b(fix|resolve|correct|repair|address|corrija|conserte|resolva|repare)\b/i.test(workRequest) &&
+    /\b(bug|defect|regression|issue|failure|broken|falha|erro|defeito|regress[aã]o)\b/i.test(request);
+  if (cohesiveDefect) return true;
+  if (request.length > 600) return false;
   const continuation =
     /\b(now|then|also|instead|continue|continuing|continuar|fechar|fechando|corrigir|corrija|corrigindo|fix|fixed|fixing|formatar|formate|formatação|format|formatted|same|that|this|it|keep|make it|additionally|agora|depois|tamb[eé]m|ent[aã]o|mantenha|isso|esse|essa|nele|nela)\b/i.test(
       request,

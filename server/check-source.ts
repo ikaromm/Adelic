@@ -1,6 +1,14 @@
 import { createHash } from 'node:crypto';
-import { lstatSync, readFileSync, readdirSync, realpathSync, watch as watchFs, type FSWatcher } from 'node:fs';
-import { join, relative, sep } from 'node:path';
+import {
+  lstatSync,
+  readFileSync,
+  readlinkSync,
+  readdirSync,
+  realpathSync,
+  watch as watchFs,
+  type FSWatcher,
+} from 'node:fs';
+import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 import type { CheckEnvironmentEvidence, CheckSource } from '../shared/contracts.js';
 import { checkEnvironment } from './hooks.js';
 
@@ -139,7 +147,7 @@ function hashTree(root: string): string | undefined {
   const hash = createHash('sha256');
   // Version the canonical encoding. Each entry below is a typed record whose fields are
   // length-prefixed, so neither binary contents nor path/mode boundaries can imitate records.
-  hash.update('adelic-check-source-v2');
+  hash.update('adelic-check-source-v3');
   const started = Date.now();
   const stack = [''];
   let entries = 0;
@@ -167,9 +175,11 @@ function hashTree(root: string): string | undefined {
       entries++;
       if (entries > MAX_ENTRIES || Date.now() - started > MAX_OBSERVATION_MS) return undefined;
       const key = relative(root, absolute).split(sep).join('/');
-      // Symlink targets may expose source outside this root; do not claim a complete tree.
       if (stat.isSymbolicLink()) {
-        return undefined;
+        const link = hashInternalFileLink(hash, root, absolute, key, started, bytes);
+        if (!link) return undefined;
+        bytes += link.size;
+        if (bytes > MAX_BYTES) return undefined;
       } else if (stat.isDirectory()) {
         updateTreeRecord(hash, 1, [key, String(stat.mode & 0o777)]);
         stack.push(rel);
@@ -198,6 +208,92 @@ function hashTree(root: string): string | undefined {
     }
   }
   return hash.digest('hex');
+}
+
+/** Hash only direct links to regular files inside this tree. Directory links and link chains
+ * remain unknown so traversal cannot escape the observed root through an intermediate link. */
+function hashInternalFileLink(
+  hash: ReturnType<typeof createHash>,
+  root: string,
+  absolute: string,
+  key: string,
+  started: number,
+  bytesAlreadyObserved: number,
+): { size: number } | undefined {
+  try {
+    const linkBefore = lstatSync(absolute);
+    if (!linkBefore.isSymbolicLink()) return undefined;
+    const linkText = readlinkSync(absolute);
+    const lexicalTarget = isAbsolute(linkText) ? linkText : join(dirname(absolute), linkText);
+    const normalizedTarget = relative(root, lexicalTarget);
+    if (!isWithinRoot(normalizedTarget) || isExcludedRootTarget(normalizedTarget)) return undefined;
+
+    // Reject symlink components before resolving the path. This prevents ordinary traversal
+    // through an external directory link, and the canonical check below catches path changes.
+    const targetAbsolute = join(root, normalizedTarget);
+    const components = normalizedTarget.split(sep).filter(Boolean);
+    if (components.length === 0) return undefined;
+    let prefix = root;
+    for (const component of components) {
+      if (Date.now() - started > MAX_OBSERVATION_MS) return undefined;
+      prefix = join(prefix, component);
+      const componentStat = lstatSync(prefix);
+      if (componentStat.isSymbolicLink()) return undefined;
+      if (prefix !== targetAbsolute && !componentStat.isDirectory()) return undefined;
+    }
+
+    const canonicalTarget = realpathSync(targetAbsolute);
+    // Native resolution of the original link must agree with lexical normalization.
+    // In particular, `excluded-link/../file` traverses the link before `..` on Unix;
+    // normalizing that text first would otherwise fingerprint a different file.
+    if (realpathSync.native(absolute) !== canonicalTarget) return undefined;
+    const canonicalRelative = relative(root, canonicalTarget);
+    if (!isWithinRoot(canonicalRelative) || isExcludedRootTarget(canonicalRelative)) return undefined;
+    if (canonicalTarget !== targetAbsolute) return undefined;
+    const targetBefore = lstatSync(canonicalTarget);
+    if (!targetBefore.isFile()) return undefined;
+    if (targetBefore.size > MAX_BYTES - bytesAlreadyObserved) return undefined;
+    if (Date.now() - started > MAX_OBSERVATION_MS) return undefined;
+    const content = readFileSync(canonicalTarget);
+    const targetAfter = lstatSync(canonicalTarget);
+    const linkAfter = lstatSync(absolute);
+    const linkTextAfter = readlinkSync(absolute);
+    if (
+      targetBefore.dev !== targetAfter.dev ||
+      targetBefore.ino !== targetAfter.ino ||
+      targetBefore.size !== targetAfter.size ||
+      targetBefore.mtimeMs !== targetAfter.mtimeMs ||
+      targetBefore.mode !== targetAfter.mode ||
+      content.length !== targetAfter.size ||
+      linkBefore.dev !== linkAfter.dev ||
+      linkBefore.ino !== linkAfter.ino ||
+      linkBefore.mtimeMs !== linkAfter.mtimeMs ||
+      linkText !== linkTextAfter ||
+      realpathSync.native(absolute) !== canonicalTarget ||
+      Date.now() - started > MAX_OBSERVATION_MS
+    )
+      return undefined;
+
+    updateTreeRecord(hash, 3, [
+      key,
+      linkText,
+      canonicalRelative.split(sep).join('/'),
+      String(targetBefore.mode & 0o777),
+      content,
+    ]);
+    return { size: content.length };
+  } catch {
+    return undefined;
+  }
+}
+
+function isWithinRoot(path: string): boolean {
+  return path !== '' && path !== '..' && !path.startsWith(`..${sep}`) && !isAbsolute(path);
+}
+
+function isExcludedRootTarget(path: string): boolean {
+  const first = path.split(sep)[0];
+  return first === '.git' || first === 'node_modules';
 }
 
 /** A one-byte tag and 64-bit byte lengths frame each typed record and binary field. */

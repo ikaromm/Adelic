@@ -250,6 +250,29 @@ describe('delegated task contracts', () => {
       ),
     ).toBe(false);
   });
+  it('keeps a bounded first-turn defect report cohesive while planning multi-feature work', () => {
+    const report =
+      'Fix the regression where reopening a completed task leaves its old completion timestamp in the task list. Steps to reproduce: create a task, mark it complete, then reopen it. Actual: the task still appears completed and its previous timestamp remains visible. Expected: reopening clears the completion state and timestamp. Please add a regression test for this behavior. The report is longer because it includes the exact steps and expected result. I noticed this after refreshing the task list, and the stale state survives navigation away and back. Completing a different task still works, so the failure is limited to reopening a completed task and its displayed completion data.';
+    expect(report.length).toBeGreaterThan(600);
+    expect(canSkipCoordinationPlanner(report)).toBe(true);
+    expect(
+      canSkipCoordinationPlanner(
+        'Fix two task-list bugs: reopening keeps the old timestamp, and filtering hides newly completed tasks.',
+      ),
+    ).toBe(false);
+    expect(
+      canSkipCoordinationPlanner('Fix the task-list regression and separately add a new export feature to the API.'),
+    ).toBe(false);
+    expect(canSkipCoordinationPlanner('Fix the task-list regression and add a new export feature.')).toBe(false);
+    expect(
+      canSkipCoordinationPlanner(
+        'Fix the regression where saving in the UI fails because the API and database migration disagree.',
+      ),
+    ).toBe(false);
+    expect(requiresResolvedContinuity('Fix this bug where reopening a completed task keeps its old timestamp.')).toBe(
+      true,
+    );
+  });
   it('resolves bounded continuation intent only from a matching recent user goal', () => {
     const longAssistant = 'assistant response '.repeat(200);
     const history = [

@@ -333,8 +333,8 @@ describe('what a run receives', () => {
     expect(detached.mcpServers?.map((s) => s.name)).toEqual(['adelic-skills']);
     expect(isSkillsMcpServer(detached.mcpServers![0]!)).toBe(true);
 
-    const noTools = await send(project.id, 'Como funciona um roteador?', 'deep');
-    expect(noTools.plan.tools).toBe(false);
-    expect(noTools.mcpServers).toBeUndefined();
+    const fullMode = await send(project.id, 'Como funciona um roteador?', 'deep');
+    expect(fullMode.plan.tools).toBe(true);
+    expect(fullMode.mcpServers?.map((server) => server.name)).toEqual(['docs', 'adelic-skills']);
   });
 });

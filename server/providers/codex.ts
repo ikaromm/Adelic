@@ -1075,9 +1075,11 @@ export class CodexProvider {
           turn!.input.plan.tools &&
           turn!.input.sandbox === 'read-only' &&
           turn!.input.remote?.executionKind === 'isolated-local' &&
-          turn!.mcpNames.length === 1 &&
-          turn!.mcpNames[0] === 'adelic-run-evidence' &&
-          server.mcp.length === 1 &&
+          turn!.mcpNames.length === server.mcp.length &&
+          turn!.mcpNames.filter((name) => name === 'adelic-run-evidence').length === 1 &&
+          turn!.mcpNames.every((name) => server.mcp.some((item) => item.name === name)) &&
+          server.mcp.filter((item) => item.name === 'adelic-run-evidence').length === 1 &&
+          server.mcp.every((item) => item.name === 'adelic-run-evidence' || isSkillsMcpServer(item)) &&
           Boolean(evidence && isRunEvidenceServer(evidence, turn!.input.runId, turn!.input.evidenceRunId));
         if (!authorized || !turn) {
           rpc.respond(message.id, MCP_DECLINE);

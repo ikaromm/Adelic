@@ -108,6 +108,63 @@ describe('isolated local automatic executor', () => {
     }
   });
 
+  it('shares verified checkout dependencies read-only with a linked worktree that has no mountpoint', async () => {
+    await access('/usr/bin/bwrap');
+    const parent = await mkdtemp(path.join(os.tmpdir(), 'adelic-linked-dependencies-'));
+    temporaryDirectories.push(parent);
+    const checkout = path.join(parent, 'checkout');
+    const workspace = path.join(parent, 'worktree');
+    const dependency = path.join(checkout, 'node_modules', 'fixture-dependency');
+    await mkdir(path.join(checkout, 'node_modules'), { recursive: true });
+    await mkdir(dependency);
+    await writeFile(path.join(checkout, 'package.json'), '{"name":"fixture"}\n');
+    await writeFile(path.join(checkout, 'README.md'), 'fixture\n');
+    await writeFile(path.join(dependency, 'index.js'), 'module.exports = "shared-readonly-dependency";\n');
+    execFileSync('git', ['init', '-q', '-b', 'main', checkout]);
+    execFileSync('git', ['-C', checkout, 'add', 'package.json', 'README.md']);
+    execFileSync('git', [
+      '-C',
+      checkout,
+      '-c',
+      'user.name=Test',
+      '-c',
+      'user.email=test@example.invalid',
+      'commit',
+      '-qm',
+      'fixture',
+    ]);
+    execFileSync('git', ['-C', checkout, 'worktree', 'add', '-q', '--detach', workspace, 'HEAD']);
+    const executor = await createLocalExecutor(workspace, 'read-only');
+    try {
+      const signal = new AbortController().signal;
+      const loaded = await executor.call(
+        'exec',
+        { command: ['node', '-e', 'process.stdout.write(require("fixture-dependency"))'], timeoutMs: 5000 },
+        signal,
+      );
+      expect(loaded).toMatchObject({ exitCode: 0, stdout: 'shared-readonly-dependency' });
+
+      const writeAttempt = await executor.call(
+        'exec',
+        {
+          command: [
+            'node',
+            '-e',
+            'try { require("node:fs").writeFileSync("/workspace/node_modules/canary", "x"); process.exit(1); } catch (e) { if (e.code !== "EROFS") process.exit(2); }',
+          ],
+          timeoutMs: 5000,
+        },
+        signal,
+      );
+      expect(writeAttempt).toMatchObject({ exitCode: 0 });
+      await expect(access(path.join(workspace, 'node_modules'))).rejects.toMatchObject({ code: 'ENOENT' });
+      await expect(access(path.join(checkout, 'node_modules', 'canary'))).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      await executor.close();
+      execFileSync('git', ['-C', checkout, 'worktree', 'remove', '--force', workspace]);
+    }
+  });
+
   it('runs actionable executor preflight before starting a tool process', async () => {
     const parent = await mkdtemp(path.join(os.tmpdir(), 'adelic-preflight-'));
     temporaryDirectories.push(parent);
@@ -582,7 +639,8 @@ describe('isolated local automatic executor', () => {
         signal,
       );
       expect(dependencyWrite).toMatchObject({ exitCode: 1 });
-      await expect(access(path.join(process.cwd(), 'node_modules/.adelic-readonly-canary'))).rejects.toMatchObject({
+      await expect(access(path.join(worktree, 'node_modules'))).rejects.toMatchObject({ code: 'ENOENT' });
+      await expect(access(path.join(worktree, 'node_modules/.adelic-readonly-canary'))).rejects.toMatchObject({
         code: 'ENOENT',
       });
     } finally {

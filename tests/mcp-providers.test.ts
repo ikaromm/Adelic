@@ -440,63 +440,74 @@ describe('Codex MCP configuration', () => {
       executionKind: 'isolated-local' as const,
       call: async () => ({ ok: true }),
     };
-    for (const [mode, decision, expectedAction] of [
-      ['automatic', undefined, 'accept'],
-      ['manual', 'approve', 'accept'],
-      ['manual', 'deny', 'decline'],
-    ] as const) {
-      const dir = await tempDir();
-      const fake = await fakeCodex(dir);
-      const evidenceStore = new RunEvidenceStore(dir);
-      await evidenceStore.put({
-        runId: '123e4567-e89b-12d3-a456-426614174010',
-        sessionId: 'session-elicitation',
-        capturedAt: new Date().toISOString(),
-        source: { state: 'unchanged' },
-        environment: [],
-        artifacts: { status: 'available', files: [] },
-        checks: [],
-        outcome: { status: 'completed' },
-      });
-      const evidence = evidenceStore.mcpServer('123e4567-e89b-12d3-a456-426614174010');
-      const approvals: Approval[] = [];
-      await withEnv({ FAKE_HOST_MCP: '{}', FAKE_ELICIT: 'adelic-run-evidence' }, async () => {
-        const codex = provider(fake.file);
-        try {
-          const running = codex.run(
-            input(dir, {
-              runId: '123e4567-e89b-12d3-a456-426614174010:223e4567-e89b-12d3-a456-426614174010',
-              evidenceRunId: '123e4567-e89b-12d3-a456-426614174010',
-              remote,
-              mcpServers: [evidence],
-              approvalMode: mode,
-            }),
-            (event) => {
-              if (event.type === 'approval') approvals.push(event.approval);
-            },
-            new AbortController().signal,
-          );
-          if (mode === 'manual') {
-            for (let i = 0; i < 200 && !approvals.length; i++) await new Promise((resolve) => setTimeout(resolve, 10));
-            expect(approvals[0]).toMatchObject({
-              status: 'pending',
-              title: 'Permitir servidor MCP adelic-run-evidence',
-            });
-            await codex.approve(approvals[0]!.id, decision!);
+    for (const siblingOrder of ['none', 'before', 'after'] as const) {
+      for (const [mode, decision, expectedAction] of [
+        ['automatic', undefined, 'accept'],
+        ['manual', 'approve', 'accept'],
+        ['manual', 'deny', 'decline'],
+        ['auto-safe', 'approve', 'accept'],
+        ['auto-safe', 'deny', 'decline'],
+      ] as const) {
+        const dir = await tempDir();
+        const fake = await fakeCodex(dir);
+        const evidenceStore = new RunEvidenceStore(dir);
+        await evidenceStore.put({
+          runId: '123e4567-e89b-12d3-a456-426614174010',
+          sessionId: 'session-elicitation',
+          capturedAt: new Date().toISOString(),
+          source: { state: 'unchanged' },
+          environment: [],
+          artifacts: { status: 'available', files: [] },
+          checks: [],
+          outcome: { status: 'completed' },
+        });
+        const evidence = evidenceStore.mcpServer('123e4567-e89b-12d3-a456-426614174010');
+        const store = new Store(dir);
+        const skills = skillsMcpRunServer('reviewer', store);
+        store.close();
+        const servers =
+          siblingOrder === 'none' ? [evidence] : siblingOrder === 'before' ? [skills, evidence] : [evidence, skills];
+        const approvals: Approval[] = [];
+        await withEnv({ FAKE_HOST_MCP: '{}', FAKE_ELICIT: 'adelic-run-evidence' }, async () => {
+          const codex = provider(fake.file);
+          try {
+            const running = codex.run(
+              input(dir, {
+                runId: '123e4567-e89b-12d3-a456-426614174010:223e4567-e89b-12d3-a456-426614174010',
+                evidenceRunId: '123e4567-e89b-12d3-a456-426614174010',
+                remote,
+                mcpServers: servers,
+                approvalMode: mode,
+              }),
+              (event) => {
+                if (event.type === 'approval') approvals.push(event.approval);
+              },
+              new AbortController().signal,
+            );
+            if (mode !== 'automatic') {
+              for (let i = 0; i < 200 && !approvals.length; i++)
+                await new Promise((resolve) => setTimeout(resolve, 10));
+              expect(approvals[0]).toMatchObject({
+                status: 'pending',
+                title: 'Permitir servidor MCP adelic-run-evidence',
+              });
+              await codex.approve(approvals[0]!.id, decision!);
+            }
+            await running;
+            await codex.shutdown();
+          } finally {
+            await codex.shutdown();
+            cleanupSkillsMcpSnapshots([skills]);
           }
-          await running;
-          await codex.shutdown();
-        } finally {
-          await codex.shutdown();
-        }
-      });
-      const response = (await fake.read()).find((item) => item.id === 900 && !item.method);
-      expect(response?.result).toEqual({
-        action: expectedAction,
-        content: expectedAction === 'accept' ? {} : null,
-        _meta: null,
-      });
-      if (mode === 'automatic') expect(approvals).toContainEqual(expect.objectContaining({ status: 'approved' }));
+        });
+        const response = (await fake.read()).find((item) => item.id === 900 && !item.method);
+        expect(response?.result).toEqual({
+          action: expectedAction,
+          content: expectedAction === 'accept' ? {} : null,
+          _meta: null,
+        });
+        if (mode === 'automatic') expect(approvals).toContainEqual(expect.objectContaining({ status: 'approved' }));
+      }
     }
   });
 
@@ -777,6 +788,9 @@ describe('Codex MCP configuration', () => {
       outcome: { status: 'completed' },
     });
     const evidence = evidenceStore.mcpServer(runId);
+    const store = new Store(dir);
+    const skills = skillsMcpRunServer('reviewer', store);
+    store.close();
     const remote = {
       label: 'Local isolado',
       root: '/workspace',
@@ -791,13 +805,14 @@ describe('Codex MCP configuration', () => {
             runId: `${runId}:${taskId}`,
             evidenceRunId: runId,
             remote,
-            mcpServers: [evidence],
+            mcpServers: [skills, evidence],
           }),
           () => undefined,
           new AbortController().signal,
         );
       } finally {
         await codex.shutdown();
+        cleanupSkillsMcpSnapshots([skills]);
       }
     });
     expect((await fake.read()).find((item) => item.id === 900 && !item.method)?.result).toEqual({

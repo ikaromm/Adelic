@@ -68,7 +68,7 @@ describe('adaptive router', () => {
     }
     expect(routeMessage('Qual é o clima hoje?', 'auto').tools).toBe(true);
     expect(routeMessage('Rode o build do projeto', 'auto').tools).toBe(true);
-    expect(routeMessage('Crie uma poesia', 'deep').tools).toBe(false);
+    expect(routeMessage('Crie uma poesia', 'deep').tools).toBe(true);
   });
   it('searches memory by a short subject instead of the full request', () => {
     expect(memoryQueryTerms('Lembre o que decidimos sobre VPN e Tailscale no computador')).toEqual([
@@ -134,7 +134,7 @@ describe('adaptive router', () => {
       ]).level,
     ).toBe('fast');
     expect(routeMessage('Corrigir server/router.ts', 'deep')).toMatchObject({ level: 'deep', tools: true });
-    expect(routeMessage('Como funciona um roteador?', 'deep')).toMatchObject({ level: 'deep', tools: false });
+    expect(routeMessage('Como funciona um roteador?', 'deep')).toMatchObject({ level: 'deep', tools: true });
   });
 
   it('routes inflected Portuguese edit imperatives in auto and full modes without promoting questions', () => {
@@ -153,7 +153,7 @@ describe('adaptive router', () => {
 
     for (const prompt of ['Como se conjuga corrigir?', 'O que significa formatar?']) {
       expect(routeMessage(prompt, 'auto')).toMatchObject({ level: 'fast' });
-      expect(routeMessage(prompt, 'deep')).toMatchObject({ level: 'deep', tools: false });
+      expect(routeMessage(prompt, 'deep')).toMatchObject({ level: 'deep', tools: true });
     }
   });
 
@@ -171,5 +171,59 @@ describe('adaptive router', () => {
       tools: true,
       memory: false,
     });
+  });
+
+  it('preserves tool availability in explicit modes independent of wording', () => {
+    for (const prompt of [
+      'What is a foreign key?',
+      'Unexpected behavior.',
+      'Improve validation.',
+      'The callback stopped.',
+    ]) {
+      for (const mode of ['fast', 'deep'] as const) expect(routeMessage(prompt, mode).tools).toBe(true);
+    }
+  });
+
+  it('routes issue-style technical failure reports to tools without requiring an imperative', () => {
+    const reports = [
+      'Foreign key references to a unique column are not represented correctly in generated models.',
+      'Regression: a parser returns the wrong token for a quoted string that spans lines (`parse(input)`).',
+      'The database migration fails when a nullable column is added.',
+      'The API returns an error when I save a record.',
+      'Erro ao salvar no banco de dados.',
+      'The UI freezes when I click Save.',
+      'The API throws an error when saving. Here is how to reproduce: click Save.',
+      'The database migration fails. Expected: the query should preserve what the user entered.',
+    ];
+
+    for (const prompt of reports) {
+      expect(routeMessage(prompt, 'auto')).toMatchObject({ level: 'deep', tools: true });
+      expect(routeMessage(prompt, 'deep')).toMatchObject({ level: 'deep', tools: true });
+    }
+
+    expect(routeMessage('What does a foreign key do in a database?', 'auto')).toMatchObject({
+      level: 'fast',
+      tools: true,
+    });
+    expect(routeMessage('What does a foreign key do in a database?', 'deep')).toMatchObject({
+      level: 'deep',
+      tools: true,
+    });
+
+    for (const prompt of [
+      'What is regression in a model?',
+      'Explain why a database query fails when a column is missing.',
+    ]) {
+      expect(routeMessage(prompt, 'auto')).toMatchObject({ level: 'fast', tools: true });
+      expect(routeMessage(prompt, 'deep')).toMatchObject({ level: 'deep', tools: true });
+    }
+
+    for (const prompt of [
+      'Why does my query fail? Here is the SQL: `SELECT name FROM customers`.',
+      'Explain why this parser fails; the traceback is in server/parser.py.',
+    ]) {
+      expect(routeMessage(prompt, 'auto')).toMatchObject({ level: 'deep', tools: true });
+      expect(routeMessage(prompt, 'deep')).toMatchObject({ level: 'deep', tools: true });
+    }
   });
 });

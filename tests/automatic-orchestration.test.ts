@@ -520,7 +520,7 @@ function setup(options: {
         maxInFlight = Math.max(maxInFlight, inFlight);
         isolatedArrivals++;
         if (isolatedArrivals === 2) releaseIsolated();
-        await bothIsolated;
+        if (options.parallelTasks) await bothIsolated;
         inFlight--;
         expect(existsSync(join(projectRoot, filename))).toBe(false);
         emit({
@@ -1059,6 +1059,41 @@ describe('automatic orchestration', () => {
     expect(test.inputs.some((input) => input.prompt.includes('Produza somente JSON válido'))).toBe(false);
   });
 
+  it.each(['auto', 'deep'] as const)(
+    'keeps real executor tools and integrates an issue-style report in %s mode',
+    async (mode) => {
+      const test = setup({ mode, review: true, realExecutor: true, gitProject: true, dirtyProject: true });
+      let terminal!: () => void;
+      const done = new Promise<void>((resolve) => (terminal = resolve));
+      const unsubscribe = test.orchestrator.subscribe((event) => {
+        if (event.type === 'run' && event.run.sessionId === test.session.id && event.run.status !== 'running')
+          terminal();
+      });
+      try {
+        const started = await test.orchestrator.start(
+          test.session,
+          'Bug: parser output drops grouped expressions in parse_expression.py. Expected: preserve grouping; actual: empty output.',
+        );
+        await done;
+        const workers = test.inputs.filter((input) => input.prompt.includes('Você é um executor delegado'));
+        expect(workers).toHaveLength(1);
+        expect(workers[0].plan.tools).toBe(true);
+        expect(workers[0].remote).toBeDefined();
+        expect(readFileSync(join(test.projectRoot, 'task-b.txt'), 'utf8')).toBe('isolated executor\\n');
+        expect(readFileSync(join(test.projectRoot, 'user-work.txt'), 'utf8')).toBe('preservar\\n');
+        const task = test.store.listSessionTasks(test.session.id).find((item) => item.role === 'worker');
+        expect(task?.integration?.status).toBe('applied');
+        const review = test.inputs.find((input) => input.prompt.includes('Faça revisão independente'));
+        expect(review?.plan.tools).toBe(true);
+        expect(review?.sandbox).toBe('read-only');
+        expect(test.store.getRun(started.runId)?.status).toBe('completed');
+      } finally {
+        unsubscribe();
+      }
+    },
+    REAL_GIT_WORKFLOW_TIMEOUT_MS,
+  );
+
   it('routes read-only automatic validation through Orchestrator.remoteFor and the real isolated executor', async () => {
     const env = setup({});
     const controller = new AbortController();
@@ -1423,7 +1458,8 @@ describe('automatic orchestration', () => {
       artifactChange: true,
       synthesisResponse: 'Tudo certo.',
     });
-    symlinkSync('src/implemented.ts', join(test.projectRoot, 'unknown-source-link'));
+    // A broken link must remain unknown; an internal regular-file link is now supported.
+    symlinkSync('missing-source.ts', join(test.projectRoot, 'unknown-source-link'));
     let terminal!: () => void;
     const done = new Promise<void>((resolve) => (terminal = resolve));
     let finalMessage: { content: string } | undefined;
@@ -3887,7 +3923,10 @@ describe('automatic orchestration', () => {
   }, 30_000);
 
   it('bounds final git write-tree by the absolute run deadline and records incomplete finalization', async () => {
-    const test = setup({ artifactChange: true, gitProject: true, worker: 'kiro' });
+    // Target final checkpoint capture itself; delegated worktree preparation legitimately
+    // performs additional Git snapshots before the provider is called.
+    const test = setup({ gitProject: true, orchestrationEnabled: false });
+    test.store.setSettings({ ...test.store.getSettings()!, sandbox: 'workspace-write' });
     const shimDir = mkdtempSync(join(tmpdir(), 'adelic-git-deadline-'));
     const originalPath = process.env.PATH ?? '';
     const realGit = execFileSync('which', ['git'], { encoding: 'utf8' }).trim();

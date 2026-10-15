@@ -486,9 +486,18 @@ async function spawnLocalExecutorProcess(
       args.push('--tmpfs', hostHome);
     }
     ensureDir(args, '/workspace');
-    args.push(...(await bind(workspace, '/workspace', sandbox !== 'workspace-write')));
     const bindings = await externalWorkspaceBindings(workspace);
     const hasDependencyMount = bindings.some((binding) => binding.kind === 'dependency');
+    const missingDependencyMount = bindings.some(
+      (binding) => binding.kind === 'dependency' && binding.target === path.join(workspace, 'node_modules'),
+    );
+    if (sandbox === 'read-only' && missingDependencyMount) {
+      // A linked worktree has no node_modules entry. Bubblewrap cannot create a mountpoint
+      // inside the read-only /workspace bind, so expose the project as an invisible overlay.
+      // The project mount is made read-only again after the dependency bind is in place.
+      args.push('--overlay-src', workspace, '--tmp-overlay', '/workspace');
+      ensureDir(args, '/workspace/node_modules');
+    } else args.push(...(await bind(workspace, '/workspace', sandbox !== 'workspace-write')));
     for (const binding of bindings) {
       if (binding.kind === 'dependency') {
         // A bind mount is namespace-local; unlike --symlink this never writes an
@@ -502,6 +511,7 @@ async function spawnLocalExecutorProcess(
         args.push(...(await bind(binding.source, target)));
       }
     }
+    if (sandbox === 'read-only' && missingDependencyMount) args.push('--remount-ro', '/workspace');
     let localRuntime = false;
     if (nodeBinary && !within('/usr', nodeBinary)) {
       const nodeRoot = path.dirname(path.dirname(nodeBinary));

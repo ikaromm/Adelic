@@ -64,6 +64,10 @@ const EXCLUDED = new Set([
   '.venv',
   'venv',
 ]);
+/** Whether a project-relative path contains a tree omitted from artifact snapshots. */
+export function isExcludedRunArtifactPath(path: string): boolean {
+  return path.split('/').some((part) => EXCLUDED.has(part));
+}
 const relativePath = (path: string) => path.split(sep).join('/');
 
 /** Paths whose regular-file contents were read successfully in both snapshots and differ. */
@@ -316,7 +320,7 @@ export async function readRunArtifactFile(
     initial = await lstat(finalPath);
     if (initial.isSymbolicLink() || !initial.isFile())
       throw Object.assign(new Error('artifact is not a regular file'), { status: 400 });
-    file = await open(finalPath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+    file = await open(finalPath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
   } finally {
     await directory.close();
   }

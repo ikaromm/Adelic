@@ -76,6 +76,8 @@ function setup(options: {
     | 'timeout-second'
     | 'approved-second-change'
     | 'finding-second-change'
+    | 'finding-path'
+    | 'mixed-partial'
     | 'omitted-prior-and-new'
     | 'id-conflict-second'
     | 'outside-partial';
@@ -92,6 +94,11 @@ function setup(options: {
   workerFailure?: boolean;
   toolEvent?: boolean;
   artifactChange?: boolean;
+  workerArtifactPath?: string;
+  workerArtifactKind?: 'regular' | 'symlink' | 'deleted';
+  reviewFindingPath?: string;
+  reviewAdditionalFindingPath?: string;
+  unchangedFindingState?: 'dirty' | 'staged' | 'untracked';
   partialArtifacts?: boolean;
   largeArtifact?: boolean;
   gitProject?: boolean;
@@ -130,6 +137,19 @@ function setup(options: {
   mkdirSync(projectRoot);
   if (options.gitProject) {
     writeFileSync(join(projectRoot, 'README.md'), 'base\\n');
+    if (options.unchangedFindingState && options.unchangedFindingState !== 'untracked') {
+      mkdirSync(join(projectRoot, 'src'), { recursive: true });
+      writeFileSync(join(projectRoot, 'src/unmodified.ts'), 'baseline unchanged\\n');
+    }
+    if (options.workerArtifactPath?.startsWith('.cache/')) {
+      mkdirSync(join(projectRoot, '.cache'), { recursive: true });
+      writeFileSync(join(projectRoot, options.workerArtifactPath), 'cache baseline\\n');
+    }
+    if (options.workerArtifactPath && ['deleted', 'symlink'].includes(options.workerArtifactKind ?? '')) {
+      const seedPath = join(projectRoot, options.workerArtifactPath);
+      mkdirSync(dirname(seedPath), { recursive: true });
+      writeFileSync(seedPath, 'worker baseline\\n');
+    }
     gitIn(projectRoot, 'init', '-q', '-b', 'main');
     gitIn(projectRoot, 'add', '-A');
     gitIn(projectRoot, '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'base');
@@ -140,6 +160,11 @@ function setup(options: {
     writeFileSync(join(projectRoot, 'src/implemented.ts'), 'baseline implementation\\n');
     writeFileSync(join(projectRoot, 'src/unmodified.ts'), 'unchanged source\\n');
     writeFileSync(join(projectRoot, '000-large-unrelated.bin'), Buffer.alloc(2_097_153, 0x61));
+  }
+  if (options.unchangedFindingState) {
+    mkdirSync(join(projectRoot, 'src'), { recursive: true });
+    writeFileSync(join(projectRoot, 'src/unmodified.ts'), 'unchanged control\\n');
+    if (options.unchangedFindingState === 'staged') gitIn(projectRoot, 'add', 'src/unmodified.ts');
   }
   const store = new Store(directory);
   const now = new Date().toISOString();
@@ -463,6 +488,29 @@ function setup(options: {
             text: '{"status":"findings","findings":[{"id":"f1","severity":"P2","title":"Unchanged fixture","file":"src/unmodified.ts","description":"This file did not change in the run"}]}',
             stopReason: 'completed',
           };
+        if (options.reviewCycle === 'mixed-partial')
+          return {
+            text: JSON.stringify({
+              status: 'findings',
+              findings: [
+                {
+                  id: 'f1',
+                  severity: 'P1',
+                  title: 'Integrated new file defect',
+                  file: options.reviewFindingPath ?? 'src/new-file.ts',
+                  description: 'A defect in the integrated file',
+                },
+                {
+                  id: 'f2',
+                  severity: 'P2',
+                  title: 'Unchanged file defect',
+                  file: options.reviewAdditionalFindingPath ?? 'src/unmodified.ts',
+                  description: 'A finding outside the integrated paths',
+                },
+              ],
+            }),
+            stopReason: 'completed',
+          };
         if (options.reviewCycle === 'omitted-prior-and-new')
           return {
             text: '{"status":"findings","findings":[{"id":"f1","severity":"P1","title":"First prior defect","file":"src/implemented.ts","description":"Incorrect output branch A"},{"id":"f2","severity":"P2","title":"Second prior defect","file":"src/implemented.ts","description":"Incorrect output branch B"}]}',
@@ -487,8 +535,24 @@ function setup(options: {
         if (options.reviewCycle === 'invalid') return { text: 'Approved. No issues.', stopReason: 'completed' };
         if (options.reviewCycle === 'incomplete')
           return { text: '{"status":"incomplete","findings":[]}', stopReason: 'completed' };
-        if (options.reviewCycle === 'fixed' && reviewPasses > 1)
+        if (['fixed', 'finding-path'].includes(options.reviewCycle ?? '') && reviewPasses > 1)
           return { text: '{"status":"approved","findings":[]}', stopReason: 'completed' };
+        if (options.reviewCycle === 'finding-path')
+          return {
+            text: JSON.stringify({
+              status: 'findings',
+              findings: [
+                {
+                  id: 'f1',
+                  severity: 'P2',
+                  title: 'Fixture defect',
+                  file: options.reviewFindingPath ?? 'src/implemented.ts',
+                  description: 'Incorrect output branch',
+                },
+              ],
+            }),
+            stopReason: 'completed',
+          };
         return {
           text: '{"status":"findings","findings":[{"id":"f1","severity":"P2","title":"Fixture defect","file":"src/implemented.ts","description":"Incorrect output branch"}]}',
           stopReason: 'completed',
@@ -608,18 +672,26 @@ function setup(options: {
         }
         mkdirSync(join(input.cwd, 'src'), { recursive: true });
         const taskFile = /(task-[ab]\.txt)/.exec(input.prompt)?.[1];
-        const filename = options.largeArtifact
-          ? input.prompt.includes('Task A')
-            ? 'large-task-a.bin'
-            : 'large-task-b.bin'
-          : (taskFile ?? 'src/implemented.ts');
-        mkdirSync(join(input.cwd, filename.includes('/') ? 'src' : '.'), { recursive: true });
-        if (options.largeArtifact) {
+        const filename =
+          options.workerArtifactPath ??
+          (options.largeArtifact
+            ? input.prompt.includes('Task A')
+              ? 'large-task-a.bin'
+              : 'large-task-b.bin'
+            : (taskFile ?? 'src/implemented.ts'));
+        const filePath = join(input.cwd, filename);
+        mkdirSync(dirname(filePath), { recursive: true });
+        if (options.workerArtifactKind === 'deleted') {
+          rmSync(filePath, { force: true });
+        } else if (options.workerArtifactKind === 'symlink') {
+          rmSync(filePath, { force: true });
+          symlinkSync('implemented.ts', filePath);
+        } else if (options.largeArtifact) {
           const byte = filename === 'large-task-a.bin' ? 0x61 : 0x62;
-          writeFileSync(join(input.cwd, filename), Buffer.alloc(2_097_153, byte));
+          writeFileSync(filePath, Buffer.alloc(2_097_153, byte));
         } else {
           writeFileSync(
-            join(input.cwd, filename),
+            filePath,
             input.prompt.includes('Corrigir achados objetivos')
               ? 'export const implemented = false;\\n'
               : 'export const implemented = true;\\n',
@@ -654,7 +726,7 @@ function setup(options: {
           const branch = gitIn(input.cwd, 'branch', '--show-current').trim();
           gitIn(projectRoot, 'worktree', 'add', '--quiet', '--force', branchProtectorPath, branch);
         }
-        if (options.integrationConflict && filename === 'src/implemented.ts') {
+        if (options.integrationConflict && filename === (options.workerArtifactPath ?? 'src/implemented.ts')) {
           mkdirSync(join(projectRoot, 'src'), { recursive: true });
           writeFileSync(join(projectRoot, filename), 'user change\\n');
         }
@@ -765,6 +837,45 @@ function setup(options: {
     progressiveThirdStartedEarly: () => progressiveThirdStartedEarly,
     dependencySawAppliedIntegration: () => dependencySawAppliedIntegration,
   };
+}
+
+async function startAndWait(test: ReturnType<typeof setup>, prompt: string) {
+  let runId: string | undefined;
+  let terminalRunId: string | undefined;
+  let finish!: () => void;
+  const done = new Promise<void>((resolve) => (finish = resolve));
+  const unsubscribe = test.orchestrator.subscribe((event) => {
+    if (
+      event.type === 'run' &&
+      event.run.sessionId === test.session.id &&
+      event.run.status !== 'running' &&
+      (!runId || event.run.id === runId)
+    ) {
+      terminalRunId = event.run.id;
+      finish();
+    }
+  });
+  try {
+    const started = await test.orchestrator.start(test.session, prompt);
+    runId = started.runId;
+    if (terminalRunId === runId || test.store.getRun(runId)?.status !== 'running') finish();
+    await done;
+    return runId;
+  } finally {
+    unsubscribe();
+  }
+}
+
+function expectReviewPathGateBlocked(test: ReturnType<typeof setup>, runId: string, paths: string[]) {
+  const tasks = test.store.listSessionTasks(test.session.id).filter((task) => task.runId === runId);
+  const reviewer = tasks.find((task) => task.role === 'reviewer');
+  expect(reviewer).toMatchObject({ status: 'completed' });
+  expect(reviewer?.output).toContain('"status":"findings"');
+  for (const path of paths) expect(reviewer?.output).toContain(`"file":"${path}"`);
+  expect(tasks.filter((task) => task.role === 'reviewer')).toHaveLength(1);
+  const synthesis = test.inputs.find((input) => input.prompt.includes('Fatos estruturados de execução'));
+  expect(synthesis?.prompt).toContain('pendência: correção não iniciada');
+  return tasks;
 }
 
 function slowFinalCheckpointGit(projectRoot: string) {
@@ -1708,6 +1819,144 @@ describe('automatic orchestration', () => {
     } finally {
       unsubscribe();
     }
+  });
+
+  it(
+    'repairs an integrated new-file finding when the global artifact snapshot is truncated',
+    async () => {
+      const test = setup({
+        review: true,
+        reviewCycle: 'finding-path',
+        artifactChange: true,
+        gitProject: true,
+        partialArtifacts: true,
+        workerArtifactPath: 'src/new-file.ts',
+        reviewFindingPath: 'src/new-file.ts',
+      });
+      const runId = await startAndWait(test, 'Implement a small change in the project.');
+      const tasks = test.store.listSessionTasks(test.session.id).filter((task) => task.runId === runId);
+      expect(test.store.getRun(runId)?.artifacts).toMatchObject({ status: 'unknown', truncated: true });
+      expect(tasks.filter((task) => task.role === 'reviewer')).toHaveLength(2);
+      const repair = tasks.find((task) => task.title === 'Corrigir achados objetivos da revisão');
+      expect(repair?.scope).toEqual(['src/new-file.ts']);
+      expect(repair?.integration).toMatchObject({ status: 'applied' });
+      expect(readFileSync(join(test.projectRoot, 'src/new-file.ts'), 'utf8')).toBe(
+        'export const implemented = false;\\n',
+      );
+    },
+    REAL_GIT_WORKFLOW_TIMEOUT_MS,
+  );
+
+  it.each(['dirty', 'staged', 'untracked'] as const)(
+    'does not authorize an unchanged %s main-checkout finding from a worktree delta',
+    async (unchangedFindingState) => {
+      const test = setup({
+        review: true,
+        reviewCycle: 'finding-path',
+        artifactChange: true,
+        gitProject: true,
+        partialArtifacts: true,
+        unchangedFindingState,
+        reviewFindingPath: 'src/unmodified.ts',
+      });
+      const headBefore = gitIn(test.projectRoot, 'rev-parse', 'HEAD');
+      const indexBefore = gitIn(test.projectRoot, 'ls-files', '--stage');
+      const pathStatusBefore = gitIn(test.projectRoot, 'status', '--porcelain', '--', 'src/unmodified.ts');
+      const contentBefore = readFileSync(join(test.projectRoot, 'src/unmodified.ts'), 'utf8');
+      const runId = await startAndWait(test, 'Implement a small change in the project.');
+      const tasks = expectReviewPathGateBlocked(test, runId, ['src/unmodified.ts']);
+      expect(test.store.getRun(runId)?.artifacts).toMatchObject({ status: 'unknown', truncated: true });
+      expect(tasks.filter((task) => task.title === 'Corrigir achados objetivos da revisão')).toHaveLength(0);
+      expect(tasks.find((task) => task.role === 'worker')?.integration).toMatchObject({ status: 'applied' });
+      expect(gitIn(test.projectRoot, 'rev-parse', 'HEAD')).toBe(headBefore);
+      expect(gitIn(test.projectRoot, 'ls-files', '--stage')).toBe(indexBefore);
+      expect(gitIn(test.projectRoot, 'status', '--porcelain', '--', 'src/unmodified.ts')).toBe(pathStatusBefore);
+      expect(readFileSync(join(test.projectRoot, 'src/unmodified.ts'), 'utf8')).toBe(contentBefore);
+    },
+    REAL_GIT_WORKFLOW_TIMEOUT_MS,
+  );
+
+  it.each([
+    { name: 'symlink', path: 'src/new-link.ts', kind: 'symlink' as const },
+    { name: 'deleted file', path: 'src/deleted.ts', kind: 'deleted' as const },
+    { name: 'excluded cache file', path: '.cache/review.ts', kind: 'regular' as const },
+  ])(
+    'does not repair a $name even when its path appears in the integrated delta',
+    async ({ path, kind }) => {
+      const test = setup({
+        review: true,
+        reviewCycle: 'finding-path',
+        artifactChange: true,
+        gitProject: true,
+        partialArtifacts: true,
+        workerArtifactPath: path,
+        workerArtifactKind: kind,
+        reviewFindingPath: path,
+      });
+      const runId = await startAndWait(test, 'Implement a small change in the project.');
+      const tasks = expectReviewPathGateBlocked(test, runId, [path]);
+      expect(tasks.filter((task) => task.title === 'Corrigir achados objetivos da revisão')).toHaveLength(0);
+      expect(tasks.find((task) => task.role === 'worker')?.integration).toMatchObject({ status: 'applied' });
+    },
+    REAL_GIT_WORKFLOW_TIMEOUT_MS,
+  );
+
+  it(
+    'does not authorize a new-file finding when its worktree integration conflicts',
+    async () => {
+      const test = setup({
+        review: true,
+        reviewCycle: 'finding-path',
+        artifactChange: true,
+        gitProject: true,
+        partialArtifacts: true,
+        integrationConflict: true,
+        workerArtifactPath: 'src/new-file.ts',
+        reviewFindingPath: 'src/new-file.ts',
+      });
+      const runId = await startAndWait(test, 'Implement a small change in the project.');
+      const tasks = expectReviewPathGateBlocked(test, runId, ['src/new-file.ts']);
+      expect(tasks.find((task) => task.role === 'worker')?.integration).toMatchObject({ status: 'blocked' });
+      expect(tasks.filter((task) => task.title === 'Corrigir achados objetivos da revisão')).toHaveLength(0);
+    },
+    REAL_GIT_WORKFLOW_TIMEOUT_MS,
+  );
+
+  it(
+    'blocks a mixed repair batch when one finding is outside the integrated paths',
+    async () => {
+      const test = setup({
+        review: true,
+        reviewCycle: 'mixed-partial',
+        artifactChange: true,
+        gitProject: true,
+        partialArtifacts: true,
+        workerArtifactPath: 'src/new-file.ts',
+        reviewFindingPath: 'src/new-file.ts',
+        reviewAdditionalFindingPath: 'src/unmodified.ts',
+      });
+      const runId = await startAndWait(test, 'Implement a small change in the project.');
+      const tasks = expectReviewPathGateBlocked(test, runId, ['src/new-file.ts', 'src/unmodified.ts']);
+      expect(tasks.find((task) => task.role === 'worker')?.integration).toMatchObject({ status: 'applied' });
+      expect(tasks.filter((task) => task.title === 'Corrigir achados objetivos da revisão')).toHaveLength(0);
+    },
+    REAL_GIT_WORKFLOW_TIMEOUT_MS,
+  );
+
+  it('keeps the no-Git partial-snapshot repair gate closed for an added file', async () => {
+    const test = setup({
+      review: true,
+      reviewCycle: 'finding-path',
+      artifactChange: true,
+      partialArtifacts: true,
+      workerArtifactPath: 'src/new-file.ts',
+      reviewFindingPath: 'src/new-file.ts',
+    });
+    const runId = await startAndWait(test, 'Implement a small change in the project.');
+    const tasks = expectReviewPathGateBlocked(test, runId, ['src/new-file.ts']);
+    expect(existsSync(join(test.projectRoot, 'src/new-file.ts'))).toBe(true);
+    expect(test.store.getRun(runId)?.artifacts).toMatchObject({ status: 'unknown', truncated: true });
+    expect(tasks.filter((task) => task.title === 'Corrigir achados objetivos da revisão')).toHaveLength(0);
   });
 
   it('reserves synthesis summary space for a repair after a full worker summary', async () => {

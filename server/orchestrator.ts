@@ -1,6 +1,8 @@
 import {
   captureRunArtifactSnapshot,
   compareRunArtifactSnapshots,
+  isExcludedRunArtifactPath,
+  readRunArtifactFile,
   verifiedChangedArtifactPaths,
   type RunArtifactSnapshot,
 } from './run-artifacts.js';
@@ -3227,6 +3229,9 @@ export class Orchestrator {
             this.graphifyService,
           );
     const mapPaths = graphifyPaths;
+    // Git-validated executor deltas remain usable when the bounded global artifact scan cannot
+    // enumerate a new path. This is run-local provenance, never persisted as an artifact list.
+    const integratedReviewPaths = new Set<string>();
     const getBrief = () => (session.projectId === null ? null : this.store.getBrief(session.projectId));
     const saveBrief = (objective: string, summary: string, paths: string[]) => {
       if (session.projectId !== null) this.store.putBrief(briefFor(project, objective, summary, paths));
@@ -3491,6 +3496,8 @@ export class Orchestrator {
                   integrateExecutorWorktree(project, executorWorktree, worktreeBudget),
                 ),
             );
+            if (integration.changed || integration.alreadyApplied)
+              for (const path of integration.files) integratedReviewPaths.add(path);
             if (!integration.changed && !integration.alreadyApplied) {
               task.integration = undefined;
               task.delivery = {
@@ -4419,15 +4426,36 @@ export class Orchestrator {
             : [],
         );
         const findingPaths = [...new Set(structuredReview.findings.map((finding) => finding.file))];
-        if (
-          (run.budget && Date.now() >= Date.parse(run.budget.deadlineAt) - run.budget.finalizationReserveMs) ||
-          !route.tools ||
-          project.remote ||
-          settings.sandbox !== 'workspace-write' ||
-          !checkSourceMatches ||
-          !findingPaths.length ||
-          findingPaths.some((path) => !changedPaths.has(path) && !reviewArtifactVerifiedChanges.has(path))
-        ) {
+        const repairWindowAvailable =
+          !run.budget || Date.now() < Date.parse(run.budget.deadlineAt) - run.budget.finalizationReserveMs;
+        const repairScopeEligible =
+          route.tools &&
+          !project.remote &&
+          settings.sandbox === 'workspace-write' &&
+          checkSourceMatches &&
+          findingPaths.length > 0;
+        let findingPathUnverified = !repairWindowAvailable || !repairScopeEligible;
+        if (!findingPathUnverified) {
+          for (const path of findingPaths) {
+            if (changedPaths.has(path) || reviewArtifactVerifiedChanges.has(path)) continue;
+            if (!integratedReviewPaths.has(path) || isExcludedRunArtifactPath(path)) {
+              findingPathUnverified = true;
+              break;
+            }
+            try {
+              await readRunArtifactFile(project.path, path, 0);
+            } catch {
+              findingPathUnverified = true;
+              break;
+            }
+            if (run.budget && Date.now() >= Date.parse(run.budget.deadlineAt) - run.budget.finalizationReserveMs) {
+              findingPathUnverified = true;
+              break;
+            }
+          }
+        }
+        if (controller.signal.aborted) break;
+        if (findingPathUnverified) {
           reviewSummary +=
             '; pendência: correção não iniciada (escopo/identidade dos arquivos, permissão ou orçamento indisponível)';
           break;

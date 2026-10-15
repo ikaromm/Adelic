@@ -6,6 +6,7 @@ import type {
   ProviderId,
   TaskDeliveryResult,
   CheckSource,
+  RunEvent,
 } from '../shared/contracts.js';
 import { hasFileReference } from './router.js';
 
@@ -221,6 +222,38 @@ export function synthesisExecutionFacts(tasks: DelegatedTask[]): string {
         : null,
     }));
   return JSON.stringify(facts);
+}
+
+/** Compact index of checks actually recorded for the run; raw commands and outputs stay out. */
+export function synthesisValidationIndex(events: RunEvent[]): string {
+  const latest = new Map<string, RunEvent>();
+  for (const event of events) {
+    if (event.type === 'check') latest.set(event.id, event);
+  }
+  const checks = [...latest.values()].map((event) => {
+    const check = event.check;
+    return {
+      checkEventId: event.id,
+      status: check?.status ?? 'unknown',
+      exitCode: check?.exitCode ?? null,
+      sourceState: check?.source?.state ?? 'unknown',
+      logAvailability: check?.operationalLog?.status ?? 'unknown',
+      inlineOutputAvailability: check?.output === undefined ? 'unknown' : check.truncated ? 'truncated' : 'available',
+    };
+  });
+  return JSON.stringify({
+    registeredCheckCount: checks.length,
+    checks,
+    checksListComplete: true,
+    validationStatus: checks.length ? 'recorded-results' : 'unknown',
+    ...(checks.length
+      ? {}
+      : {
+          absence:
+            'No check events were recorded; this does not establish whether validation ran outside Adelic checks.',
+          missingLogsRecoverable: false,
+        }),
+  });
 }
 
 export interface StructuredReviewFinding {

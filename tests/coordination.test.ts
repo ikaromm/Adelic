@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { DelegatedTask, ProviderInfo } from '../shared/contracts.js';
+import type { DelegatedTask, ProviderInfo, RunEvent } from '../shared/contracts.js';
 import {
   boundedCoordinatorContext,
   canSkipCoordinationPlanner,
@@ -15,6 +15,7 @@ import {
   isSafeReviewPath,
   decideReview,
   synthesisExecutionFacts,
+  synthesisValidationIndex,
 } from '../server/coordination.js';
 
 describe('delegated task contracts', () => {
@@ -76,6 +77,108 @@ describe('delegated task contracts', () => {
     expect(facts[2]).toMatchObject({ process: { status: 'failed', error: 'verificação indisponível' } });
     expect(JSON.stringify(facts)).not.toContain('synthesis');
   });
+
+  it('indexes only recorded check events with latest status and explicit unknown evidence', () => {
+    const event = (id: string, check?: RunEvent['check'], type: RunEvent['type'] = 'check'): RunEvent => ({
+      id,
+      runId: 'run',
+      sessionId: 'session',
+      type,
+      text: '',
+      createdAt: '2026-10-15T00:00:00.000Z',
+      ...(check ? { check } : {}),
+    });
+    const index = JSON.parse(
+      synthesisValidationIndex([
+        event('event-running', { name: 'check', status: 'running' }),
+        event('event-running', {
+          name: 'check',
+          status: 'failed',
+          exitCode: 1,
+          command: 'SECRET_COMMAND',
+          output: 'SECRET_OUTPUT',
+          truncated: true,
+          source: { runId: 'run', state: 'unknown', scope: 'filesystem-except-.git-and-node_modules' },
+          operationalLog: { status: 'truncated' },
+        }),
+        event('event-available', {
+          name: 'another',
+          status: 'passed',
+          exitCode: 0,
+          source: { runId: 'run', state: 'verified', scope: 'filesystem-except-.git-and-node_modules' },
+          operationalLog: { status: 'available' },
+        }),
+        event('event-log-unavailable', {
+          name: 'operational log unavailable',
+          status: 'failed',
+          exitCode: 2,
+          operationalLog: { status: 'unavailable' },
+        }),
+        event('event-unavailable', { name: 'legacy', status: 'running' }),
+        event('not-a-check', undefined, 'tool'),
+      ]),
+    ) as {
+      registeredCheckCount: number;
+      checksListComplete: boolean;
+      validationStatus: string;
+      checks: {
+        checkEventId: string;
+        status: string;
+        exitCode: number | null;
+        sourceState: string;
+        logAvailability: string;
+        inlineOutputAvailability: string;
+      }[];
+    };
+    expect(index).toMatchObject({
+      registeredCheckCount: 4,
+      checksListComplete: true,
+      validationStatus: 'recorded-results',
+      checks: [
+        {
+          checkEventId: 'event-running',
+          status: 'failed',
+          exitCode: 1,
+          sourceState: 'unknown',
+          logAvailability: 'truncated',
+          inlineOutputAvailability: 'truncated',
+        },
+        {
+          checkEventId: 'event-available',
+          status: 'passed',
+          exitCode: 0,
+          sourceState: 'verified',
+          logAvailability: 'available',
+          inlineOutputAvailability: 'unknown',
+        },
+        {
+          checkEventId: 'event-log-unavailable',
+          status: 'failed',
+          exitCode: 2,
+          sourceState: 'unknown',
+          logAvailability: 'unavailable',
+          inlineOutputAvailability: 'unknown',
+        },
+        {
+          checkEventId: 'event-unavailable',
+          status: 'running',
+          exitCode: null,
+          sourceState: 'unknown',
+          logAvailability: 'unknown',
+          inlineOutputAvailability: 'unknown',
+        },
+      ],
+    });
+    expect(JSON.stringify(index)).not.toContain('SECRET_');
+    expect(JSON.parse(synthesisValidationIndex([]))).toMatchObject({
+      registeredCheckCount: 0,
+      checks: [],
+      checksListComplete: true,
+      validationStatus: 'unknown',
+      missingLogsRecoverable: false,
+    });
+  });
+
   it('accepts bounded task plans with forward dependencies', () => {
     expect(
       parseTaskPlan(

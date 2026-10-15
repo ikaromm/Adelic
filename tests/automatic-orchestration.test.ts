@@ -3252,6 +3252,44 @@ describe('automatic orchestration', () => {
       const evidence = await test.orchestrator.runEvidence.get(started.runId);
       expect(synthesis?.prompt).not.toContain(commandSecret);
       expect(synthesis?.prompt).not.toContain(logSecret);
+      expect(synthesis?.prompt).toContain('Use primeiro o índice completo de verificações registradas.');
+      const validationIndexStart = synthesis!.prompt.indexOf(
+        'Índice determinístico de validações observadas (JSON completo dos eventos check deste run):\n',
+      );
+      const validationIndexText = synthesis!.prompt
+        .slice(validationIndexStart)
+        .split('\n')
+        .slice(1)
+        .join('\n')
+        .split('\n\nPedido completo do usuário:')[0]!;
+      const validationIndex = JSON.parse(validationIndexText) as {
+        registeredCheckCount: number;
+        checksListComplete: boolean;
+        validationStatus: string;
+        checks: {
+          checkEventId: string;
+          status: string;
+          exitCode: number | null;
+          sourceState: string;
+          logAvailability: string;
+          inlineOutputAvailability: string;
+        }[];
+      };
+      expect(validationIndex).toMatchObject({
+        registeredCheckCount: 1,
+        checksListComplete: true,
+        validationStatus: 'recorded-results',
+        checks: [
+          {
+            status: 'failed',
+            exitCode: 1,
+            sourceState: 'unknown',
+            logAvailability: 'unavailable',
+            inlineOutputAvailability: 'truncated',
+          },
+        ],
+      });
+      expect(validationIndex.checks[0]!.checkEventId).toMatch(/^[0-9a-f-]{36}$/i);
       expect(answer?.content).toContain('sentinel check');
       expect(answer?.content).toContain('failed');
       expect(answer?.content).toContain('código de saída 1');
@@ -3358,6 +3396,27 @@ describe('automatic orchestration', () => {
     expect(synthesis.prompt).toContain('"providerId":"kiro","model":"model","effort":"high"');
     expect(synthesis.prompt).toContain('"status":"completed"');
     expect(synthesis.prompt).toContain('"status":"implemented"');
+    expect(synthesis.prompt).toContain('Índice determinístico de validações observadas');
+    const validationIndexStart = synthesis.prompt.indexOf(
+      'Índice determinístico de validações observadas (JSON completo dos eventos check deste run):\n',
+    );
+    const validationIndexText = synthesis.prompt
+      .slice(validationIndexStart)
+      .split('\n')
+      .slice(1)
+      .join('\n')
+      .split('\n\nPedido completo do usuário:')[0]!;
+    expect(JSON.parse(validationIndexText)).toMatchObject({
+      registeredCheckCount: 0,
+      checks: [],
+      checksListComplete: true,
+      validationStatus: 'unknown',
+      absence: expect.stringContaining('No check events were recorded'),
+      missingLogsRecoverable: false,
+    });
+    expect(synthesis.prompt).toContain(
+      'Não consulte ferramentas para procurar logs de checks quando o índice estiver vazio.',
+    );
     const workerTask = test.store.listSessionTasks(test.session.id).find((task) => task.role === 'worker')!;
     expect(workerTask).toMatchObject({
       agentId: expect.any(String),

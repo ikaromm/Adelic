@@ -1786,34 +1786,38 @@ describe('worktree per conversation', () => {
     expect(readFileSync(join(repo, 'ignored.log'), 'utf8')).toBe('segredo local\n');
   });
 
-  it('never runs repository hooks, filters or merge drivers', async () => {
-    const repo = makeRepo();
-    const marker = join(realpathSync(mkdtempSync(join(tmpdir(), 'adelic-wt-marker-'))), 'ran');
-    cleanup.push(() => rmSync(join(marker, '..'), { recursive: true, force: true }));
-    writeFileSync(join(repo, '.gitattributes'), '*.txt filter=evil merge=evil\n');
-    gitIn(repo, 'add', '-A');
-    gitIn(repo, ...ID, 'commit', '-qm', 'attrs');
-    for (const [key, value] of [
-      ['filter.evil.clean', `touch ${marker}; cat`],
-      ['filter.evil.smudge', `touch ${marker}; cat`],
-      ['filter.evil.process', `touch ${marker}`],
-      ['filter.evil.required', 'true'],
-      ['merge.evil.driver', `touch ${marker}; false`],
-      ['hook.spy.event', 'post-checkout'],
-      ['hook.spy.command', `touch ${marker}`],
-    ])
-      gitIn(repo, 'config', '--add', key, value);
-    for (const event of ['pre-commit', 'post-checkout', 'post-merge', 'pre-merge-commit', 'commit-msg'])
-      writeFileSync(join(repo, '.git', 'hooks', event), `#!/bin/sh\ntouch ${marker}\n`, { mode: 0o755 });
-    const t = setup(repo);
-    const s = t.session();
-    await t.enable(s.id);
-    await t.finished((await t.send(s.id, 'mude')).body.runId);
-    expect((await t.api(`/api/sessions/${s.id}/worktree`)).status).toBe(200);
-    const r = await t.api(`/api/sessions/${s.id}/worktree/apply`, { method: 'POST', body: { confirm: true } });
-    expect(r.status, JSON.stringify(r.body)).toBe(200);
-    expect(existsSync(marker)).toBe(false);
-  });
+  it(
+    'never runs repository hooks, filters or merge drivers',
+    async () => {
+      const repo = makeRepo();
+      const marker = join(realpathSync(mkdtempSync(join(tmpdir(), 'adelic-wt-marker-'))), 'ran');
+      cleanup.push(() => rmSync(join(marker, '..'), { recursive: true, force: true }));
+      writeFileSync(join(repo, '.gitattributes'), '*.txt filter=evil merge=evil\n');
+      gitIn(repo, 'add', '-A');
+      gitIn(repo, ...ID, 'commit', '-qm', 'attrs');
+      for (const [key, value] of [
+        ['filter.evil.clean', `touch ${marker}; cat`],
+        ['filter.evil.smudge', `touch ${marker}; cat`],
+        ['filter.evil.process', `touch ${marker}`],
+        ['filter.evil.required', 'true'],
+        ['merge.evil.driver', `touch ${marker}; false`],
+        ['hook.spy.event', 'post-checkout'],
+        ['hook.spy.command', `touch ${marker}`],
+      ])
+        gitIn(repo, 'config', '--add', key, value);
+      for (const event of ['pre-commit', 'post-checkout', 'post-merge', 'pre-merge-commit', 'commit-msg'])
+        writeFileSync(join(repo, '.git', 'hooks', event), `#!/bin/sh\ntouch ${marker}\n`, { mode: 0o755 });
+      const t = setup(repo);
+      const s = t.session();
+      await t.enable(s.id);
+      await t.finished((await t.send(s.id, 'mude')).body.runId);
+      expect((await t.api(`/api/sessions/${s.id}/worktree`)).status).toBe(200);
+      const r = await t.api(`/api/sessions/${s.id}/worktree/apply`, { method: 'POST', body: { confirm: true } });
+      expect(r.status, JSON.stringify(r.body)).toBe(200);
+      expect(existsSync(marker)).toBe(false);
+    },
+    REAL_GIT_WORKFLOW_TIMEOUT_MS,
+  );
 
   it(
     'discards with or without deleting the unmerged branch',

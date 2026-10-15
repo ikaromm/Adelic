@@ -2,6 +2,7 @@ import type { ProviderEvent, RunInput } from '../../shared/contracts';
 import type { RemoteRuntime, RemoteToolName } from '../../shared/remote-hosts';
 import { blockedBy, commandText } from '../../shared/hooks';
 import { isRecord } from './process';
+import path from 'node:path';
 
 const MAX_REMOTE_APPROVAL_DETAIL = 1024 * 1024;
 const MAX_REMOTE_WRITE_BYTES = 128 * 1024;
@@ -126,7 +127,8 @@ export const REMOTE_TOOL_SPECS = [
   {
     name: 'adelic_remote_git',
     remoteName: 'git',
-    description: 'Read repository status and diff information from the configured project executor.',
+    description:
+      'Read repository status and diff information from the configured project executor. For a focused diff, pass an optional project-relative literal path with args ["diff"]; omitting path returns the full diff.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -135,6 +137,7 @@ export const REMOTE_TOOL_SPECS = [
           items: { type: 'string', enum: ['status', 'diff', 'log'] },
           maxItems: 1,
         },
+        path: { type: 'string', minLength: 1, maxLength: 4096 },
       },
       required: ['args'],
       additionalProperties: false,
@@ -280,10 +283,19 @@ export function validateRemoteArguments(spec: RemoteToolSpec, raw: unknown): Rec
     case 'diagnose':
       return exactKeys([]) ? args : undefined;
     case 'git':
-      return exactKeys(['args']) &&
+      return exactKeys(['args', 'path']) &&
         Array.isArray(args.args) &&
         args.args.length === 1 &&
-        args.args.every((arg) => ['status', 'diff', 'log'].includes(String(arg)))
+        args.args.every((arg) => ['status', 'diff', 'log'].includes(String(arg))) &&
+        (args.path === undefined ||
+          (args.args[0] === 'diff' &&
+            typeof args.path === 'string' &&
+            args.path.length > 0 &&
+            Buffer.byteLength(args.path, 'utf8') <= 4096 &&
+            !args.path.includes('\0') &&
+            !path.isAbsolute(args.path) &&
+            !args.path.split(/[\\/]/).includes('..') &&
+            path.normalize(args.path) !== '.'))
         ? args
         : undefined;
   }
@@ -349,7 +361,8 @@ export function remoteToolDescription(
       operation = 'diagnose executor capabilities';
       break;
     case 'git':
-      operation = `git ${Array.isArray(args.args) ? compactToolText(args.args[0]) : ''}`.trim();
+      operation =
+        `git ${Array.isArray(args.args) ? compactToolText(args.args[0]) : ''}${args.path ? ` ${compactToolText(args.path, 80)}` : ''}`.trim();
       break;
   }
   const context = runtime.executionKind === 'isolated-local' ? 'Executor local isolado' : `Host ${runtime.label}`;
@@ -434,6 +447,17 @@ export function remoteToolError(error: unknown) {
     return 'Limite curto demais para um caractere UTF-8; aumente limit e reinicie a página.';
   if (category === 'invalid_request' && safeDiagnostic === 'file is not valid UTF-8')
     return 'Arquivo não é UTF-8 válido; confirme o formato antes de ler ou editar.';
+  if (category === 'invalid_request' && safeDiagnostic === 'path escapes project root')
+    return 'Caminho fora da raiz do projeto; informe um caminho relativo dentro do projeto.';
+  if (
+    category === 'invalid_request' &&
+    (safeDiagnostic === 'git diff path must be a non-empty project-relative path' ||
+      safeDiagnostic === 'git diff path must be project-relative' ||
+      safeDiagnostic === 'git diff path must name a file or directory')
+  )
+    return 'Para filtrar git diff, informe um caminho relativo de arquivo ou diretório dentro do projeto.';
+  if (category === 'invalid_request' && safeDiagnostic === 'git diff path is only supported for diff')
+    return 'O campo path só pode acompanhar args ["diff"].';
   if (category === 'conflict' && safeDiagnostic === 'file must be read completely before replace_text')
     return 'Para editar apenas o trecho revisado, leia essa página e passe sua revision como expectedRevision; só chamadas legadas sem revisão exigem leitura sequencial até truncated=false.';
   if (category === 'conflict' && safeDiagnostic === 'file changed before edit')

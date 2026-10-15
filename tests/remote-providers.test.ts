@@ -87,6 +87,26 @@ describe('remote provider tools', () => {
     ).toMatch(/field 'file'.*campos aceitos/i);
   });
 
+  it('accepts only a bounded project-relative path for read-only git diff', () => {
+    const git = REMOTE_TOOL_SPECS.find((tool) => tool.remoteName === 'git')!;
+    expect(git.inputSchema.properties).toMatchObject({
+      path: { type: 'string', minLength: 1, maxLength: 4096 },
+    });
+    expect(validateRemoteArguments(git, { args: ['diff'], path: 'src/fix with spaces.ts' })).toEqual({
+      args: ['diff'],
+      path: 'src/fix with spaces.ts',
+    });
+    expect(validateRemoteArguments(git, { args: ['diff'] })).toEqual({ args: ['diff'] });
+    expect(validateRemoteArguments(git, { args: ['status'], path: 'src/file.ts' })).toBeUndefined();
+    expect(validateRemoteArguments(git, { args: ['diff'], path: '../outside' })).toBeUndefined();
+    expect(validateRemoteArguments(git, { args: ['diff'], path: 'src/../outside' })).toBeUndefined();
+    expect(validateRemoteArguments(git, { args: ['diff'], path: '/etc/passwd' })).toBeUndefined();
+    expect(validateRemoteArguments(git, { args: ['diff'], path: ':(glob)*' })).toEqual({
+      args: ['diff'],
+      path: ':(glob)*',
+    });
+  });
+
   it('paginates through the local factory, Codex provider and model transport across fresh runners', async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), 'adelic-local-provider-pages-'));
     dirs.push(directory);

@@ -576,6 +576,23 @@ def diagnose_capabilities():
             "binaries": binaries,
             "hostDependentTests": "Browser executables are listed separately from --version success; this does not verify GUI/browser automation. /tmp and /var/tmp are private writable scratch directories in this executor. Tests requiring desktop GUI, host services, host-only files, a host SSH account/agent or external networking may still require the host and may not run here."}
 
+def git_diff_pathspec(raw):
+    if not isinstance(raw, str) or not raw or "\x00" in raw or len(raw.encode("utf-8")) > 4096:
+        raise ValueError("git diff path must be a non-empty project-relative path")
+    candidate = Path(raw)
+    if candidate.is_absolute() or ".." in candidate.parts:
+        raise ValueError("git diff path must be project-relative")
+    normalized = os.path.normpath(raw)
+    if normalized in ("", "."):
+        raise ValueError("git diff path must name a file or directory")
+    resolved = (ROOT / normalized).resolve(strict=False)
+    try:
+        resolved.relative_to(ROOT)
+    except ValueError:
+        raise ValueError("path escapes project root")
+    # The magic prefix is fixed locally; the user path is literal data, never Git pathspec syntax.
+    return ":(literal)" + normalized.replace(os.sep, "/")
+
 def execute(tool, args, request_id):
     if not isinstance(args, dict):
         raise ValueError("args must be an object")
@@ -594,14 +611,20 @@ def execute(tool, args, request_id):
         validate_keys(args, (), ())
         return diagnose_capabilities()
     if tool == "git":
-        validate_keys(args, ("args", "operation", "cwd", "timeoutMs", "readOnly"), ())
+        validate_keys(args, ("args", "operation", "cwd", "timeoutMs", "readOnly", "path"), ())
         operation = args.get("operation")
         supplied = args.get("args")
         if operation is None and isinstance(supplied, list) and len(supplied) == 1:
             operation = supplied[0]
         if operation not in GIT_READ_COMMANDS or args.get("readOnly") is False:
             raise ValueError("only read-only git commands are allowed")
-        cwd = cwd_for(args)
+        pathspec = None
+        if "path" in args:
+            if operation != "diff":
+                raise ValueError("git diff path is only supported for diff")
+            pathspec = git_diff_pathspec(args["path"])
+        requested_cwd = cwd_for(args)
+        cwd = ROOT if pathspec is not None else requested_cwd
         timeout = args.get("timeoutMs", 30000)
         # --no-textconv does not disable clean/process filters selected by attributes.
         # Read the effective config (including includes/worktree config) without running
@@ -627,6 +650,8 @@ def execute(tool, args, request_id):
             argv.append("--ignore-submodules=all")
         elif operation == "diff":
             argv.extend(["--no-ext-diff", "--no-textconv", "--ignore-submodules=all"])
+            if pathspec is not None:
+                argv.extend(["--", pathspec])
         if operation == "log":
             argv.extend(["-n", "20", "--oneline", "--no-ext-diff", "--no-textconv"])
         return run_process(argv, cwd, timeout, request_id)
@@ -703,6 +728,8 @@ def process_request(request):
             "unable to read UTF-8 boundary",
             "oldText must be a non-empty string", "newText must be a string",
             "replacement text exceeds limit", "edited file exceeds limit", "path is not a directory",
+            "git diff path must be a non-empty project-relative path", "git diff path must be project-relative",
+            "git diff path must name a file or directory", "git diff path is only supported for diff",
             "path is a directory; read_file requires a file", "path is a directory; replace_text requires a file",
             "path is not a directory; search accepts directories only, use the file's parent directory",
             "limit must be between 1 and 20000", "recursive must be a boolean",

@@ -336,6 +336,124 @@ if __name__ == "__main__":
     }
   }, 10000);
 
+  it('scopes read-only git diff to a literal in-project path and leaves unrelated large diffs out', async () => {
+    const harness = await createHarness();
+    const git = (...args: string[]) => execFileAsync('git', ['-C', harness.root, ...args]);
+    const sendDiff = (id: string, path?: string) =>
+      harness.send({
+        id,
+        method: 'call',
+        tool: 'git',
+        args: { args: ['diff'], ...(path === undefined ? {} : { path }) },
+      });
+    try {
+      await git('init', '-q');
+      await git('config', 'user.name', 'Adelic Test');
+      await git('config', 'user.email', 'adelic-test@example.invalid');
+      await mkdir(join(harness.root, 'scope with spaces'));
+      await writeFile(join(harness.root, 'scope with spaces', 'edited.txt'), 'before\n');
+      await writeFile(join(harness.root, 'scope with spaces', 'deleted.txt'), 'remove me\n');
+      await writeFile(join(harness.root, 'unrelated-large.txt'), `${'unrelated baseline\n'.repeat(5000)}`);
+      await writeFile(join(harness.root, ':(glob)*'), 'literal pathspec filename\n');
+      await git('add', '.');
+      await git('commit', '-qm', 'fixture');
+
+      await writeFile(join(harness.root, 'scope with spaces', 'edited.txt'), 'after\n');
+      await rm(join(harness.root, 'scope with spaces', 'deleted.txt'));
+      await writeFile(join(harness.root, ':(glob)*'), 'literal pathspec filename changed\n');
+      await writeFile(
+        join(harness.root, 'unrelated-large.txt'),
+        `unrelated changed marker ${'x'.repeat(80)}\n`.repeat(5000),
+      );
+
+      const scoped = await sendDiff('git-diff-space-path', 'scope with spaces/edited.txt');
+      expect(scoped).toMatchObject({
+        ok: true,
+        result: { exitCode: 0, stdoutCapture: { truncated: false } },
+      });
+      const scopedResult = scoped.result as { stdout: string; stdoutCapture: { observedBytes: number } };
+      expect(scopedResult.stdout).toContain('after');
+      expect(scopedResult.stdout).not.toContain('unrelated changed marker');
+      expect(scopedResult.stdoutCapture.observedBytes).toBeLessThan(1000);
+
+      const deleted = await sendDiff('git-diff-deleted-path', 'scope with spaces/deleted.txt');
+      expect(deleted).toMatchObject({ ok: true, result: { exitCode: 0 } });
+      expect((deleted.result as { stdout: string }).stdout).toContain('deleted file mode');
+      expect((deleted.result as { stdout: string }).stdout).not.toContain('unrelated changed marker');
+
+      const scopedDirectory = await sendDiff('git-diff-directory-path', 'scope with spaces');
+      expect(scopedDirectory).toMatchObject({ ok: true, result: { exitCode: 0 } });
+      expect((scopedDirectory.result as { stdout: string }).stdout).toContain('after');
+      expect((scopedDirectory.result as { stdout: string }).stdout).toContain('deleted file mode');
+      expect((scopedDirectory.result as { stdout: string }).stdout).not.toContain('unrelated changed marker');
+
+      const literal = await sendDiff('git-diff-literal-path', ':(glob)*');
+      expect(literal).toMatchObject({ ok: true, result: { exitCode: 0 } });
+      expect((literal.result as { stdout: string }).stdout).toContain('literal pathspec filename');
+      expect((literal.result as { stdout: string }).stdout).not.toContain('unrelated changed marker');
+
+      const full = await sendDiff('git-diff-unfiltered');
+      expect(full).toMatchObject({
+        ok: true,
+        result: { stdoutCapture: { truncated: true } },
+      });
+      expect((full.result as { stdout: string }).stdout).toContain('unrelated changed marker');
+
+      const escaped = await sendDiff('git-diff-escape', '../outside');
+      expect(escaped).toMatchObject({
+        ok: false,
+        errorCategory: 'invalid_request',
+        error: 'git diff path must be project-relative',
+      });
+
+      const outside = join(dirname(harness.root), 'outside-target');
+      await writeFile(outside, 'outside\n');
+      await symlink(outside, join(harness.root, 'outside-link'));
+      const symlinkEscape = await sendDiff('git-diff-symlink-escape', 'outside-link');
+      expect(symlinkEscape).toMatchObject({
+        ok: false,
+        errorCategory: 'invalid_request',
+        error: 'path escapes project root',
+      });
+    } finally {
+      await harness.close();
+    }
+  }, 15000);
+
+  it('anchors a literal git diff path at a nested project root, not the repository root', async () => {
+    const base = await mkdtemp(join(tmpdir(), 'adelic-nested-git-diff-'));
+    roots.push(base);
+    const repository = join(base, 'repository');
+    const project = join(repository, 'nested', 'project');
+    await mkdir(project, { recursive: true });
+    const harness = await createHarness(project);
+    const git = (...args: string[]) => execFileAsync('git', ['-C', repository, ...args]);
+    try {
+      await git('init', '-q');
+      await git('config', 'user.name', 'Adelic Test');
+      await git('config', 'user.email', 'adelic-test@example.invalid');
+      await writeFile(join(project, 'inside.txt'), 'before inside\n');
+      await writeFile(join(repository, 'sibling.txt'), 'before sibling\n');
+      await git('add', '.');
+      await git('commit', '-qm', 'fixture');
+      await writeFile(join(project, 'inside.txt'), 'after inside\n');
+      await writeFile(join(repository, 'sibling.txt'), 'after sibling\n');
+
+      const response = await harness.send({
+        id: 'nested-root-scoped-diff',
+        method: 'call',
+        tool: 'git',
+        args: { args: ['diff'], path: 'inside.txt' },
+      });
+      expect(response).toMatchObject({ ok: true, result: { exitCode: 0 } });
+      const stdout = (response.result as { stdout: string }).stdout;
+      expect(stdout).toContain('after inside');
+      expect(stdout).not.toContain('sibling');
+    } finally {
+      await harness.close();
+    }
+  }, 10000);
+
   it('refuses read-only exec at the remote protocol boundary before spawning argv commands', async () => {
     const harness = await createHarness();
     const marker = join(harness.root, 'should-not-exist');

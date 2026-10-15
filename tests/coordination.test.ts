@@ -340,6 +340,42 @@ describe('delegated task contracts', () => {
   it('keeps a single explicit filename on the simple inspection path', () => {
     expect(isSimpleInspectionRequest('Leia src/App.tsx')).toBe(true);
   });
+  it('keeps implementation requests out of the read-only inspection path', () => {
+    for (const request of [
+      'Add summarize(values) to src/stats.js',
+      'Continue: add median(values) to src/stats.js and preserve summarize(values).',
+      'Append a guard to src/stats.js',
+      'Remove the obsolete branch from src/stats.js',
+      'Update the parser in src/stats.js',
+      'Adicione summarize(values) em src/stats.js',
+      'Acrescente uma validação em src/stats.js',
+      'Remova a condição obsoleta de src/stats.js',
+      'Atualize o parser em src/stats.js',
+    ]) {
+      expect(isSimpleInspectionRequest(request), request).toBe(false);
+    }
+  });
+  it('does not treat function names or inline code as inspection or mutation verbs', () => {
+    for (const request of [
+      'Read src/math.ts and explain summarize(rows).',
+      'Leia src/math.ts e explique summarize(rows).',
+      'Explain function reviewFunction() in src/reviews.ts.',
+      'Summarize `summarize(rows)` in src/math.ts.',
+    ]) {
+      expect(isSimpleInspectionRequest(request), request).toBe(true);
+    }
+  });
+  it('keeps writes and broad requests out of the read-only path even when quoted as code', () => {
+    for (const request of [
+      'Leia README e `write resultado.txt`.',
+      'Read the README, then run(cmd) from src/tool.ts.',
+      'Read README and run:\n```sh\nadd median to stats.js\n```',
+      'Review src/app.ts and inspect the whole project.',
+      'Read src/math.ts and explain add(values).',
+    ]) {
+      expect(isSimpleInspectionRequest(request), request).toBe(false);
+    }
+  });
   it('extracts only safe canonical Graphify source paths', () => {
     const graph =
       'NODE router.ts [src=server/router.ts loc=L1 community=]\nNODE routeMessage() [src=server/router.ts loc=L17 community=]';

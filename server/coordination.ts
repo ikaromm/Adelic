@@ -476,15 +476,24 @@ export function briefFor(project: Project, objective: string, summary: string, p
 
 export function isSimpleInspectionRequest(text: string) {
   const mutating =
-    /\b(implemente|implement|crie|create|edite|edit|corrija|fix|altere|change|write|escreva|delete|remova|refatore|refactor|instale|install|rode|run|execute|build|compile|teste|test|deploy)\b/i;
+    /\b(implemente|implementar|implement|crie|criar|create|adicione|adicionar|add|acrescente|acrescentar|append|insira|inserir|insert|atualize|atualizar|update|modifique|modificar|modify|substitua|substituir|replace|renomeie|renomear|rename|edite|editar|edit|corrija|corrigir|fix|altere|alterar|change|write|escreva|escrever|delete|remova|remover|remove|apague|apagar|exclua|excluir|refatore|refatorar|refactor|instale|instalar|install|rode|rodar|run|execute|build|compile|teste|testar|test|deploy)\b/i;
   const inspection =
     /\b(leia|read|abra|open|inspecione|inspect|analise|analyze|explique|explain|resuma|summari[sz]e|summarize)\b/i;
   const file =
     /\b(arquivo|file|projeto|project|c[oó]digo|code|repo|reposit[oó]rio|readme|pasta|directory|m[oó]dulo|module|componente|component)\b/i;
   const complex =
     /\b(v[aá]rios|m[uú]ltiplos|multiple|several|whole|todo o|toda a|arquitetura|architecture|etapas|steps|plano|plan|trade-?off|recomend|recommend)\b|\b(duas|dois|tr[eê]s|quatro|cinco|seis|quarta?|quint[oa]s?|sext[oa]s?|two|three|four|five|six|fourth|fifth|sixth|[2-6])\s+(?:independentes?\s+|independent\s+)?(partes?|tarefas?|etapas?|arquivos?|m[oó]dulos?|parts?|tasks?|stages?|files?|modules?)\b|\b(partes?|tarefas?|etapas?|arquivos?|m[oó]dulos?|parts?|tasks?|stages?|files?|modules?)\s+(independentes?|independent)\b|\bem paralelo\b|\bparallel(?:ly)?\b/i;
+  // Code identifiers and calls can contain words such as `summarize`, `add`, or
+  // `update`; only prose outside code should select the read-only fast path.
+  const inspectionRequest = text
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/`[^`\n]*`/g, ' ')
+    .replace(/\b[$\w]+\s*\([^)]*\)/g, ' ');
   return (
-    inspection.test(text) && (file.test(text) || hasFileReference(text)) && !mutating.test(text) && !complex.test(text)
+    inspection.test(inspectionRequest) &&
+    (file.test(text) || hasFileReference(text)) &&
+    !mutating.test(text) &&
+    !complex.test(text)
   );
 }
 

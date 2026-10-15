@@ -1394,6 +1394,10 @@ export class CodexProvider {
       if (signal.aborted) throw abortError(signal);
       const imagePaths = await stageCodexImages(server.scratch, input.attachments ?? []);
       if (signal.aborted) throw abortError(signal);
+      const taskInstructions = `Responda em português salvo se o usuário pedir outra língua. ${executorContextInstructions(input)} ${remoteInstructions ?? (toolsAllowed ? (profile === 'fast-local-tools' ? 'Responda diretamente; use ferramentas locais somente se necessário para verificar informações do computador. Não afirme falta de acesso sem tentar. Sujeito a sandbox e aprovação.' : 'Use ferramentas necessárias, sujeito a sandbox e aprovação.') : 'Responda diretamente sem ferramentas.')}`;
+      // Keep Codex's bundled coding instructions for deep tool-enabled work. The short
+      // base override remains useful for fast and tool-less requests.
+      const preserveCodingInstructions = toolsAllowed && input.plan.level === 'deep';
       const threadRaw = await raceAbort(
         rpc.request('thread/start', {
           cwd: server.cwd,
@@ -1454,7 +1458,9 @@ export class CodexProvider {
                   },
                 }),
           },
-          baseInstructions: `Responda em português salvo se o usuário pedir outra língua. ${executorContextInstructions(input)} ${remoteInstructions ?? (toolsAllowed ? (profile === 'fast-local-tools' ? 'Responda diretamente; use ferramentas locais somente se necessário para verificar informações do computador. Não afirme falta de acesso sem tentar. Sujeito a sandbox e aprovação.' : 'Use ferramentas necessárias, sujeito a sandbox e aprovação.') : 'Responda diretamente sem ferramentas.')}`,
+          ...(preserveCodingInstructions
+            ? { developerInstructions: taskInstructions }
+            : { baseInstructions: taskInstructions }),
         }),
         signal,
       );

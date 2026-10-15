@@ -1320,6 +1320,7 @@ rl.on('line', (line) => {
         new AbortController().signal,
       );
       const noTools = runInput('responda sem ferramentas');
+      noTools.plan.level = 'deep';
       await provider.run(noTools, () => undefined, new AbortController().signal);
       const deep = {
         ...runInput('tarefa profunda'),
@@ -1362,11 +1363,16 @@ rl.on('line', (line) => {
       },
       baseInstructions: expect.stringContaining('use ferramentas locais somente se necessário'),
     });
+    expect(threads[0].params).not.toHaveProperty('developerInstructions');
     expect(threads[1].params.config).toMatchObject({
       features: { shell_tool: false, unified_exec: false, code_mode_host: false },
     });
     expect(threads[1].params.baseInstructions).toContain('sem ferramentas');
+    expect(threads[1].params).not.toHaveProperty('developerInstructions');
     expect(threads[2].params.config).toMatchObject({ model_reasoning_effort: 'low' });
+    expect(threads[2].params.developerInstructions).toContain('Use ferramentas necessárias');
+    expect(threads[2].params.developerInstructions).toContain('Responda em português');
+    expect(threads[2].params).not.toHaveProperty('baseInstructions');
     expect(threads[2].params.config).not.toHaveProperty('web_search');
     const args = (await readFile(argsLog, 'utf8'))
       .trim()

@@ -2616,6 +2616,19 @@ describe('automatic orchestration', () => {
         blockedCommands: [],
         autoFix: true,
       });
+      // The regular fixture always writes `true`; make hookFix's output a real edit so its check runs once.
+      const originalRun = test.providers.run.bind(test.providers);
+      vi.spyOn(test.providers, 'run').mockImplementation(async (input, emit, signal) => {
+        const result = await originalRun(input, emit, signal);
+        if (input.prompt.includes('Você é um executor delegado')) {
+          const rootRunId = input.evidenceRunId ?? input.runId.split(':')[0];
+          const run = test.store.getRun(rootRunId);
+          if (run?.sessionId === test.session.id && run.hookFix?.sourceRunId) {
+            writeFileSync(join(input.cwd, 'src/implemented.ts'), 'export const implemented = false;\n');
+          }
+        }
+        return result;
+      });
       let terminal!: () => void;
       const done = new Promise<void>((resolve) => (terminal = resolve));
       let fixTerminal!: () => void;
@@ -2660,6 +2673,9 @@ describe('automatic orchestration', () => {
         await fixDone;
         expect(secondDone).toBe(true);
         expect(test.store.listRuns(test.session.id)).toHaveLength(2);
+        expect(readFileSync(join(test.projectRoot, 'src/implemented.ts'), 'utf8')).toBe(
+          'export const implemented = false;\n',
+        );
         expect(
           test.store.listEvents(test.session.id).filter((event) => event.runId === fixRun.id && event.type === 'check'),
         ).toHaveLength(1); // required verification still runs, while hookFix prevents recursion

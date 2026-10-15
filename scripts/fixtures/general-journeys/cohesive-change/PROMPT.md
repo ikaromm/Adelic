@@ -1,0 +1,1 @@
+Add `slugify(value)` to `src/text.js`. It must lowercase, trim, replace every run of non-ASCII letters/digits with one hyphen, and remove leading/trailing hyphens. Add a short README usage example. Keep the change limited to these two files.

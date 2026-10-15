@@ -1,0 +1,1 @@
+Inspect `src/discount.js` and write `findings.json` as JSON with exactly these fields: `percentageAfterSubtotal` (boolean), `maximumDiscountPercent` (number), and `negativeSubtotalReturnsZero` (boolean). Derive each value from the code. Do not change source files.

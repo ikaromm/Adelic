@@ -73,6 +73,7 @@ import {
   resolveAgent,
   taskRecord,
   synthesisExecutionFacts,
+  injectSynthesisFacts,
   summarizeReview,
   parseStructuredReview,
   decideReview,
@@ -3037,8 +3038,7 @@ export class Orchestrator {
           this.store.listSessionTasks(session.id, 100).filter((entry) => entry.runId === run.id),
         );
         const validationIndex = synthesisValidationIndex(runEvents);
-        effectiveInput.prompt = effectiveInput.prompt.replace('@@ADELIC_EXECUTION_FACTS@@', executionFacts);
-        effectiveInput.prompt = effectiveInput.prompt.replace('@@ADELIC_VALIDATION_INDEX@@', validationIndex);
+        effectiveInput.prompt = injectSynthesisFacts(effectiveInput.prompt, executionFacts, validationIndex);
         effectiveInput.contextComponents = {
           skills: effectiveInput.contextComponents?.skills ?? measureContextText(''),
           graph: measureContextText(''),

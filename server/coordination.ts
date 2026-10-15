@@ -256,6 +256,12 @@ export function synthesisValidationIndex(events: RunEvent[]): string {
   });
 }
 
+export function injectSynthesisFacts(prompt: string, executionFacts: string, validationIndex: string): string {
+  return prompt
+    .replace('@@ADELIC_VALIDATION_INDEX@@', () => validationIndex)
+    .replace('@@ADELIC_EXECUTION_FACTS@@', () => executionFacts);
+}
+
 export interface StructuredReviewFinding {
   id: string;
   severity: 'P0' | 'P1' | 'P2' | 'P3';

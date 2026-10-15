@@ -16,6 +16,7 @@ import {
   decideReview,
   synthesisExecutionFacts,
   synthesisValidationIndex,
+  injectSynthesisFacts,
 } from '../server/coordination.js';
 
 describe('delegated task contracts', () => {
@@ -177,6 +178,17 @@ describe('delegated task contracts', () => {
       validationStatus: 'unknown',
       missingLogsRecoverable: false,
     });
+  });
+
+  it('does not reinterpret prompt markers or replacement syntax inside recorded task facts', () => {
+    const executionFacts = '[{"title":"@@ADELIC_VALIDATION_INDEX@@","error":"$&"}]';
+    const validationIndex = '{"registeredCheckCount":0,"checks":[]}';
+    const prompt = injectSynthesisFacts(
+      'facts=@@ADELIC_EXECUTION_FACTS@@\nchecks=@@ADELIC_VALIDATION_INDEX@@',
+      executionFacts,
+      validationIndex,
+    );
+    expect(prompt).toBe(`facts=${executionFacts}\nchecks=${validationIndex}`);
   });
 
   it('accepts bounded task plans with forward dependencies', () => {

@@ -75,7 +75,8 @@ function setup(options: {
     | 'failure-second'
     | 'timeout-second'
     | 'approved-second-change'
-    | 'finding-second-change';
+    | 'finding-second-change'
+    | 'outside-partial';
   reviewStaticOnly?: boolean;
   reviewerFailure?: boolean;
   repairFailure?: boolean;
@@ -88,6 +89,7 @@ function setup(options: {
   workerFailure?: boolean;
   toolEvent?: boolean;
   artifactChange?: boolean;
+  partialArtifacts?: boolean;
   largeArtifact?: boolean;
   gitProject?: boolean;
   parallelTasks?: boolean;
@@ -127,6 +129,12 @@ function setup(options: {
     gitIn(projectRoot, 'add', '-A');
     gitIn(projectRoot, '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'base');
     if (options.dirtyProject) writeFileSync(join(projectRoot, 'user-work.txt'), 'preservar\\n');
+  }
+  if (options.partialArtifacts) {
+    mkdirSync(join(projectRoot, 'src'), { recursive: true });
+    writeFileSync(join(projectRoot, 'src/implemented.ts'), 'baseline implementation\\n');
+    writeFileSync(join(projectRoot, 'src/unmodified.ts'), 'unchanged source\\n');
+    writeFileSync(join(projectRoot, '000-large-unrelated.bin'), Buffer.alloc(2_097_153, 0x61));
   }
   const store = new Store(directory);
   const now = new Date().toISOString();
@@ -416,6 +424,11 @@ function setup(options: {
         }
         if (options.reviewCycle === 'invalid-second' && reviewPasses > 1)
           return { text: 'Approved. No issues.', stopReason: 'completed' };
+        if (options.reviewCycle === 'outside-partial')
+          return {
+            text: '{"status":"findings","findings":[{"id":"f1","severity":"P2","title":"Unchanged fixture","file":"src/unmodified.ts","description":"This file did not change in the run"}]}',
+            stopReason: 'completed',
+          };
         if (options.reviewCycle === 'invalid') return { text: 'Approved. No issues.', stopReason: 'completed' };
         if (options.reviewCycle === 'incomplete')
           return { text: '{"status":"incomplete","findings":[]}', stopReason: 'completed' };
@@ -1419,6 +1432,56 @@ describe('automatic orchestration', () => {
     }
   });
 
+  it('repairs a finding with path-local hashes while the complete artifact list stays unknown', async () => {
+    const test = setup({
+      review: true,
+      reviewCycle: 'fixed',
+      artifactChange: true,
+      partialArtifacts: true,
+    });
+    let terminal!: () => void;
+    const done = new Promise<void>((resolve) => (terminal = resolve));
+    const unsubscribe = test.orchestrator.subscribe((event) => {
+      if (event.type === 'run' && event.run.sessionId === test.session.id && event.run.status !== 'running') terminal();
+    });
+    try {
+      const started = await test.orchestrator.start(test.session, 'Implement a small change in the project.');
+      await done;
+      const tasks = test.store.listSessionTasks(test.session.id).filter((task) => task.runId === started.runId);
+      expect(test.store.getRun(started.runId)?.artifacts).toMatchObject({ status: 'unknown', truncated: true });
+      expect(tasks.filter((task) => task.role === 'reviewer')).toHaveLength(2);
+      expect(tasks.find((task) => task.title === 'Corrigir achados objetivos da revisão')?.scope).toEqual([
+        'src/implemented.ts',
+      ]);
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it('does not repair a finding outside the path-local hashes in partial artifacts', async () => {
+    const test = setup({
+      review: true,
+      reviewCycle: 'outside-partial',
+      artifactChange: true,
+      partialArtifacts: true,
+    });
+    let terminal!: () => void;
+    const done = new Promise<void>((resolve) => (terminal = resolve));
+    const unsubscribe = test.orchestrator.subscribe((event) => {
+      if (event.type === 'run' && event.run.sessionId === test.session.id && event.run.status !== 'running') terminal();
+    });
+    try {
+      const started = await test.orchestrator.start(test.session, 'Implement a small change in the project.');
+      await done;
+      const tasks = test.store.listSessionTasks(test.session.id).filter((task) => task.runId === started.runId);
+      expect(test.store.getRun(started.runId)?.artifacts).toMatchObject({ status: 'unknown', truncated: true });
+      expect(tasks.filter((task) => task.role === 'reviewer')).toHaveLength(1);
+      expect(tasks.filter((task) => task.title === 'Corrigir achados objetivos da revisão')).toHaveLength(0);
+    } finally {
+      unsubscribe();
+    }
+  });
+
   it('reserves synthesis summary space for a repair after a full worker summary', async () => {
     const test = setup({
       review: true,
@@ -1456,6 +1519,7 @@ describe('automatic orchestration', () => {
       review: true,
       reviewCycle: 'persistent',
       artifactChange: true,
+      partialArtifacts: true,
       synthesisResponse: 'Tudo certo.',
     });
     // A broken link must remain unknown; an internal regular-file link is now supported.

@@ -287,8 +287,6 @@ export async function externalWorkspaceBindings(workspace: string): Promise<Exte
     if (marker.isDirectory() && !marker.isSymbolicLink()) {
       const bindings = [await isolatedGitConfigBinding(path.join(gitMarker, 'config'))];
       try {
-        const packageFile = path.join(root, 'package.json');
-        const packageInfo = await lstat(packageFile);
         const dependencyPath = path.join(root, 'node_modules');
         const dependencyInfo = await lstat(dependencyPath);
         const dependencyRoot = await realpath(dependencyPath);
@@ -298,7 +296,7 @@ export async function externalWorkspaceBindings(workspace: string): Promise<Exte
           dependencyInfo.isSymbolicLink() &&
           path.resolve(root, await readlink(dependencyPath)) === '/opt/adelic-shared/node_modules' &&
           dependencyRoot === (await realpath('/opt/adelic-shared/node_modules'));
-        if (packageInfo.isFile() && !packageInfo.isSymbolicLink() && (localDependencies || sharedDependencies)) {
+        if (localDependencies || sharedDependencies) {
           bindings.push({ source: dependencyRoot, target: dependencyPath, kind: 'dependency' });
         }
       } catch {
@@ -377,11 +375,9 @@ export async function externalWorkspaceBindings(workspace: string): Promise<Exte
   // than exposing the host's config or substituting a device node.
   bindings.push(await isolatedGitConfigBinding(path.join(commonDirectory, 'config')));
 
-  // Dependencies may be mounted only from this checkout, or from the single
-  // runtime-managed shared-dependency location used by the isolated executor.
+  // Local tools and other prepared resources may be mounted only from this checkout,
+  // or from the single runtime-managed shared-dependency location used by the executor.
   try {
-    const packageFile = path.join(checkoutRoot, 'package.json');
-    const packageInfo = await lstat(packageFile);
     const dependencyPath = path.join(checkoutRoot, 'node_modules');
     const dependencyInfo = await lstat(dependencyPath);
     const dependencyRoot = await realpath(dependencyPath);
@@ -392,8 +388,6 @@ export async function externalWorkspaceBindings(workspace: string): Promise<Exte
       path.resolve(checkoutRoot, await readlink(dependencyPath)) === '/opt/adelic-shared/node_modules' &&
       dependencyRoot === (await realpath('/opt/adelic-shared/node_modules'));
     if (
-      packageInfo.isFile() &&
-      !packageInfo.isSymbolicLink() &&
       (localDependencies || sharedDependencies) &&
       !(await lstat(path.join(root, 'node_modules')).then(
         () => true,

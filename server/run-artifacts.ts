@@ -66,6 +66,16 @@ const EXCLUDED = new Set([
 ]);
 const relativePath = (path: string) => path.split(sep).join('/');
 
+/** Paths whose regular-file contents were read successfully in both snapshots and differ. */
+export function verifiedChangedArtifactPaths(before: RunArtifactSnapshot, after: RunArtifactSnapshot): string[] {
+  const changed: string[] = [];
+  for (const [path, previous] of Object.entries(before.entries)) {
+    const current = after.entries[path];
+    if (previous.hash && current?.hash && previous.hash !== current.hash) changed.push(path);
+  }
+  return changed.sort();
+}
+
 /** Capture regular files only. Symlinks, ignored trees, and files outside configured bounds are never read. */
 export async function captureRunArtifactSnapshot(
   projectPath: string,

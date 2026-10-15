@@ -31,7 +31,6 @@ describe('isolated local automatic executor', () => {
     await mkdir(path.join(common, 'objects'), { recursive: true });
     await mkdir(path.join(common, 'refs'), { recursive: true });
     await mkdir(dependencies);
-    await writeFile(path.join(checkout, 'package.json'), '{}');
     await writeFile(path.join(workspace, '.git'), `gitdir: ${admin}\n`);
     await writeFile(path.join(admin, 'commondir'), '../..\n');
     await writeFile(path.join(admin, 'gitdir'), `${path.join(workspace, '.git')}\n`);
@@ -108,22 +107,22 @@ describe('isolated local automatic executor', () => {
     }
   });
 
-  it('shares verified checkout dependencies read-only with a linked worktree that has no mountpoint', async () => {
+  it('shares a prepared language-agnostic runtime read-only with a linked worktree without a mountpoint', async () => {
     await access('/usr/bin/bwrap');
     const parent = await mkdtemp(path.join(os.tmpdir(), 'adelic-linked-dependencies-'));
     temporaryDirectories.push(parent);
     const checkout = path.join(parent, 'checkout');
     const workspace = path.join(parent, 'worktree');
-    const dependency = path.join(checkout, 'node_modules', 'fixture-dependency');
+    const runtimeResource = path.join(checkout, 'node_modules', '.prepared-tool');
+    const probe = path.join(runtimeResource, 'bin', 'probe');
     const outsideSecret = path.join(parent, 'outside-secret.txt');
-    await mkdir(path.join(checkout, 'node_modules'), { recursive: true });
-    await mkdir(dependency);
-    await writeFile(path.join(checkout, 'package.json'), '{"name":"fixture"}\n');
+    await mkdir(path.dirname(probe), { recursive: true });
     await writeFile(path.join(checkout, 'README.md'), 'fixture\n');
-    await writeFile(path.join(dependency, 'index.js'), 'module.exports = "shared-readonly-dependency";\n');
+    await writeFile(probe, '#!/bin/sh\nprintf synthetic-runtime-ok\n', { mode: 0o755 });
+    await writeFile(path.join(runtimeResource, 'resource.txt'), 'synthetic runtime resource\n');
     await writeFile(outsideSecret, 'outside-workspace-secret-canary');
     execFileSync('git', ['init', '-q', '-b', 'main', checkout]);
-    execFileSync('git', ['-C', checkout, 'add', 'package.json', 'README.md']);
+    execFileSync('git', ['-C', checkout, 'add', 'README.md']);
     execFileSync('git', [
       '-C',
       checkout,
@@ -143,10 +142,10 @@ describe('isolated local automatic executor', () => {
       const signal = new AbortController().signal;
       const loaded = await executor.call(
         'exec',
-        { command: ['node', '-e', 'process.stdout.write(require("fixture-dependency"))'], timeoutMs: 5000 },
+        { command: ['/workspace/node_modules/.prepared-tool/bin/probe'], timeoutMs: 5000 },
         signal,
       );
-      expect(loaded).toMatchObject({ exitCode: 0, stdout: 'shared-readonly-dependency' });
+      expect(loaded).toMatchObject({ exitCode: 0, stdout: 'synthetic-runtime-ok' });
 
       const links = await executor.call(
         'exec',
@@ -183,7 +182,7 @@ describe('isolated local automatic executor', () => {
           command: [
             'node',
             '-e',
-            'try { require("node:fs").writeFileSync("/workspace/node_modules/canary", "x"); process.exit(1); } catch (e) { if (e.code !== "EROFS") process.exit(2); }',
+            'try { require("node:fs").writeFileSync("/workspace/node_modules/.prepared-tool/canary", "x"); process.exit(1); } catch (e) { if (e.code !== "EROFS") process.exit(2); }',
           ],
           timeoutMs: 5000,
         },
@@ -191,7 +190,7 @@ describe('isolated local automatic executor', () => {
       );
       expect(writeAttempt).toMatchObject({ exitCode: 0 });
       await expect(access(path.join(workspace, 'node_modules'))).rejects.toMatchObject({ code: 'ENOENT' });
-      await expect(access(path.join(checkout, 'node_modules', 'canary'))).rejects.toMatchObject({ code: 'ENOENT' });
+      await expect(access(path.join(runtimeResource, 'canary'))).rejects.toMatchObject({ code: 'ENOENT' });
 
       await executor.close();
       const fifo = path.join(workspace, 'unsupported-fifo');
@@ -211,12 +210,80 @@ describe('isolated local automatic executor', () => {
     try {
       const loaded = await checkoutExecutor.call(
         'exec',
-        { command: ['node', '-e', 'process.stdout.write(require("fixture-dependency"))'], timeoutMs: 5000 },
+        { command: ['/workspace/node_modules/.prepared-tool/bin/probe'], timeoutMs: 5000 },
         new AbortController().signal,
       );
-      expect(loaded).toMatchObject({ exitCode: 0, stdout: 'shared-readonly-dependency' });
+      expect(loaded).toMatchObject({ exitCode: 0, stdout: 'synthetic-runtime-ok' });
     } finally {
       await checkoutExecutor.close();
+    }
+  });
+
+  it('shares a prepared language-agnostic tool read-only in a writable linked worktree', async () => {
+    await access('/usr/bin/bwrap');
+    const parent = await mkdtemp(path.join(os.tmpdir(), 'adelic-linked-runtime-write-'));
+    temporaryDirectories.push(parent);
+    const checkout = path.join(parent, 'checkout');
+    const workspace = path.join(parent, 'worktree');
+    const resourceRoot = path.join(checkout, 'node_modules', '.bench-tool');
+    const tool = path.join(resourceRoot, 'bin', 'probe');
+    await mkdir(path.dirname(tool), { recursive: true });
+    await writeFile(path.join(checkout, 'README.md'), 'fixture\n');
+    await writeFile(tool, '#!/bin/sh\nprintf synthetic-tool-ok\n', { mode: 0o755 });
+    await writeFile(path.join(resourceRoot, 'data.txt'), 'prepared tool resource\n');
+    execFileSync('git', ['init', '-q', '-b', 'main', checkout]);
+    execFileSync('git', ['-C', checkout, 'add', 'README.md']);
+    execFileSync('git', [
+      '-C',
+      checkout,
+      '-c',
+      'user.name=Test',
+      '-c',
+      'user.email=test@example.invalid',
+      'commit',
+      '-qm',
+      'fixture',
+    ]);
+    execFileSync('git', ['-C', checkout, 'worktree', 'add', '-q', '--detach', workspace, 'HEAD']);
+
+    const executor = await createLocalExecutor(workspace, 'workspace-write');
+    try {
+      const signal = new AbortController().signal;
+      const loaded = await executor.call(
+        'exec',
+        { command: [tool.replace(checkout, '/workspace')], timeoutMs: 5000 },
+        signal,
+      );
+      expect(loaded).toMatchObject({ exitCode: 0, stdout: 'synthetic-tool-ok' });
+
+      const workspaceWrite = await executor.call(
+        'exec',
+        { command: ['sh', '-c', 'printf workspace-edit > /workspace/edited.txt'], timeoutMs: 5000 },
+        signal,
+      );
+      expect(workspaceWrite).toMatchObject({ exitCode: 0 });
+
+      const resourceWrite = await executor.call(
+        'exec',
+        {
+          command: [
+            'node',
+            '-e',
+            'try { require("node:fs").writeFileSync("/workspace/node_modules/.bench-tool/canary", "x"); process.exit(1); } catch (e) { if (e.code !== "EROFS") process.exit(2); }',
+          ],
+          timeoutMs: 5000,
+        },
+        signal,
+      );
+      expect(resourceWrite).toMatchObject({ exitCode: 0 });
+      await executor.close();
+      await expect(readFile(path.join(resourceRoot, 'data.txt'), 'utf8')).resolves.toBe('prepared tool resource\n');
+      await expect(access(path.join(resourceRoot, 'canary'))).rejects.toMatchObject({ code: 'ENOENT' });
+      await expect(readFile(path.join(workspace, 'edited.txt'), 'utf8')).resolves.toBe('workspace-edit');
+      await expect(access(path.join(workspace, 'node_modules'))).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      await executor.close();
+      execFileSync('git', ['-C', checkout, 'worktree', 'remove', '--force', workspace]);
     }
   });
 

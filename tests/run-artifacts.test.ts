@@ -7,6 +7,7 @@ import {
   compareRunArtifactSnapshots,
   readRunArtifactFile,
   RUN_ARTIFACT_LIMITS,
+  verifiedChangedArtifactPaths,
 } from '../server/run-artifacts';
 
 const folders: string[] = [];
@@ -125,6 +126,34 @@ describe('run artifact snapshots', () => {
       truncated: true,
       omitted: 3,
     });
+  });
+
+  it('verifies only content changes hashed in both partial snapshots', () => {
+    const before = {
+      status: 'available' as const,
+      truncated: true,
+      omitted: 2,
+      entries: {
+        'changed.ts': { size: 3, mtimeMs: 1, hash: 'before' },
+        'same.ts': { size: 3, mtimeMs: 1, hash: 'same' },
+        'unhashed.ts': { size: 3, mtimeMs: 1 },
+        'deleted.ts': { size: 3, mtimeMs: 1, hash: 'deleted' },
+      },
+    };
+    const after = {
+      status: 'unknown' as const,
+      truncated: true,
+      omitted: 1,
+      entries: {
+        'changed.ts': { size: 3, mtimeMs: 2, hash: 'after' },
+        'same.ts': { size: 3, mtimeMs: 1, hash: 'same' },
+        'unhashed.ts': { size: 3, mtimeMs: 2 },
+        'added.ts': { size: 3, mtimeMs: 2, hash: 'added' },
+      },
+    };
+
+    expect(verifiedChangedArtifactPaths(before, after)).toEqual(['changed.ts']);
+    expect(compareRunArtifactSnapshots(before, after)).toMatchObject({ status: 'unknown', files: [], truncated: true });
   });
 
   it('caps large-file hashing and preserves unknown membership instead of reporting false changes', async () => {

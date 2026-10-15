@@ -1,4 +1,9 @@
-import { captureRunArtifactSnapshot, compareRunArtifactSnapshots, type RunArtifactSnapshot } from './run-artifacts.js';
+import {
+  captureRunArtifactSnapshot,
+  compareRunArtifactSnapshots,
+  verifiedChangedArtifactPaths,
+  type RunArtifactSnapshot,
+} from './run-artifacts.js';
 import { observeCheckSource } from './check-source.js';
 import { RunEvidenceStore } from './run-evidence.js';
 import { RemoteHostService } from './remote/transport.js';
@@ -2782,6 +2787,7 @@ export class Orchestrator {
     const catalog = await prepare(() => this.providerList(), 'descoberta de provedores');
     if (controller.signal.aborted) throw new Error('Execução cancelada');
     let reviewArtifactBefore: RunArtifactSnapshot | undefined;
+    let reviewArtifactVerifiedChanges = new Set<string>();
     if (route.tools && !memoryOnly && !project.remote) {
       try {
         reviewArtifactBefore = await captureRunArtifactSnapshot(project.path, {
@@ -4084,12 +4090,16 @@ export class Orchestrator {
         const reviewStartedAt = Date.now();
         try {
           if (route.tools && !project.remote) {
+            reviewArtifactVerifiedChanges = new Set();
             try {
               const reviewArtifactAfter = await captureRunArtifactSnapshot(project.path, {
                 ...(run.budget
                   ? { deadlineAt: run.budget.deadlineAt, signal: controller.signal }
                   : { signal: controller.signal }),
               });
+              reviewArtifactVerifiedChanges = new Set(
+                reviewArtifactBefore ? verifiedChangedArtifactPaths(reviewArtifactBefore, reviewArtifactAfter) : [],
+              );
               run.artifacts = reviewArtifactBefore
                 ? {
                     ...compareRunArtifactSnapshots(reviewArtifactBefore, reviewArtifactAfter),
@@ -4359,7 +4369,7 @@ export class Orchestrator {
           settings.sandbox !== 'workspace-write' ||
           !checkSourceMatches ||
           !findingPaths.length ||
-          findingPaths.some((path) => !changedPaths.has(path))
+          findingPaths.some((path) => !changedPaths.has(path) && !reviewArtifactVerifiedChanges.has(path))
         ) {
           reviewSummary +=
             '; pendência: correção não iniciada (escopo/identidade dos arquivos, permissão ou orçamento indisponível)';

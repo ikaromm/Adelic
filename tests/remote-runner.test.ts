@@ -1,4 +1,4 @@
-import { access, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { access, mkdtemp, mkdir, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { execFile, spawn } from 'node:child_process';
@@ -758,6 +758,18 @@ if __name__ == "__main__":
         args: { path: 'large.txt', offset: 0, limit: 32 },
       });
       expect(partial).toMatchObject({ ok: true, result: { truncated: true } });
+      await expect(
+        harness.send({
+          id: 'partial-read-missing-revision',
+          method: 'call',
+          tool: 'read_file',
+          args: { path: 'large.txt', offset: 16, limit: 32 },
+        }),
+      ).resolves.toMatchObject({
+        ok: false,
+        errorCategory: 'invalid_request',
+        error: 'revision required for offset greater than zero',
+      });
       expect(
         await harness.send({
           id: 'partial-edit',
@@ -863,6 +875,196 @@ if __name__ == "__main__":
       expect(text).toBe('legacy' + prefix + suffix);
       expect(text.startsWith('legacy')).toBe(true);
       expect(text.endsWith(suffix)).toBe(true);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('returns a verified revision for explicit chained edits and rejects stale snapshots', async () => {
+    const harness = await createHarness();
+    try {
+      await writeFile(join(harness.root, 'chain.txt'), 'first target, second target');
+      const page = await harness.send({
+        id: 'chain-read',
+        method: 'call',
+        tool: 'read_file',
+        args: { path: 'chain.txt' },
+      });
+      const first = await harness.send({
+        id: 'chain-edit-first',
+        method: 'call',
+        tool: 'replace_text',
+        args: {
+          path: 'chain.txt',
+          oldText: 'first',
+          newText: 'initial',
+          expectedRevision: (page.result as { revision: string }).revision,
+        },
+      });
+      expect(first).toMatchObject({ ok: true, result: { matches: 1, revision: expect.any(String) } });
+      const firstRevision = (first.result as { revision: string }).revision;
+
+      const second = await harness.send({
+        id: 'chain-edit-second',
+        method: 'call',
+        tool: 'replace_text',
+        args: { path: 'chain.txt', oldText: 'second', newText: 'final', expectedRevision: firstRevision },
+      });
+      expect(second).toMatchObject({ ok: true, result: { matches: 1, revision: expect.any(String) } });
+      await expect(readFile(join(harness.root, 'chain.txt'), 'utf8')).resolves.toBe('initial target, final target');
+
+      const stale = await harness.send({
+        id: 'chain-edit-stale',
+        method: 'call',
+        tool: 'replace_text',
+        args: { path: 'chain.txt', oldText: 'final', newText: 'bad', expectedRevision: firstRevision },
+      });
+      expect(stale).toMatchObject({ ok: false, errorCategory: 'conflict', error: 'file changed before edit' });
+
+      const legacy = await harness.send({
+        id: 'chain-edit-needs-explicit-token',
+        method: 'call',
+        tool: 'replace_text',
+        args: { path: 'chain.txt', oldText: 'final', newText: 'bad' },
+      });
+      expect(legacy).toMatchObject({ ok: false, error: 'file must be read completely before replace_text' });
+
+      // A writer outside the runner can replace the inode; the explicit token must not
+      // authorize editing the new file, even when it contains the same target text.
+      const replacementPath = join(harness.root, 'outside-writer.txt');
+      await writeFile(replacementPath, 'initial target, final target');
+      await rename(replacementPath, join(harness.root, 'chain.txt'));
+      const inodeStale = await harness.send({
+        id: 'chain-edit-external-inode',
+        method: 'call',
+        tool: 'replace_text',
+        args: {
+          path: 'chain.txt',
+          oldText: 'final',
+          newText: 'bad',
+          expectedRevision: (second.result as { revision: string }).revision,
+        },
+      });
+      expect(inodeStale).toMatchObject({ ok: false, errorCategory: 'conflict', error: 'file changed before edit' });
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('reports a successful edit without a revision when installed-content verification fails', async () => {
+    const marker =
+      'def installed_file_revision(fd, path, expected_content):\n    """Return a revision only if the installed path still names these exact bytes."""\n    try:\n';
+    const instrumentedSource = REMOTE_RUNNER_SOURCE.replace(
+      marker,
+      `${marker}        raise OSError("injected verification failure")\n`,
+    );
+    expect(instrumentedSource).not.toBe(REMOTE_RUNNER_SOURCE);
+    const harness = await createHarness(undefined, instrumentedSource);
+    try {
+      await writeFile(join(harness.root, 'verify.txt'), 'before');
+      const page = await harness.send({
+        id: 'verify-read',
+        method: 'call',
+        tool: 'read_file',
+        args: { path: 'verify.txt' },
+      });
+      const changed = await harness.send({
+        id: 'verify-edit',
+        method: 'call',
+        tool: 'replace_text',
+        args: {
+          path: 'verify.txt',
+          oldText: 'before',
+          newText: 'after',
+          expectedRevision: (page.result as { revision: string }).revision,
+        },
+      });
+      expect(changed).toMatchObject({ ok: true, result: { matches: 1, bytesWritten: 5 } });
+      expect(changed.result).not.toHaveProperty('revision');
+      await expect(readFile(join(harness.root, 'verify.txt'), 'utf8')).resolves.toBe('after');
+
+      // The runner must not invite a retry or silently treat the changed file as read.
+      await expect(
+        harness.send({
+          id: 'verify-edit-no-revision',
+          method: 'call',
+          tool: 'replace_text',
+          args: { path: 'verify.txt', oldText: 'after', newText: 'again' },
+        }),
+      ).resolves.toMatchObject({ ok: false, error: 'file must be read completely before replace_text' });
+      await expect(readFile(join(harness.root, 'verify.txt'), 'utf8')).resolves.toBe('after');
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('omits the chained revision when an outside writer changes the installed inode before verification', async () => {
+    const marker =
+      'def installed_file_revision(fd, path, expected_content):\n    """Return a revision only if the installed path still names these exact bytes."""\n    try:\n';
+    const instrumentedSource = REMOTE_RUNNER_SOURCE.replace(
+      marker,
+      `${marker}        external = path.with_name("external-writer")\n        external.write_bytes(b"outside")\n        os.replace(str(external), str(path))\n`,
+    );
+    expect(instrumentedSource).not.toBe(REMOTE_RUNNER_SOURCE);
+    const harness = await createHarness(undefined, instrumentedSource);
+    try {
+      await writeFile(join(harness.root, 'race.txt'), 'before');
+      const page = await harness.send({
+        id: 'race-read',
+        method: 'call',
+        tool: 'read_file',
+        args: { path: 'race.txt' },
+      });
+      const changed = await harness.send({
+        id: 'race-edit',
+        method: 'call',
+        tool: 'replace_text',
+        args: {
+          path: 'race.txt',
+          oldText: 'before',
+          newText: 'after',
+          expectedRevision: (page.result as { revision: string }).revision,
+        },
+      });
+      expect(changed).toMatchObject({ ok: true, result: { matches: 1 } });
+      expect(changed.result).not.toHaveProperty('revision');
+      await expect(readFile(join(harness.root, 'race.txt'), 'utf8')).resolves.toBe('outside');
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('omits the chained revision when an outside writer changes installed bytes in place', async () => {
+    const marker =
+      'def installed_file_revision(fd, path, expected_content):\n    """Return a revision only if the installed path still names these exact bytes."""\n    try:\n';
+    const instrumentedSource = REMOTE_RUNNER_SOURCE.replace(
+      marker,
+      `${marker}        with path.open("r+b") as external:\n            external.write(b"again")\n            external.truncate()\n`,
+    );
+    expect(instrumentedSource).not.toBe(REMOTE_RUNNER_SOURCE);
+    const harness = await createHarness(undefined, instrumentedSource);
+    try {
+      await writeFile(join(harness.root, 'race-in-place.txt'), 'before');
+      const page = await harness.send({
+        id: 'race-in-place-read',
+        method: 'call',
+        tool: 'read_file',
+        args: { path: 'race-in-place.txt' },
+      });
+      const changed = await harness.send({
+        id: 'race-in-place-edit',
+        method: 'call',
+        tool: 'replace_text',
+        args: {
+          path: 'race-in-place.txt',
+          oldText: 'before',
+          newText: 'after',
+          expectedRevision: (page.result as { revision: string }).revision,
+        },
+      });
+      expect(changed).toMatchObject({ ok: true, result: { matches: 1 } });
+      expect(changed.result).not.toHaveProperty('revision');
+      await expect(readFile(join(harness.root, 'race-in-place.txt'), 'utf8')).resolves.toBe('again');
     } finally {
       await harness.close();
     }

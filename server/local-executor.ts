@@ -952,6 +952,7 @@ class LocalExecutorProcess implements LocalExecutor {
           'file must be read completely before replace_text',
           'file changed before edit',
           'file changed while reading',
+          'revision required for offset greater than zero',
           'offset exceeds file size',
           'offset is not a UTF-8 boundary',
           'read limit must be between 1 and 49152 bytes',

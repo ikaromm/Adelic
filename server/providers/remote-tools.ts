@@ -39,7 +39,7 @@ export const REMOTE_TOOL_SPECS = [
     name: 'adelic_remote_read_file',
     remoteName: 'read_file',
     description:
-      'Read a file from the configured project executor in bounded UTF-8 chunks. Pass the revision from any page to replace_text as expectedRevision after reviewing the matching text; continue with nextOffset and the same revision when you need more context. Legacy edits without expectedRevision require a complete sequential read.',
+      'Read a file from the configured project executor in bounded UTF-8 chunks. offset is a zero-based UTF-8 byte position; offsets above zero require the revision returned by a prior page. Pass a page revision to replace_text as expectedRevision after reviewing the matching text; continue with nextOffset and the same revision when you need more context. Legacy edits without expectedRevision require a complete sequential read.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -70,7 +70,7 @@ export const REMOTE_TOOL_SPECS = [
     name: 'adelic_remote_replace_text',
     remoteName: 'replace_text',
     description:
-      'Replace one unique, non-empty exact text match in a file under the project root. Pass expectedRevision from any read_file page; legacy readRevision is accepted. Without either revision, a complete sequential read is required. The supplied revision is revalidated under an external per-resource process lock before the bounded atomic edit. Use this executor tool for edits; do not request native file-change or patch tools.',
+      'Replace one unique, non-empty exact text match in a file under the project root. Pass expectedRevision from any read_file page or from a previous successful replace_text result; legacy readRevision is accepted. Without either revision, a complete sequential read is required. The supplied revision is revalidated under an external per-resource process lock before the bounded atomic edit. A successful edit may omit revision if the runner cannot verify the installed file snapshot; read the file again before another edit in that case. Use this executor tool for edits; do not request native file-change or patch tools.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -441,6 +441,8 @@ export function remoteToolError(error: unknown) {
     return 'Arquivo acima do limite de leitura; use read_file com offset/limit e continue até truncated=false.';
   if (category === 'invalid_request' && safeDiagnostic === 'offset exceeds file size')
     return 'Offset fora do arquivo; consulte stat ou reinicie a leitura a partir de offset 0.';
+  if (category === 'invalid_request' && safeDiagnostic === 'revision required for offset greater than zero')
+    return 'Para continuar em offset maior que zero, retome a partir da página de offset 0 e envie sua revision junto com o nextOffset retornado.';
   if (category === 'invalid_request' && safeDiagnostic === 'offset is not a UTF-8 boundary')
     return 'Offset não coincide com limite UTF-8; retome exatamente pelo nextOffset retornado.';
   if (category === 'invalid_request' && safeDiagnostic === 'read limit is too small for a UTF-8 character')

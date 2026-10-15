@@ -641,6 +641,11 @@ readline.createInterface({input:process.stdin}).on('line',(line)=>{
       remoteToolError(Object.assign(new Error('file exceeds read limit'), { category: 'invalid_request' })),
     ).toContain('offset/limit');
     expect(
+      remoteToolError(
+        Object.assign(new Error('revision required for offset greater than zero'), { category: 'invalid_request' }),
+      ),
+    ).toContain('offset 0');
+    expect(
       remoteToolError(Object.assign(new Error('oldText must match exactly once'), { category: 'conflict' })),
     ).toContain('trecho único');
     expect(

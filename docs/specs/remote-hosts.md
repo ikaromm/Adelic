@@ -16,6 +16,8 @@ O runner oferece `exec`, `read_file`, `write_file`, `list`, `stat`, `search` e l
 
 O Git de leitura aceita `args: ["diff"]` com um `path` opcional relativo à raiz do projeto. Esse caminho é literal, pode apontar para arquivo ou diretório (inclusive um arquivo rastreado removido) e limita o diff sem aceitar opções Git. Sem `path`, a chamada continua retornando o diff completo. O filtro exige um runner atualizado; runners antigos recusam o campo e o Adelic não repete a chamada como diff completo, evitando ampliar o escopo silenciosamente.
 
+`read_file.offset` é uma posição em bytes UTF-8 a partir de zero. Páginas com offset maior que zero exigem a `revision` da página anterior; em caso de token ausente, retome em offset 0 e continue com `nextOffset` e a mesma revisão. `replace_text` aceita a revisão de uma página ou a revisão retornada por uma edição anterior bem-sucedida. O runner só retorna essa revisão da edição quando confirma o conteúdo exato no mesmo inode instalado; se não puder confirmar, a edição continua bem-sucedida sem token e a próxima edição exige nova leitura. O contrato legado sem revisão continua exigindo uma leitura sequencial completa antes da primeira edição e não é reabilitado após editar.
+
 Projetos novos continuam locais. Para usar um host remoto, o usuário escolhe explicitamente o host e uma pasta. No projeto remoto do Adelic 0.5.1, orquestração e Graphify ficam indisponíveis e são forçados desligados. A execução de ferramentas que o agente solicita é remota. Worktrees, hooks, MCPs de projeto, automações e operações Git de escrita não estão disponíveis nesse fluxo.
 
 ### Contrato de `exec`

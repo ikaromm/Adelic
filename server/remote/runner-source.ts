@@ -88,6 +88,8 @@ def read_file(args):
     supplied_revision = args.get("revision")
     if supplied_revision is not None and (not isinstance(supplied_revision, str) or len(supplied_revision) > 256):
         raise ValueError("revision must be a short string")
+    if offset > 0 and supplied_revision is None:
+        raise ValueError("revision required for offset greater than zero")
     before = path.stat()
     if offset > before.st_size:
         raise ValueError("offset exceeds file size")
@@ -124,6 +126,32 @@ def read_file(args):
     return {"path": str(path), "content": data.decode("utf-8"), "offset": offset,
             "bytesRead": len(data), "totalBytes": before.st_size, "truncated": truncated,
             "nextOffset": next_offset, "revision": revision_text}
+
+def installed_file_revision(fd, path, expected_content):
+    """Return a revision only if the installed path still names these exact bytes."""
+    try:
+        before = os.fstat(fd)
+        expected_revision = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+        if before.st_size != len(expected_content):
+            return None
+        os.lseek(fd, 0, os.SEEK_SET)
+        offset = 0
+        while offset < len(expected_content):
+            chunk = os.read(fd, min(64 * 1024, len(expected_content) - offset))
+            if not chunk or chunk != expected_content[offset:offset + len(chunk)]:
+                return None
+            offset += len(chunk)
+        after = os.fstat(fd)
+        installed = path.lstat()
+        after_revision = (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+        installed_revision = (installed.st_dev, installed.st_ino, installed.st_size, installed.st_mtime_ns, installed.st_ctime_ns)
+        if not stat.S_ISREG(installed.st_mode) or expected_revision != after_revision or expected_revision != installed_revision:
+            return None
+        return ":".join(str(part) for part in expected_revision)
+    except Exception:
+        # The replacement already happened. A missing token is safer than reporting
+        # a failed mutation that a caller could retry.
+        return None
 
 def write_file(args):
     validate_keys(args, ("path", "content", "readOnly"), ("path", "content"))
@@ -236,9 +264,10 @@ def _replace_text(args):
     if len(updated) > MAX_EDIT_FILE:
         raise ValueError("edited file exceeds limit")
     fd, temporary = tempfile.mkstemp(prefix=".adelic-", dir=str(path.parent))
+    installed_revision = None
     try:
         os.fchmod(fd, stat.S_IMODE(path.stat().st_mode))
-        with os.fdopen(fd, "wb") as stream:
+        with os.fdopen(fd, "wb", closefd=False) as stream:
             stream.write(updated)
             stream.flush()
             os.fsync(stream.fileno())
@@ -247,21 +276,37 @@ def _replace_text(args):
         if latest_revision != current_revision:
             raise ValueError("file changed before edit")
         os.replace(temporary, path)
-        directory_fd = os.open(str(path.parent), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        installed_revision = installed_file_revision(fd, path, updated)
         try:
-            os.fsync(directory_fd)
+            directory_fd = os.open(str(path.parent), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
         except OSError:
             # The atomic replace already succeeded; some filesystems do not support directory fsync.
             pass
-        finally:
-            os.close(directory_fd)
+        else:
+            try:
+                os.fsync(directory_fd)
+            except OSError:
+                # The atomic replace already succeeded; some filesystems do not support directory fsync.
+                pass
+            finally:
+                try:
+                    os.close(directory_fd)
+                except OSError:
+                    pass
     finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
         try:
             os.unlink(temporary)
         except FileNotFoundError:
             pass
     read_progress.pop(str(path), None)
-    return {"path": str(path), "matches": 1, "bytesWritten": len(updated)}
+    result = {"path": str(path), "matches": 1, "bytesWritten": len(updated)}
+    if installed_revision is not None:
+        result["revision"] = installed_revision
+    return result
 
 def list_dir(args):
     validate_keys(args, ("path", "recursive", "limit"), ())
@@ -684,7 +729,7 @@ def process_request(request):
             category, message = "not_found", "file does not exist"
         elif isinstance(exc, PermissionError):
             category, message = "permission", "permission denied"
-        elif detail in ("file exceeds read limit", "offset exceeds file size", "offset is not a UTF-8 boundary", "read limit must be between 1 and 49152 bytes", "read limit is too small for a UTF-8 character", "unable to read UTF-8 boundary", "path is a directory; read_file requires a file", "path is a directory; replace_text requires a file", "path is not a directory; search accepts directories only, use the file's parent directory"):
+        elif detail in ("file exceeds read limit", "offset exceeds file size", "offset is not a UTF-8 boundary", "revision required for offset greater than zero", "read limit must be between 1 and 49152 bytes", "read limit is too small for a UTF-8 character", "unable to read UTF-8 boundary", "path is a directory; read_file requires a file", "path is a directory; replace_text requires a file", "path is not a directory; search accepts directories only, use the file's parent directory"):
             category, message = "invalid_request", detail
         elif detail == "file exceeds edit limit":
             category, message = "invalid_request", "file exceeds edit limit"

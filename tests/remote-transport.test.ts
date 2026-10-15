@@ -270,12 +270,21 @@ describe('SSH remote host transport', () => {
       matches: 1,
       bytesWritten: 5,
     });
+    expect(
+      validateRemoteResult('replace_text', {
+        path: '/project/file.txt',
+        matches: 1,
+        bytesWritten: 5,
+        revision: '1:2:5:3:4',
+      }),
+    ).toEqual({ path: '/project/file.txt', matches: 1, bytesWritten: 5, revision: '1:2:5:3:4' });
     for (const malformed of [
       { path: '/project/file.txt', matches: 0, bytesWritten: 5 },
       { path: '/project/file.txt', matches: 2, bytesWritten: 5 },
       { path: '/project/file.txt', matches: 1, bytesWritten: -1 },
       { path: '/project/file.txt', matches: 1, bytesWritten: 32 * 1024 * 1024 + 1 },
       { path: '/project/file.txt', matches: true, bytesWritten: 5 },
+      { path: '/project/file.txt', matches: 1, bytesWritten: 5, revision: '../path' },
     ])
       expect(() => validateRemoteResult('replace_text', malformed)).toThrow(/did not match its schema/);
   });

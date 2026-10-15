@@ -47,6 +47,7 @@ const safeRemoteErrorMessage = (category: RemoteErrorCategory | undefined, raw: 
     'expectedRevision and readRevision do not match',
     'file changed before edit',
     'file changed while reading',
+    'revision required for offset greater than zero',
     'file is not valid UTF-8',
     'read limit is too small for a UTF-8 character',
     'offset exceeds file size',
@@ -167,7 +168,9 @@ export const validateRemoteResult = (tool: RemoteToolName, value: unknown): unkn
         value.matches !== 1 ||
         !Number.isSafeInteger(value.bytesWritten) ||
         (value.bytesWritten as number) < 0 ||
-        (value.bytesWritten as number) > 32 * 1024 * 1024
+        (value.bytesWritten as number) > 32 * 1024 * 1024 ||
+        (value.revision !== undefined &&
+          (!isText(value.revision, 128) || !/^\d+:\d+:\d+:\d+:\d+$/.test(value.revision)))
       ) {
         throw new Error('Remote replace_text result did not match its schema');
       }

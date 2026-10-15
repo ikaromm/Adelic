@@ -939,19 +939,31 @@ describe('isolated local automatic executor', () => {
       const recovery = await createLocalExecutor(workspace, 'workspace-write');
       try {
         const recoveryPage = (await recovery.call('read_file', { path: 'source.txt' }, signal)) as { revision: string };
+        const recovered = await recovery.call(
+          'replace_text',
+          { path: 'source.txt', oldText: 'edited', newText: 'recovered', expectedRevision: recoveryPage.revision },
+          signal,
+        );
+        expect(recovered).toMatchObject({ matches: 1, revision: expect.any(String) });
         await expect(
           recovery.call(
             'replace_text',
-            { path: 'source.txt', oldText: 'edited', newText: 'recovered', expectedRevision: recoveryPage.revision },
+            {
+              path: 'source.txt',
+              oldText: 'recovered',
+              newText: 'done',
+              expectedRevision: (recovered as { revision: string }).revision,
+            },
             signal,
           ),
-        ).resolves.toMatchObject({ matches: 1 });
+        ).resolves.toMatchObject({ matches: 1, revision: expect.any(String) });
+        await expect(
+          recovery.call('replace_text', { path: 'source.txt', oldText: 'done', newText: 'legacy' }, signal),
+        ).rejects.toMatchObject({ category: 'conflict', message: 'file must be read completely before replace_text' });
       } finally {
         await recovery.close();
       }
-      expect(await readFile(path.join(workspace, 'source.txt'), 'utf8')).toBe(
-        `${'page content '.repeat(9000)}recovered`,
-      );
+      expect(await readFile(path.join(workspace, 'source.txt'), 'utf8')).toBe(`${'page content '.repeat(9000)}done`);
     } finally {
       await executor.close();
     }

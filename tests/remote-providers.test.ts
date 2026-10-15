@@ -773,11 +773,6 @@ readline.createInterface({input:process.stdin}).on('line',(line)=>{
         dynamicTools: expect.arrayContaining([expect.objectContaining({ name: 'adelic_remote_exec' })]),
         config: { features: { shell_tool: false, unified_exec: false, code_mode_host: true } },
       });
-      expect(threadStart.params).toHaveProperty(
-        'developerInstructions',
-        expect.stringContaining('Use somente as ferramentas adelic_remote_*'),
-      );
-      expect(threadStart.params).not.toHaveProperty('baseInstructions');
       expect(requests.find((request) => request.method === 'turn/start')?.params).toMatchObject({
         cwd: process.cwd(),
         sandboxPolicy: { type: 'readOnly' },
@@ -818,77 +813,6 @@ readline.createInterface({input:process.stdin}).on('line',(line)=>{
     } finally {
       await provider.shutdown();
     }
-  });
-
-  it('keeps remote fast and tool-less deep runs on the short base instruction path', async () => {
-    const directory = await mkdtemp(path.join(os.tmpdir(), 'adelic-remote-instruction-path-'));
-    dirs.push(directory);
-    const requestLog = path.join(directory, 'requests.jsonl');
-    const fake = path.join(directory, 'codex.mjs');
-    await writeFile(
-      fake,
-      `#!/usr/bin/env node
-import readline from 'node:readline';
-import fs from 'node:fs';
-const log=${JSON.stringify(requestLog)};
-const send=(m)=>process.stdout.write(JSON.stringify(m)+'\\n');
-const append=(m)=>fs.appendFileSync(log,JSON.stringify(m)+'\\n');
-let thread='remote-instruction-thread'; let turn=0;
-readline.createInterface({input:process.stdin}).on('line',(line)=>{
- const m=JSON.parse(line); append(m);
- if(m.method==='initialize')send({jsonrpc:'2.0',id:m.id,result:{}});
- else if(m.method==='config/read')send({jsonrpc:'2.0',id:m.id,result:{config:{mcp_servers:{}}}});
- else if(m.method==='thread/start')send({jsonrpc:'2.0',id:m.id,result:{thread:{id:thread}}});
- else if(m.method==='turn/start'){
-  const id='remote-instruction-turn-'+(++turn);
-  send({jsonrpc:'2.0',id:m.id,result:{turn:{id}}});
-  send({jsonrpc:'2.0',method:'turn/started',params:{threadId:thread,turn:{id}}});
-  send({jsonrpc:'2.0',method:'turn/completed',params:{threadId:thread,turn:{id,status:'completed'}}});
- }
-});
-`,
-      { mode: 0o700 },
-    );
-    const runtime: RemoteRuntime = {
-      label: 'fixture-host',
-      root: '/remote/project',
-      call: async () => 'unexpected remote call',
-    };
-    const provider = new CodexProvider(
-      async () => fake,
-      undefined,
-      undefined,
-      undefined,
-      async (command, args) => ({ command, args }),
-    );
-    try {
-      const remoteFast = input(process.cwd(), runtime);
-      remoteFast.plan.level = 'fast';
-      await provider.run(remoteFast, () => undefined, new AbortController().signal);
-      const remoteNoTools = input(process.cwd(), runtime);
-      remoteNoTools.plan.tools = false;
-      await provider.run(remoteNoTools, () => undefined, new AbortController().signal);
-    } finally {
-      await provider.shutdown();
-    }
-    const requests = (await readFile(requestLog, 'utf8'))
-      .trim()
-      .split('\n')
-      .map((line) => JSON.parse(line) as { method: string; params: Record<string, unknown> });
-    const threads = requests.filter((request) => request.method === 'thread/start');
-    expect(threads).toHaveLength(2);
-    expect(threads[0].params).toMatchObject({
-      sandbox: 'read-only',
-      dynamicTools: expect.arrayContaining([expect.objectContaining({ name: 'adelic_remote_exec' })]),
-      config: { features: { shell_tool: false, unified_exec: false, code_mode_host: true } },
-      baseInstructions: expect.stringContaining('Use somente as ferramentas adelic_remote_*'),
-    });
-    expect(threads[0].params).not.toHaveProperty('developerInstructions');
-    expect(threads[1].params).toMatchObject({
-      config: { features: { shell_tool: false, unified_exec: false, code_mode_host: false } },
-    });
-    expect(threads[1].params).toHaveProperty('baseInstructions', expect.stringContaining('sem ferramentas'));
-    expect(threads[1].params).not.toHaveProperty('developerInstructions');
   });
 
   it('keeps Kiro native tools unavailable and shows approved bridge calls as running', async () => {

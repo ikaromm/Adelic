@@ -408,6 +408,28 @@ export async function externalWorkspaceBindings(workspace: string): Promise<Exte
   return bindings;
 }
 
+/** Build a read-only workspace root without depending on newer bubblewrap overlay options. */
+async function bindReadonlyWorkspaceEntries(
+  workspace: string,
+  args: string[],
+  bind: (source: string, target: string, readonly?: boolean) => Promise<string[]>,
+) {
+  for (const name of await readdir(workspace)) {
+    const source = path.join(workspace, name);
+    const target = path.join('/workspace', name);
+    const info = await lstat(source);
+    if (info.isSymbolicLink()) {
+      // Recreate the link text inside the namespace. Never resolve a project-owned link
+      // against the host filesystem while constructing the synthetic workspace view.
+      args.push('--symlink', await readlink(source), target);
+    } else if (info.isDirectory() || info.isFile()) {
+      args.push(...(await bind(source, target)));
+    } else {
+      throw new Error('O sandbox somente leitura não pode montar uma entrada especial na raiz do projeto.');
+    }
+  }
+}
+
 async function spawnLocalExecutorProcess(
   workspace: string,
   sandbox: 'read-only' | 'workspace-write',
@@ -421,7 +443,15 @@ async function spawnLocalExecutorProcess(
   let lockTransferred = false;
   try {
     const bind = async (source: string, target: string, readonly = true) => {
-      const handle = await open(source, 'r');
+      const handle = await open(source, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+      const info = await handle.stat().catch(async (error: unknown) => {
+        await handle.close();
+        throw error;
+      });
+      if (!info.isFile() && !info.isDirectory()) {
+        await handle.close();
+        throw new Error(`O sandbox não pode montar uma entrada especial: ${source}`);
+      }
       const childFd = handles.length + 3;
       handles.push(handle);
       return [readonly ? '--ro-bind-fd' : '--bind-fd', String(childFd), target];
@@ -488,14 +518,22 @@ async function spawnLocalExecutorProcess(
     ensureDir(args, '/workspace');
     const bindings = await externalWorkspaceBindings(workspace);
     const hasDependencyMount = bindings.some((binding) => binding.kind === 'dependency');
-    const missingDependencyMount = bindings.some(
-      (binding) => binding.kind === 'dependency' && binding.target === path.join(workspace, 'node_modules'),
-    );
+    const missingDependencyMount =
+      hasDependencyMount &&
+      (await lstat(path.join(workspace, 'node_modules')).then(
+        () => false,
+        (error: NodeJS.ErrnoException) => {
+          if (error.code === 'ENOENT') return true;
+          throw error;
+        },
+      ));
     if (sandbox === 'read-only' && missingDependencyMount) {
       // A linked worktree has no node_modules entry. Bubblewrap cannot create a mountpoint
-      // inside the read-only /workspace bind, so expose the project as an invisible overlay.
-      // The project mount is made read-only again after the dependency bind is in place.
-      args.push('--overlay-src', workspace, '--tmp-overlay', '/workspace');
+      // inside the read-only /workspace bind. Recreate its top-level entries over a fresh
+      // tmpfs root, keeping source symlinks as raw namespace links instead of following them.
+      // Every entry and dependency bind is read-only; the empty root is remounted read-only too.
+      args.push('--tmpfs', '/workspace');
+      await bindReadonlyWorkspaceEntries(workspace, args, bind);
       ensureDir(args, '/workspace/node_modules');
     } else args.push(...(await bind(workspace, '/workspace', sandbox !== 'workspace-write')));
     for (const binding of bindings) {

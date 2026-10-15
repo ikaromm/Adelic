@@ -115,11 +115,13 @@ describe('isolated local automatic executor', () => {
     const checkout = path.join(parent, 'checkout');
     const workspace = path.join(parent, 'worktree');
     const dependency = path.join(checkout, 'node_modules', 'fixture-dependency');
+    const outsideSecret = path.join(parent, 'outside-secret.txt');
     await mkdir(path.join(checkout, 'node_modules'), { recursive: true });
     await mkdir(dependency);
     await writeFile(path.join(checkout, 'package.json'), '{"name":"fixture"}\n');
     await writeFile(path.join(checkout, 'README.md'), 'fixture\n');
     await writeFile(path.join(dependency, 'index.js'), 'module.exports = "shared-readonly-dependency";\n');
+    await writeFile(outsideSecret, 'outside-workspace-secret-canary');
     execFileSync('git', ['init', '-q', '-b', 'main', checkout]);
     execFileSync('git', ['-C', checkout, 'add', 'package.json', 'README.md']);
     execFileSync('git', [
@@ -134,6 +136,8 @@ describe('isolated local automatic executor', () => {
       'fixture',
     ]);
     execFileSync('git', ['-C', checkout, 'worktree', 'add', '-q', '--detach', workspace, 'HEAD']);
+    await symlink('README.md', path.join(workspace, 'readme-link'));
+    await symlink(outsideSecret, path.join(workspace, 'outside-link'));
     const executor = await createLocalExecutor(workspace, 'read-only');
     try {
       const signal = new AbortController().signal;
@@ -143,6 +147,35 @@ describe('isolated local automatic executor', () => {
         signal,
       );
       expect(loaded).toMatchObject({ exitCode: 0, stdout: 'shared-readonly-dependency' });
+
+      const links = await executor.call(
+        'exec',
+        {
+          command: [
+            'node',
+            '-e',
+            'const fs=require("node:fs");if(fs.readFileSync("/workspace/readme-link","utf8")!=="fixture\\n")process.exit(2);try{fs.readFileSync("/workspace/outside-link","utf8");process.exit(1)}catch(e){if(e.code!=="ENOENT")process.exit(3)}',
+          ],
+          timeoutMs: 5000,
+        },
+        signal,
+      );
+      expect(links).toMatchObject({ exitCode: 0, stdout: '', stderr: '' });
+
+      const sourceFdProbe = await executor.call(
+        'exec',
+        {
+          command: [
+            'node',
+            '-e',
+            'const fs=require("node:fs");const prefix=process.argv[1];const leaks=[];for(const fd of fs.readdirSync("/proc/self/fd")){try{const target=fs.readlinkSync(`/proc/self/fd/${fd}`);if(target.startsWith(prefix))leaks.push(target)}catch{}}process.stdout.write(leaks.join("\\n"))',
+            parent,
+          ],
+          timeoutMs: 5000,
+        },
+        signal,
+      );
+      expect(sourceFdProbe).toMatchObject({ exitCode: 0, stdout: '', stderr: '' });
 
       const writeAttempt = await executor.call(
         'exec',
@@ -159,9 +192,31 @@ describe('isolated local automatic executor', () => {
       expect(writeAttempt).toMatchObject({ exitCode: 0 });
       await expect(access(path.join(workspace, 'node_modules'))).rejects.toMatchObject({ code: 'ENOENT' });
       await expect(access(path.join(checkout, 'node_modules', 'canary'))).rejects.toMatchObject({ code: 'ENOENT' });
+
+      await executor.close();
+      const fifo = path.join(workspace, 'unsupported-fifo');
+      execFileSync('mkfifo', [fifo]);
+      const rejected = await createLocalExecutor(workspace, 'read-only').then(
+        () => undefined,
+        (error: Error & { cause?: Error }) => error,
+      );
+      expect(rejected).toBeInstanceOf(Error);
+      expect(rejected?.cause?.message).toContain('entrada especial');
     } finally {
       await executor.close();
       execFileSync('git', ['-C', checkout, 'worktree', 'remove', '--force', workspace]);
+    }
+
+    const checkoutExecutor = await createLocalExecutor(checkout, 'read-only');
+    try {
+      const loaded = await checkoutExecutor.call(
+        'exec',
+        { command: ['node', '-e', 'process.stdout.write(require("fixture-dependency"))'], timeoutMs: 5000 },
+        new AbortController().signal,
+      );
+      expect(loaded).toMatchObject({ exitCode: 0, stdout: 'shared-readonly-dependency' });
+    } finally {
+      await checkoutExecutor.close();
     }
   });
 

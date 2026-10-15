@@ -18,6 +18,53 @@ export interface PlannedTask {
   dependsOn: string[];
 }
 
+export interface WorkerReportExcerpt {
+  taskId: string;
+  source: 'output' | 'summary' | 'none';
+  /** Length of the selected source text, in JavaScript characters. */
+  totalChars: number;
+  omittedChars: number;
+  /** Whether the full task output is present; summaries and unavailable output stay unknown. */
+  fullOutputComplete: boolean | null;
+  head: string;
+  tail: string;
+}
+
+/** Build fair, bounded excerpts for reviewer context without changing persisted task evidence. */
+export function boundedWorkerReportExcerpts(
+  tasks: Pick<DelegatedTask, 'id' | 'output' | 'summary'>[],
+  maxPerWorkerChars = 2_000,
+  maxTotalExcerptChars = 8_000,
+): WorkerReportExcerpt[] {
+  const selected = tasks.map((task) => {
+    const output = task.output?.length ? task.output : undefined;
+    const summary = task.summary?.length ? task.summary : undefined;
+    const source: WorkerReportExcerpt['source'] = output ? 'output' : summary ? 'summary' : 'none';
+    const text = output ?? summary ?? '';
+    return { taskId: task.id, source, text };
+  });
+  const nonemptyCount = selected.filter(({ text }) => text.length > 0).length;
+  const fairBudget = nonemptyCount ? Math.min(maxPerWorkerChars, Math.floor(maxTotalExcerptChars / nonemptyCount)) : 0;
+
+  return selected.map(({ taskId, source, text }) => {
+    const allowance = Math.min(text.length, fairBudget);
+    const headLength = text.length <= allowance ? text.length : Math.ceil(allowance / 2);
+    const tailLength = text.length <= allowance ? 0 : Math.floor(allowance / 2);
+    const head = text.slice(0, headLength);
+    const tail = tailLength ? text.slice(-tailLength) : '';
+    const omittedChars = text.length - head.length - tail.length;
+    return {
+      taskId,
+      source,
+      totalChars: text.length,
+      omittedChars,
+      fullOutputComplete: source === 'output' ? omittedChars === 0 : null,
+      head,
+      tail,
+    };
+  });
+}
+
 /** Extract only Graphify's canonical source attributes, never node labels or basenames. */
 export function graphifyPaths(text: string): string[] {
   const paths: string[] = [];
